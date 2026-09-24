@@ -38,6 +38,17 @@ class EmbeddingClient:
         if not texts:
             return []
         prepared = [self.prepare(text, self.profile["document_instruction"], kind="Document") for text in texts]
+        # SiliconFlow's Qwen3 VL endpoint currently restarts response indices
+        # after each eight inputs. Keep every request within that boundary;
+        # never infer vector ownership from a malformed larger response.
+        if (urlparse(self.endpoint).hostname in {"api.siliconflow.cn", "api.siliconflow.com"}
+                and self.profile["model"] == "Qwen/Qwen3-VL-Embedding-8B"
+                and len(prepared) > 8):
+            vectors = []
+            for start in range(0, len(prepared), 8):
+                batch = prepared[start:start + 8]
+                vectors.extend(self._request(batch, len(batch), client=client))
+            return vectors
         return self._request(prepared, len(texts), client=client)
 
     def _request(self, inputs, count, *, client=None):

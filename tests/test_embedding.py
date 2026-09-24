@@ -64,3 +64,33 @@ def test_instruction_prefix_is_part_of_preserved_truncation_contract(client):
     client.profile['max_chars'] = 40
     assert client.prepare('x' * 60, 'Retrieve memories') == ('Instruct: Retrieve memories\nQuery: ' + 'x' * 60)[:40]
     assert client.prepare('x' * 60, 'Store memories', kind='Document') == ('Instruct: Store memories\nDocument: ' + 'x' * 60)[:40]
+
+
+def test_siliconflow_vl_large_batch_preserves_global_ownership(client):
+    client.endpoint = 'https://api.siliconflow.cn/v1/embeddings'
+    client.profile['model'] = 'Qwen/Qwen3-VL-Embedding-8B'
+    sizes = []
+    def handle(request):
+        body = json.loads(request.content)
+        texts = body['input']
+        sizes.append(len(texts))
+        assert len(texts) <= 8
+        return httpx.Response(200, json={'model': client.profile['model'], 'data': [
+            {'index': i, 'embedding': [1, 0] if int(text) % 2 == 0 else [0, 1]}
+            for i, text in reversed(list(enumerate(texts)))]})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as http:
+        result = client.documents([str(i) for i in range(19)], client=http)
+    assert sizes == [8, 8, 3]
+    assert result == [[1, 0] if i % 2 == 0 else [0, 1] for i in range(19)]
+
+
+def test_siliconflow_vl_subbatch_still_rejects_duplicate_positions(client):
+    client.endpoint = 'https://api.siliconflow.cn/v1/embeddings'
+    client.profile['model'] = 'Qwen/Qwen3-VL-Embedding-8B'
+    def handle(request):
+        count = len(json.loads(request.content)['input'])
+        return httpx.Response(200, json={'model': client.profile['model'], 'data': [
+            {'index': 0, 'embedding': [1, 0]} for _ in range(count)]})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as http:
+        with pytest.raises(ValueError, match='positions'):
+            client.documents([str(i) for i in range(9)], client=http)
