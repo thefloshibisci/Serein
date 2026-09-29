@@ -805,6 +805,22 @@ function sereinMemoryBridge() {
           response.statusCode=result.status;response.end(JSON.stringify(result.payload));
         } catch {response.statusCode=502;response.end(JSON.stringify({error:"pipeline_unavailable"}));}
       });
+      server.middlewares.use("/__serein/originals", async (request,response)=>{
+        response.setHeader("Content-Type","application/json; charset=utf-8");
+        response.setHeader("Cache-Control","no-store");
+        const action=request.url?.split("?")[0];
+        if(request.method!=="POST" || !["/search","/read","/upload","/delete-preview","/delete"].includes(action)){
+          response.statusCode=405;response.end(JSON.stringify({error:"method_not_allowed"}));return;
+        }
+        try {
+          if(!String(request.headers["content-type"]).startsWith("application/json") ||
+             (request.headers.origin && new URL(request.headers.origin).host!==request.headers.host)){
+            response.statusCode=403;response.end(JSON.stringify({error:"origin_not_allowed"}));return;
+          }
+          const result=await callSereinBackend('/v1/originals'+action,{method:'POST',body:await readJsonBody(request,1_000_000)});
+          response.statusCode=result.status;response.end(JSON.stringify(result.payload));
+        }catch{response.statusCode=502;response.end(JSON.stringify({detail:"原话操作未完成，请刷新确认状态后再试。"}));}
+      });
       server.middlewares.use("/__serein/imports", async (request,response)=>{
         response.setHeader("Content-Type","application/json; charset=utf-8");
         response.setHeader("Cache-Control","no-store");

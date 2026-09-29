@@ -4,11 +4,37 @@ from fastapi import APIRouter, HTTPException, Request
 
 from ..compat.raw_archive import raw_archive
 from ..compat.germany.raw_ingest import _raw_ingest_events_from_body
+from ..core.store import Conflict
 
 
 def routes(settings, auth):
     router = APIRouter(dependencies=auth)
     archive = raw_archive(settings)
+    from ..source_management import SourceManagement
+    from ..compat.originals import Originals
+    manager = SourceManagement(settings)
+
+    @router.post('/v1/originals/search')
+    def originals_search(body: dict):
+        return Originals(settings.database).source_message_search(**body)
+
+    @router.post('/v1/originals/read')
+    def originals_read(body: dict):
+        return Originals(settings.database).source_message_read(**body)
+
+    @router.post('/v1/originals/upload')
+    def originals_upload(body: dict):
+        try: return manager.upload(**body)
+        except Conflict as error: raise HTTPException(409,str(error)) from None
+
+    @router.post('/v1/originals/delete-preview')
+    def originals_delete_preview(body: dict):
+        return manager.preview_delete(body.get('ids'))
+
+    @router.post('/v1/originals/delete')
+    def originals_delete(body: dict):
+        try: return manager.delete(body.get('items'),body.get('confirm'))
+        except Conflict as error: raise HTTPException(409,str(error)) from None
 
     @router.post('/api/ingest-raw')
     def ingest(body: dict, request: Request):

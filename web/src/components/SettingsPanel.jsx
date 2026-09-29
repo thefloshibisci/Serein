@@ -4,10 +4,11 @@ import { people } from "../data/awake.js";
 import { ModelSettings } from "./ModelSettings.jsx";
 import { FeatureSettings } from "./FeatureSettings.jsx";
 import { PipelineSettings } from "./PipelineSettings.jsx";
+import { OriginalArchive } from "./OriginalArchive.jsx";
 import { LegacyMigration } from "./LegacyMigration.jsx";
 import { togetherCaption } from "../storage/togetherDate.js";
 
-const tabs = [["appearance", "外观"], ["features", "功能"], ["models", "模型"], ["configuration", "配置"], ["imports", "对话导入"], ["migration", "旧库迁移"]];
+const tabs = [["appearance", "外观"], ["features", "功能"], ["models", "模型"], ["configuration", "配置"], ["originals", "原文档案"], ["imports", "对话导入"], ["migration", "旧库迁移"]];
 
 export function SettingsPanel({
   open,
@@ -232,6 +233,9 @@ export function SettingsPanel({
           {open && <ModelSettings page={tab} summaryRequest={summaryRequest} recallThreshold={recallThreshold} setRecallThreshold={setRecallThreshold}
             candidateThresholdDraft={candidateThresholdDraft} setCandidateThresholdDraft={setCandidateThresholdDraft}
             passageDraft={passageDraft} setPassageDraft={setPassageDraft} onOpenPipeline={()=>showTab("imports")} onOpenCatalog={()=>showTab("models")} onOpenAssignments={()=>showTab("configuration")} />}
+          <div role="tabpanel" id="settings-content-originals" aria-labelledby="settings-tab-originals" aria-hidden={tab !== "originals"} inert={tab !== "originals"}>
+            {open && tab === "originals" && <OriginalArchive />}
+          </div>
           <div role="tabpanel" id="settings-content-imports" aria-labelledby="settings-tab-imports" aria-hidden={tab !== "imports"} inert={tab !== "imports"}>
             {open && <PipelineSettings onOpenSummary={openSummary} />}
           </div>

@@ -31,6 +31,14 @@ def tools_for(settings):
                      source_message_read=originals.source_message_read)
     if not settings.writable:
         return tools
+    if enabled['originals']:
+        def source_message_upload(client: str, conversation_id: str, messages: list[dict]) -> dict:
+            """Upload 1..50 verbatim messages actually available in the current conversation. Each requires stable message_id, role(user/assistant), content and optional timezone-aware created_at. Omit unknown time. Keep client and conversation_id stable across retries. Never upload system/developer/tool prompts, credentials, summaries masquerading as original text, or unseen conversation history. Returns raw IDs for verification; duplicate retries are safe and changed payloads conflict. This explicit upload bypasses chat completion routing; it does not automatically capture every turn or create Scenes."""
+            if not read_settings(settings.database)['features']['originals']:
+                raise ValueError('Original message tools are disabled')
+            from ..source_management import SourceManagement
+            return SourceManagement(settings).upload(client,conversation_id,messages)
+        tools['source_message_upload']=source_message_upload
     if enabled['event_to_scene']:
         def promote_event_to_scene(operation_id: str, event_id: str, expected_revision: int,
                                    title: str, body_md: str) -> dict[str, Any]:
