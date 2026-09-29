@@ -3,13 +3,15 @@
 **持续归线、延迟结算与来源归属的系统案例研究**
 
 **ChiYouyu · Haven**
-中文 v0.18 · 2026-09-13 · 仓库阅读副本。
+中文 v0.19 · 2026-09-27 · 仓库阅读副本。
 
 [阅读 PDF](pdf/event-memory-paper.zh-CN.pdf) · [阅读 Markdown](manuscript.zh-CN.md) · [补充表格 PDF](pdf/event-memory-supplementary-tables.zh-CN.pdf) · [补充表格 Markdown](supplementary-tables.md)
 
 论文讨论三个问题：交错消息怎样持续归入已有经历，为什么经历边界需要延迟结算，以及来源角色和续接关系怎样被保留并接受追溯。案例同时报告来源保留、误收、角色丢失与中断；自动摘要不能保证完全准确，手动修订后的结果不计作自动生成正确。
 
 当前 PDF 入口指向随仓库保存的阅读版，封面署名为 **ChiYouyu · Haven**。
+
+本次更新以公开仓库提交 `26ffe639a17348079c7bba9f4c496eca063ff180` 为实现核对基点，补充阅读范围、显式来源归属、正文材料取舍、逐图转录和失败恢复，更新图 1。E1–E10 的条件、计数和结论保留；没有新增模型实验、部署核验或准确率成绩。§3.8 区分 9 月历史实现与当前公开版，§6.3 列出新机制待验证的问题。文件名带 v0.18 的旧 PDF 保留为历史副本，当前版本使用上方稳定入口。
 
 ## 与公开版的关系
 
@@ -26,10 +28,10 @@
 
 ## 重建 PDF
 
-安装 Python、`reportlab` 和 `pypdf`，运行：
+安装 Python、`reportlab`、`pypdf` 和 `svglib`，运行：
 
 ```sh
 python docs/paper/typesetting/build_reading_pdf.py
 ```
 
-脚本默认使用 Windows 宋体、黑体和 Times New Roman。其他环境可通过 `--body-font`、`--heading-font`、`--latin-font` 指定已有字体。PDF 输出至本目录 `pdf/`。这是单栏阅读版。
+脚本默认使用 Windows 宋体、黑体和 Times New Roman。其他环境可通过 `--body-font`、`--heading-font`、`--latin-font` 指定已有字体。图 1 的 SVG 会以所选标题字体重建为矢量 PDF，再嵌入正文。PDF 输出至本目录 `pdf/`。这是单栏阅读版。

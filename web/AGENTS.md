@@ -36,7 +36,7 @@ Persona reading order: page heading, quiet window selector and refresh, handnote
 ## 2026-09-10 心绪 naming
 User-facing Persona labels are 心绪 (page, navigation, feature switch and model selector). Keep internal persona keys, API paths and #persona links compatible. Preserve this optional feature and its current design for existing users; personal dislike of the presentation is not a request to remove or redesign it.
 
-Awake keeps 上一窗影 beside 梦境, with a settings link while disabled; never enable its tools merely by opening the page. Remove the 画像 section heading and use 做了什么梦呢 as the page subtitle. Both personal introductions are editable in a dialog and persist through instance settings (user_description / ai_description); description edits must preserve names and the other introduction.
+Awake keeps 上一窗影 beside 梦境, with a settings link while disabled; never enable its tools merely by opening the page. Remove the 画像 section heading and use 做了什么梦呢 as the page subtitle. Both portraits are read-only projections of the latest shadow's user_view / self_view, independent of instance user_description / ai_description. Keep long-text reading, show empty sections without retaining an older portrait, and refresh on entering Awake or returning to the browser tab. Never edit or save portrait prose from this page.
 
 Appearance uses a saved 相遇日期 (identity.meeting_date) instead of editable anniversary wording. The cover shows 在一起的 XX 天, counting the meeting day as day 1 using the device's local calendar date; update at midnight and on return to the tab. Empty dates show 从这里开始. Persist the date in instance settings; localStorage is only its mirror.
 

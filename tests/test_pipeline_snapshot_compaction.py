@@ -63,6 +63,8 @@ def test_inline_image_bytes_exist_once_only_in_live_model_job(settings):
     captured=[]
     async def runner(role,request):
         captured.append(copy.deepcopy(request))
+        if request.get('transcription_only'):
+            return {'image_transcriptions':[{'input_image':1,'text':'Visible image','unreadable':False}]}
         if role=='event_curator' and not request.get('transcription_only'):
             with Store(settings.database,read_only=True) as store:
                 saved=store.conn.execute("SELECT request_json FROM pipeline_jobs WHERE role LIKE 'event_curator:%'").fetchone()[0]
@@ -72,8 +74,10 @@ def test_inline_image_bytes_exist_once_only_in_live_model_job(settings):
     result=asyncio.run(p.advance(settings.database,include_recent=True,runner=runner))
     assert result['events']==1
     curator=next(request for request in captured if request['role']=='event_curator' and not request.get('transcription_only'))
-    assert encode(curator).count(PNG)==1
-    assert curator['images'][0]['url']==PNG
+    transcription=next(request for request in captured if request.get('transcription_only'))
+    assert encode(transcription).count(PNG)==1
+    assert transcription['images'][0]['url']==PNG
+    assert 'data:image/' not in encode(curator) and curator['images']==[]
     assert 'url' not in curator['component']['images'][0]
     assert 'data:image/' not in encode(curator['component'])
     with Store(settings.database,read_only=True) as store:

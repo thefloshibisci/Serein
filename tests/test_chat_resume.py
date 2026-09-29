@@ -10,6 +10,7 @@ from serein.api.http import create_app
 from serein import chat_resume
 from serein.chat_context import ClientContext
 from serein.compat.window_shadows import WindowShadows
+from serein.compat.raw_archive import raw_archive
 from serein.core import Store
 from serein.deployment import save_settings
 from test_public_settings import deployment, configure
@@ -78,6 +79,40 @@ def test_resume_and_followup_full_pages_persist_and_match_history(chat):
     assert 'Changed after resume' in payloads[-1]['messages'][-1]['content']
     save_settings(settings.database, {'features':{'resume':False}})
     assert post(reopened, followup).headers['x-serein-resume']=='none'
+
+
+@pytest.mark.parametrize('recent', [False, True])
+@pytest.mark.parametrize('zone,expected', [
+    ('Asia/Shanghai', '2026-09-27T16:39:21+08:00'),
+    ('Europe/Berlin', '2026-09-27T10:39:21+02:00'),
+])
+def test_resume_original_timezone_survives_wire_transport_and_followup(chat, monkeypatch, recent, zone, expected):
+    settings, client, _ = chat
+    save_settings(settings.database, {'clock':{'timezone':zone}, 'resume':{
+        'pending_originals':not recent, 'recent_originals':recent}})
+    raw_archive(settings).ingest([{'source_event_id':'utc-message', 'role':'user',
+        'text':'Synthetic UTC original', 'created_at':'2026-09-27 08:39:21'}], source='haven_bridge_codex')
+    requests = []
+    def handle(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={'choices':[{'message':{'role':'assistant','content':'Synthetic reply'}}]})
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kw:original(transport=httpx.MockTransport(handle), **kw))
+    from serein.model_runtime import complete
+    monkeypatch.setattr('serein.api.chat.complete', complete)
+    messages = [{'role':'user','content':'/resume Synthetic test'}]
+    assert post(client, messages).status_code==200
+    followup = messages + [{'role':'assistant','content':'Synthetic reply'}, {'role':'user','content':'Continue'}]
+    assert post(client, followup).headers['x-serein-resume']=='loaded'
+    for request in requests:
+        content = next(m['content'] for m in request['messages'] if 'Serein resume:' in str(m.get('content')))
+        start = content.index('\n', content.index('Serein resume:')) + 1
+        payload, _ = json.JSONDecoder().raw_decode(content[start:])
+        item = next(i for i in payload['items'] if i['body_md']=='Synthetic UTC original')
+        assert item['title']==item['created_at']==expected
+        assert item['section']==('recent_original' if recent else 'pending_original')
+    with Store(settings.database, read_only=True) as store:
+        assert store.conn.execute("SELECT created_at FROM raw_events WHERE source_event_id='utc-message'").fetchone()[0]=='2026-09-27 08:39:21'
 
 
 @pytest.mark.parametrize('text', ['/resumex hello', '请解释 /resume', '`/resume`', '继续聊'])

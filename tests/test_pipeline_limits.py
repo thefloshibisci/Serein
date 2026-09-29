@@ -210,7 +210,8 @@ def test_import_boundary_keeps_concurrent_new_chats_and_retires_mixed_plan(setti
     p.initialize(settings.database)  # Upgrade recovers historical import membership.
     with Store(settings.database) as store:
         assert store.conn.execute("SELECT status FROM pipeline_batches WHERE id='old-mixed'").fetchone()[0]=='superseded_import_boundary'
-        assert {r[0] for r in store.conn.execute('SELECT raw_id FROM raw_processing')}==set(imported)
+        assert store.conn.execute("SELECT count(*) FROM raw_processing WHERE outcome='archived_only'").fetchone()[0]==0
+        assert store.conn.execute('SELECT released FROM pipeline_import_boundaries WHERE upload_id=?',(upload['id'],)).fetchone()[0]==0
     batch=p.new_batch(settings.database,True)
     assert batch and all(m['id'] not in imported for m in json.loads(batch['input_json'])['messages'])
     calls=[]
@@ -414,8 +415,9 @@ def test_empty_structured_output_reports_length_exhaustion(settings,monkeypatch)
         return {'choices':[{'message':{'content':''},'finish_reason':'length'}],
                 'usage':{'completion_tokens':8192,'completion_tokens_details':{'reasoning_tokens':8192}}}
     monkeypatch.setattr('serein.model_runtime.complete',empty)
-    with pytest.raises(ValueError,match='未返回最终 JSON 内容.*输出预算耗尽.*8192'):
-        asyncio.run(p.advance(settings.database,include_recent=True))
+    result=asyncio.run(p.advance(settings.database,include_recent=True))
+    assert result['status']=='paused'
+    assert '未返回最终 JSON 内容' in result['reason'] and '输出预算耗尽' in result['reason'] and '8192' in result['reason']
     assert len(calls)==3 and all('max_tokens' not in payload for payload in calls)
     with Store(settings.database,read_only=True) as store:
         attempts=store.conn.execute('SELECT output_text,error FROM pipeline_attempts ORDER BY id').fetchall()
@@ -439,7 +441,7 @@ def test_legacy_116_originals_eleven_router_jobs_resume_without_repeating_them(s
     with Store(settings.database) as store:
         messages=[p.message(row) for row in store.conn.execute('SELECT * FROM raw_events ORDER BY id')]
         scope=digest(encode(['synthetic','legacy']))[:20]
-        data={'contract':p.CONTRACT,'messages':messages,'parked':[],'routing_messages':messages,'tracks':[],
+        data={'contract':p.CONTRACT,'runtime_revision':p.runtime_revision(),'messages':messages,'parked':[],'routing_messages':messages,'tracks':[],
               'scope':scope,'source':'synthetic','recent':[],'day':'2025-01-01'}
         batch={'id':'pipeline:legacy116','scope':scope,'input_json':encode(data)}
         store.conn.execute('INSERT INTO pipeline_batches(id,scope,input_json) VALUES (?,?,?)',tuple(batch.values()))
@@ -506,6 +508,43 @@ def test_enabling_auto_pipeline_starts_after_latest_original_and_reenable_moves_
     with Store(settings.database,read_only=True) as store:
         assert [row[0] for row in store.conn.execute("SELECT raw_id FROM raw_processing WHERE outcome='auto_boundary' ORDER BY raw_id")]==[1,2,3,4,5,6]
         assert [row[0] for row in store.conn.execute('SELECT id FROM raw_events WHERE NOT EXISTS (SELECT 1 FROM raw_processing p WHERE p.raw_id=raw_events.id) ORDER BY id')]==[7,8]
+
+
+def test_manual_auto_boundary_restore_requeues_only_boundary_originals(settings):
+    p.initialize(settings.database)
+    save_settings(settings.database,{'pipeline':{'auto_enabled':False}})
+    ingest(settings,1)
+    ingest(settings,2)
+    save_settings(settings.database,{'pipeline':{'auto_enabled':True}})
+    with Store(settings.database) as store:
+        store.conn.execute("UPDATE raw_processing SET outcome='settled' WHERE raw_id IN (3,4)")
+    with pytest.raises(ValueError,match='确认恢复'):
+        p.restore_auto_boundary(settings.database,'wrong')
+    result=p.restore_auto_boundary(settings.database,'RESTORE_AUTO_BOUNDARY')
+    assert result=={'status':'restored','restored_originals':2}
+    assert p.restore_auto_boundary(settings.database,'RESTORE_AUTO_BOUNDARY')['restored_originals']==0
+    with Store(settings.database,read_only=True) as store:
+        assert [tuple(row) for row in store.conn.execute('SELECT raw_id,outcome FROM raw_processing ORDER BY raw_id')]==[(3,'settled'),(4,'settled')]
+    batch=p.new_batch(settings.database,True)
+    assert [item['id'] for item in json.loads(batch['input_json'])['messages']]==[1,2]
+
+
+def test_pipeline_status_and_restore_endpoint_show_auto_boundary_backlog(settings):
+    from fastapi.testclient import TestClient
+    from serein.api.http import create_app
+    p.initialize(settings.database)
+    save_settings(settings.database,{'pipeline':{'auto_enabled':False}})
+    ingest(settings,1)
+    save_settings(settings.database,{'pipeline':{'auto_enabled':True}})
+    client=TestClient(create_app(settings,token='test',live=True),headers={'Authorization':'Bearer test'})
+    assert client.get('/v1/pipeline/status').json()['auto_boundary_originals']==2
+    save_settings(settings.database,{'pipeline':{'execution_mode':'legacy'}})
+    state=client.get('/v1/pipeline/status').json()
+    assert state['execution_mode']=='legacy'
+    assert state['unassigned_roles']==['track_router','event_curator','event_writer']
+    response=client.post('/v1/pipeline/restore-auto-boundary',json={'confirm':'RESTORE_AUTO_BOUNDARY'})
+    assert response.status_code==200 and response.json()['restored_originals']==2
+    assert client.get('/v1/pipeline/status').json()['auto_boundary_originals']==0
 
 
 def test_legacy_completed_writer_uses_accepted_router_before_conflicting_cache(settings,monkeypatch):

@@ -10,7 +10,7 @@ from serein.application import Application
 from serein.api.http import create_app
 from serein.api.mcp import create_server
 from serein.bootstrap import initialize
-from serein.compat.originals import Originals
+from serein.compat.originals import Originals, original_timestamp
 from serein.config import Settings
 from serein.core.store import Store
 from serein.deployment import save_settings
@@ -67,6 +67,27 @@ def test_dates_offsets_range_and_combined_filters(settings):
     assert ids(search(date='2025-01-02',query='雨',role='user'))==['raw:2']
     assert ids(search(date='2025-01-02..2025-01-03',query='雨',role='ai'))==['raw:3','raw:6']
     assert ids(search(date='2025-01-03'))==['raw:4']
+
+
+def test_bridge_utc_dates_sort_with_aware_and_legacy_times(settings):
+    seed(settings,1,time='2025-01-01 16:00:00',source='haven_bridge_codex')
+    seed(settings,2,time='2025-01-02 01:00:00')
+    seed(settings,3,time='2025-01-01T18:00:00Z')
+    search=Originals(settings.database).source_message_search
+    assert ids(search(date='2025-01-02'))==['raw:3','raw:2','raw:1']
+    assert not search(date='2025-01-01')['items']
+
+
+@pytest.mark.parametrize('source,value,expected', [
+    ('haven_bridge_codex','2026-09-27 08:39:21','2026-09-27T16:39:21+08:00'),
+    ('synthetic','2026-09-27 08:39:21','2026-09-27T08:39:21+08:00'),
+    ('haven_bridge_codex','2026-09-27T08:39:21Z','2026-09-27T16:39:21+08:00'),
+    ('haven_bridge_codex','2026-09-27T16:39:21+08:00','2026-09-27T16:39:21+08:00'),
+    ('synthetic','',''),
+    ('synthetic','unknown','unknown'),
+])
+def test_original_timestamp_preserves_offsets_and_unknown_dates(source,value,expected):
+    assert original_timestamp({'source':source,'created_at':value}, 'Asia/Shanghai')==expected
 
 
 @pytest.mark.parametrize('arguments',[

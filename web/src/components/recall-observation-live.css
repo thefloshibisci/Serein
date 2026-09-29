@@ -2,3 +2,4 @@
 .observation-live-notice button { font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 999px; padding: .35rem .9rem; cursor: pointer; }
 .observation-outcome--pending, .observation-outcome--failed { border: 1px dashed currentColor; }
 .observation-review button:disabled { opacity: .55; cursor: default; }
+.observation-request-status { margin: .6rem 0 0; color: #7c8984; font-size: 12px; line-height: 1.6; }

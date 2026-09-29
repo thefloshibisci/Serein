@@ -76,6 +76,7 @@ function asArray(value) {
 
 function normalizeScore(item) {
   const raw = item?.score?.final ?? item?.score?.semantic ?? item?.score?.keyword ?? item?.score;
+  if (raw === null || raw === undefined || raw === "") return "";
   const score = Number(raw);
   if (!Number.isFinite(score)) return "";
   return score <= 1 ? `${(score * 100).toFixed(1)}%` : score.toFixed(2);
@@ -83,6 +84,7 @@ function normalizeScore(item) {
 
 function normalizeScoreValue(item) {
   const raw = item?.score?.final ?? item?.score?.semantic ?? item?.score?.keyword ?? item?.score;
+  if (raw === null || raw === undefined || raw === "") return null;
   const score = Number(raw);
   return Number.isFinite(score) ? score : null;
 }
@@ -97,15 +99,22 @@ function normalizeObservation(row) {
     : {};
   const injectedDetails = asArray(why.injected);
   const injectedIds = asArray(payload.injected_bucket_ids);
-  const injected = injectedDetails.length
-    ? injectedDetails.map((item) => ({
+  const detailsById = new Map();
+  for (const item of [...asArray(payload.prepared_items), ...injectedDetails]) {
+    const id = item.bucket_id || item.id;
+    detailsById.set(id, { ...detailsById.get(id), ...item });
+  }
+  // Current requests use confirmed IDs as the authority. Prepared candidates
+  // must not appear as delivered merely because details were recorded.
+  const deliveredItems = payload.observation_version || injectedIds.length
+    ? injectedIds.map(id => ({ ...detailsById.get(id), id })) : injectedDetails;
+  const injected = deliveredItems.map((item) => ({
       id: item.bucket_id || item.id || "",
       title: item.bucket_name || item.title || item.bucket_id || item.id || "未命名记忆",
       score: normalizeScore(asArray(item.evidence)[0] || item),
       scoreValue: normalizeScoreValue(asArray(item.evidence)[0] || item),
       sourceKind: String(item.source_kind || "").trim(),
-    }))
-    : injectedIds.map((id) => ({ id, title: id, score: "", scoreValue: null, sourceKind: "" }));
+    }));
   const action = String(semantic.applied_action || semantic.action || "").trim();
   const query = String(payload.query || payload.query_preview || payload.original_query || payload.user_query || "").trim();
   const outcome = resolveGatewayObservationOutcome(payload, action === "skip" ? "skip" : injected.length ? "injected" : "no_match");
@@ -127,7 +136,9 @@ function normalizeObservation(row) {
     requestLabel: gatewayRequestLabel(payload),
     requestKind: payload.request_kind,
     memoryEnabled: payload.memory_enabled,
-    prepared: asArray(payload.prepared_items).map(item => ({id:item.id, title:item.title || item.id, sourceKind:item.source_kind, score:normalizeScore(item)})),
+    prepared: (asArray(payload.prepared_items).length ? asArray(payload.prepared_items)
+      : asArray(payload.prepared_ids).map(id => ({id})))
+      .map(item => ({id:item.id, title:item.title || item.id, sourceKind:item.source_kind, score:normalizeScore(item)})),
     trigger: String(semantic.reason || "").trim(),
     hookOutcome: "",
   };
@@ -584,10 +595,10 @@ export function BasementRecallObservation() {
                   <div>
                     <time>{formatObservedAt(item.createdAt)} · {sourceLabels[item.source]}</time>
                     <h3>{item.query}</h3>
+                    {item.requestLabel && <p className="observation-request-status">{item.requestLabel}</p>}
                   </div>
                   <span className={`observation-outcome observation-outcome--${item.outcome}`}>{outcomeLabels[item.outcome]}</span>
                 </header>
-                {item.requestLabel && <p>{item.requestLabel}</p>}
 
                 <dl className="observation-route-facts">
                   <div><dt>Router 路线</dt><dd>{item.route ? publishedRouteLabels[item.route] || item.route : "未记录／本次未执行"}</dd></div>
@@ -596,7 +607,7 @@ export function BasementRecallObservation() {
                 </dl>
 
                 <div className="observation-injections">
-                  <span>{preparationOnly ? '准备的记忆（尚未确认上游成功）' : item.source === "hook" ? "成功请求中的记忆" : "Gateway 记忆记录"}</span>
+                  <span>{preparationOnly ? '准备的记忆（尚未确认上游成功）' : '真正送入模型'}</span>
                   {memories.length ? memories.map((memory) => (
                     <div className="observation-memory-row" key={`${item.id}-${memory.id}`}>
                       <strong>
@@ -605,7 +616,7 @@ export function BasementRecallObservation() {
                       </strong>
                       <code>{memory.id || "ID 未记录"}</code>
                       <em>{memory.score || "score 未记录"}</em>
-                      {item.source === "hook" && item.outcome === "injected" && memory.id && (
+                      {item.outcome === "injected" && memory.id && (
                         <div className="observation-memory-review" role="group" aria-label={`记忆相关度：${memory.title}`}>
                           <span>单卡相关度</span>
                           {candidateRelevances.map(({ key, label }) => (

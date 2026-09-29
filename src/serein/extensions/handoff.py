@@ -5,7 +5,7 @@ import json
 from . import Contributions
 from ..core.store import Store, Conflict, encode, now
 from ..core.reader import Reader
-from ..compat.originals import READABLE, TIME
+from ..compat.originals import READABLE, TIME, original_timestamp
 
 
 def factory(services, options):
@@ -95,10 +95,11 @@ def factory(services, options):
                     (*params,selection['recent_original_limit'])).fetchall()
                 for row in reversed(recent_raw):
                     raw_ids.add(row['id'])
+                    stamp = original_timestamp(row, state['clock']['timezone'])
                     documents.append({'id':f"raw:{row['id']}",'kind':'raw','section':'recent_original',
-                        'title':row['created_at'] or 'Original message','revision':1,'body_md':row['text'],
+                        'title':stamp or 'Original message','revision':1,'body_md':row['text'],
                         'source_system':row['source'],'session_id':row['session_id'],'raw_id':row['id'],
-                        'source_message_id':row['source_event_id'] or str(row['id']),'role':row['role'],'created_at':row['created_at']})
+                        'source_message_id':row['source_event_id'] or str(row['id']),'role':row['role'],'created_at':stamp})
             has_processing = reader.store.conn.execute("SELECT 1 FROM sqlite_master WHERE name='raw_processing'").fetchone()
             pending_clause = 'NOT EXISTS (SELECT 1 FROM raw_processing p WHERE p.raw_id=r.id)' if has_processing else '1=1'
             raw = reader.store.conn.execute('SELECT r.* FROM raw_events r WHERE '+pending_clause+
@@ -107,10 +108,11 @@ def factory(services, options):
             if not selection['pending_originals']:raw=[]
             for row in raw:
                 if row['id'] in raw_ids:continue
+                stamp = original_timestamp(row, state['clock']['timezone'])
                 documents.append({'id':f"raw:{row['id']}",'kind':'raw','section':'pending_original',
-                    'title':row['created_at'] or 'Original message','revision':1,'body_md':row['text'],
+                    'title':stamp or 'Original message','revision':1,'body_md':row['text'],
                     'source_system':row['source'],'session_id':row['session_id'], 'raw_id':row['id'],
-                    'source_message_id':row['source_event_id'] or str(row['id']),'role':row['role'],'created_at':row['created_at']})
+                    'source_message_id':row['source_event_id'] or str(row['id']),'role':row['role'],'created_at':stamp})
             note = None
             if handoff_key and reader.store.conn.execute("SELECT 1 FROM sqlite_master WHERE name='continuity_notes'").fetchone():
                 row = reader.store.conn.execute('SELECT * FROM continuity_notes WHERE key=?',(handoff_key,)).fetchone()

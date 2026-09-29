@@ -26,4 +26,10 @@ HTTP：`POST /v1/pipeline/rebuild`，请求包含 `batch_id` 和 `confirm="REBUI
 
 ## 验证范围
 
-合成回归覆盖跨窗卡片迁移、旧版无 provenance、来源卡片确实缺行、较大日间批次的早期输入块恢复、旧任务复用、源内容/ordinal/bridge 不匹配、歧义来源、事务回滚、确认重建、旧记录保留、鉴权与 lease 冲突。没有连接真实部署或读取真实对话。本改动不加入并发，不改变 Event Writer 的 1000/1500 契约。
+合成回归覆盖跨窗卡片迁移、旧版无 provenance、来源卡片确实缺行、较大日间批次的早期输入块恢复、旧任务复用、源内容/ordinal/bridge 不匹配、歧义来源、事务回滚、确认重建、旧记录保留、鉴权与 lease 冲突。没有连接真实部署或读取真实对话。本改动不加入并发，不改变 Event Writer 的 500 字软预算与 1500 字异常阈值。
+
+## 与模型失败暂停的区别
+
+needs_repair 表示无法证明旧归线可以安全恢复，需要先校验或明确重建，不自动跳过或猜补。paused_failure 表示文字 job 累计失败三次：点“重试此批次”保留冻结材料和成功结果，只重新开放未完成步骤的预算。其他聊天可继续，同一聊天后续等待恢复；绕行不适用于 needs_repair。
+
+HTTP 使用 `POST /v1/pipeline/retry-batch` 和 `{batch_id}`，随后调用继续接口。与重建共用 pipeline 执行锁，已有 queued/running 任务时返回 busy。

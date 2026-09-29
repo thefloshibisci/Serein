@@ -26,6 +26,7 @@ import {
 import {
   loadWindowShadows,
   readFallbackWindowShadows,
+  windowShadowViews,
 } from "../storage/windowShadowStore.js";
 import { dreamExcerpt, loadDreams } from "../storage/dreamStore.js";
 import { instanceSettings, identityName } from "../storage/instanceStore.js";
@@ -46,7 +47,6 @@ export function AwakePage({
 }) {
   const compositionRef = useRef(null);
   const shadowTriggerRef = useRef(null);
-  const portraitDialogRef = useRef(null);
   const dreamTriggerRef = useRef(null);
   const activeDrag = useRef(null);
   const activeResize = useRef(null);
@@ -58,10 +58,6 @@ export function AwakePage({
   const [shadowReaderOpen, setShadowReaderOpen] = useState(false);
   const [shadowsEnabled, setShadowsEnabled] = useState(false);
   const [shadowsStatus, setShadowsStatus] = useState("loading");
-  const [descriptions, setDescriptions] = useState(() => Object.fromEntries(people.map(person => [person.key, person.detail])));
-  const [portraitDraft, setPortraitDraft] = useState(null);
-  const [portraitBusy, setPortraitBusy] = useState(false);
-  const [portraitError, setPortraitError] = useState("");
   const [dreamReaderOpen, setDreamReaderOpen] = useState(false);
   const [windowShadows, setWindowShadows] = useState(readFallbackWindowShadows);
   const [selectedShadowId, setSelectedShadowId] = useState(defaultWindowShadows[0]?.id ?? null);
@@ -127,7 +123,6 @@ export function AwakePage({
     instanceSettings().then(({ identity,features }) => {
       if (active) setIdentityNames({ user: identity.user_name, assistant: identity.ai_name });
       if (active) { setMeetingDate(identity.meeting_date ?? ""); setMeetingDateDraft(identity.meeting_date ?? ""); }
-      if (active) setDescriptions({ user: identity.user_description ?? people[0].detail, assistant: identity.ai_description ?? people[1].detail });
       if (active) setShadowsEnabled(!!features?.window_shadows);
     }).catch(error => { if (active) setIdentityStatus(error.message); });
     return () => { active = false;window.removeEventListener('serein:features',featuresChanged); };
@@ -144,41 +139,36 @@ export function AwakePage({
     } catch (error) { setIdentityStatus(error.message); }
     finally { setIdentityBusy(false); }
   };
-  const editPortrait = person => {
-    setPortraitDraft({ key: person.key, name: person.name, description: person.detail });
-    setPortraitError("");
-    portraitDialogRef.current.showModal();
-  };
-  const savePortrait = async event => {
-    event.preventDefault();
-    setPortraitBusy(true);
-    setPortraitError("");
-    const field = portraitDraft.key === "user" ? "user_description" : "ai_description";
-    try {
-      const { identity } = await instanceSettings({ identity: { [field]: portraitDraft.description } });
-      setDescriptions({ user: identity.user_description ?? people[0].detail, assistant: identity.ai_description ?? people[1].detail });
-      portraitDialogRef.current.close();
-    } catch (error) { setPortraitError(error.message); }
-    finally { setPortraitBusy(false); }
-  };
-  const resolvedPeople = people.map((person) => ({ ...person, name: identityName(person.key), detail: descriptions[person.key] }));
   const latestShadow = windowShadows[0];
+  const views = windowShadowViews(shadowsEnabled && shadowsStatus === "ready" ? latestShadow : null);
+  const portraitPlaceholder = !shadowsEnabled ? "窗影尚未开启。" : shadowsStatus === "loading" ? "正在读回上一窗。" : shadowsStatus === "error" ? "窗影暂时没有接通。" : latestShadow ? "这一窗还没有写下这部分。" : "还没有窗影。";
+  const resolvedPeople = people.map((person) => ({ ...person, name: identityName(person.key), detail: views[person.key] || portraitPlaceholder }));
   const latestDream = dreams.find((dream) => dream.hasBody) ?? dreams[0] ?? null;
 
   useEffect(() => {
-    if (!shadowsEnabled) return;
+    if (!shadowsEnabled || activeArea !== "醒来") return;
     let active = true;
+    let request = 0;
+    const refresh = () => {
+      if (document.hidden) return;
+      const currentRequest = ++request;
+      loadWindowShadows().then((snapshotShadows) => {
+        if (!active || currentRequest !== request) return;
+        setShadowsStatus(snapshotShadows === null ? "error" : "ready");
+        setWindowShadows(snapshotShadows ?? []);
+        setSelectedShadowId(previous => snapshotShadows?.some(shadow => shadow.id === previous) ? previous : snapshotShadows?.[0]?.id ?? null);
+      });
+    };
     setShadowsStatus("loading");
-    loadWindowShadows().then((snapshotShadows) => {
-      if (!active) return;
-      setShadowsStatus(snapshotShadows === null ? "error" : "ready");
-      setWindowShadows(snapshotShadows ?? []);
-      setSelectedShadowId(snapshotShadows?.[0]?.id ?? null);
-    });
+    refresh();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
     return () => {
       active = false;
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
     };
-  }, [shadowsEnabled]);
+  }, [shadowsEnabled, activeArea]);
 
   useEffect(() => {
     let active = true;
@@ -613,10 +603,6 @@ export function AwakePage({
                     <div className="portrait__copy">
                       <div className="portrait__name-row">
                         <h4>{person.name}</h4>
-                        <button type="button" aria-label={`编辑${person.name}的介绍`} onClick={() => editPortrait(person)}>
-                          <PencilSimple size={15} weight="light" aria-hidden="true" />
-                          编辑
-                        </button>
                       </div>
                       <PortraitIntro name={person.name} text={person.detail} />
                     </div>
@@ -684,14 +670,6 @@ export function AwakePage({
         </div>
       </section>
 
-      <dialog ref={portraitDialogRef} className="agent-guide portrait-editor" aria-labelledby="portrait-editor-title" onCancel={event => { if (portraitBusy) event.preventDefault(); }}>
-        <header><h3 id="portrait-editor-title">{portraitDraft?.name}的介绍</h3><button type="button" aria-label="关闭介绍编辑" disabled={portraitBusy} onClick={() => portraitDialogRef.current.close()}>×</button></header>
-        <form onSubmit={savePortrait}>
-          <label className="settings-field"><span>个人介绍</span><textarea autoFocus rows={5} maxLength={2000} value={portraitDraft?.description ?? ""} onChange={event => setPortraitDraft({ ...portraitDraft, description: event.target.value })} /></label>
-          {portraitError && <p role="alert">{portraitError}</p>}
-          <div className="settings-actions"><button type="button" disabled={portraitBusy} onClick={() => portraitDialogRef.current.close()}>取消</button><button type="submit" disabled={portraitBusy}>{portraitBusy ? "保存中…" : "保存"}</button></div>
-        </form>
-      </dialog>
       {settingsOpen && <Sidebar activeArea="设置" onNavigate={navigateFromAwake} onOpenSettings={() => {}} />}
       <SettingsPanel
         open={settingsOpen}

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1240" height="1300" viewBox="0 0 1240 1300" role="img" aria-labelledby="title desc">
   <title id="title">Serein 自动 Event 流水线</title>
-  <desc id="desc">白天在同一会话至少积累五个完整回复包且会话静默至少二十分钟后归线；回复包只粗分等待边界，每条消息仍由 Track Router 逐条归线。消息随后经 Curator 切分与图片转录、宿主校验、Event Writer、结构校验和幂等结算，直接写成 Serein 正式 Event；落库后可选由 Arc Linker 归入已有叙事卷，Event 升为 Scene 是另一个独立可选操作。</desc>
+  <desc id="desc">白天在同一会话至少积累五个完整回复包且静默至少二十分钟后归线；回复包用于调度，每条消息仍逐条归线。桥接共同阅读不自动增加来源，Curator 显式决定归属。图片独立逐张转录，Writer 读取原话和已校验转录，不接收原图。程序核对结构、来源及可选证据收据，不保证正文语义准确。文字步骤累计失败三次后暂停，成功步骤保留，同一聊天等待，其他聊天继续；图片单独计失败预算。成功后直接保存为 Serein Event，Arc 归档和主模型编辑为 Scene 均为落库后的可选操作。</desc>
   <defs>
     <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#f8f8f4"/>
@@ -45,7 +45,7 @@
   <text x="56" y="94" class="title">原话，怎样长成一条 Event</text>
   <text x="56" y="121" class="subtitle">模型负责归线、切分与写作；Serein 冻结归属、执行保护与结算。</text>
   <rect x="56" y="141" width="304" height="30" rx="15" fill="#e3ece7"/>
-  <text x="208" y="161" text-anchor="middle" class="chip">现行三阶段 · 独立 EVIDENCE 调用已撤下</text>
+  <text x="208" y="161" text-anchor="middle" class="chip">三个语义阶段 · 图片转录独立处理</text>
 
   <!-- 01 / source and schedule -->
   <line x1="56" y1="202" x2="1184" y2="202" class="rule"/>
@@ -65,7 +65,7 @@
   <text x="78" y="321" class="node-copy">Serein 持续归档</text>
   <text x="78" y="343" class="small">成功回复 · 正文 · 附件</text>
 
-  <text x="334" y="284" class="node-title">完整 dialogue units</text>
+  <text x="334" y="284" class="node-title">完整回复包 · 用于调度</text>
   <text x="334" y="310" class="node-copy">一问一答 / 主动发起后的回应</text>
   <text x="334" y="335" class="small">未完成尾巴继续等待</text>
 
@@ -75,7 +75,7 @@
   <text x="650" y="333" class="node-copy">同一会话 ≥ 5 个完整回复包</text>
   <text x="650" y="353" class="small">且会话静默 ≥ 20 分钟</text>
   <text x="924" y="310" class="chip">03:00 · ASIA/SHANGHAI</text>
-  <text x="924" y="334" class="node-copy">结算稳定材料 · 末尾 20 分钟 parked</text>
+  <text x="924" y="334" class="node-copy">稳定材料结算 · 活跃尾部等待</text>
 
   <text x="624" y="393" class="small">回复包只粗分等待边界 · 每条消息仍由 Track Router 逐条归线</text>
 
@@ -97,17 +97,17 @@
   <text x="924" y="559" class="node-copy">Track 不是 Event 边界</text>
 
   <text x="526" y="494" class="chip">MODEL 2</text>
-  <text x="526" y="523" class="node-title">Curator · 切分与图片转录</text>
+  <text x="526" y="523" class="node-title">Curator · 切分整理</text>
   <text x="526" y="548" class="node-copy">create / extend / merge</text>
-  <text x="526" y="571" class="small">或 skip / defer · 读取已有 Scene 对照</text>
+  <text x="526" y="571" class="small">或 skip / defer · 图片先逐张转录</text>
 
   <text x="80" y="494" class="chip">DETERMINISTIC HOST</text>
-  <text x="80" y="523" class="node-title">冻结 ownership 与阅读范围</text>
-  <text x="80" y="548" class="node-copy">展开来源角色 · 核对图片身份</text>
-  <text x="80" y="571" class="small">保护 predecessor · 共享来源联动 defer</text>
+  <text x="80" y="523" class="node-title">校验判断回执 · 冻结来源归属</text>
+  <text x="80" y="548" class="node-copy">桥接共同阅读，不自动增加来源</text>
+  <text x="80" y="571" class="small">保护旧 Event · 按实际共享来源联动暂缓</text>
 
   <rect x="530" y="607" width="282" height="32" rx="16" fill="#f3eee2"/>
-  <text x="671" y="628" text-anchor="middle" class="chip">原图必须逐张读 · 转录不能扩大归属</text>
+  <text x="671" y="628" text-anchor="middle" class="chip">逐图转录并复用 · 转录不扩大归属</text>
 
   <path d="M80 589V668H32V751H56" class="line"/>
 
@@ -129,20 +129,22 @@
   </g>
   <text x="80" y="775" class="node-title">冻结材料包</text>
   <text x="80" y="800" class="node-copy">owned / context_only 原话</text>
-  <text x="80" y="823" class="small">前版正文 · 转录 · 对应原图</text>
+  <text x="80" y="823" class="small">前版正文 · 已校验转录</text>
 
   <text x="378" y="775" class="chip">MODEL 3</text>
   <text x="378" y="804" class="node-title">Event Writer</text>
-  <text x="378" y="829" class="node-copy">标题 · 正文 · 自检</text>
+  <text x="378" y="829" class="node-copy">原话与转录写作 · 不接收原图</text>
 
   <text x="692" y="763" class="node-title">结构校验 / 有限修复</text>
-  <text x="692" y="789" class="node-copy">归属、事实、指代、结果</text>
-  <text x="692" y="813" class="node-copy">不通过则修同一条 Event</text>
-  <text x="692" y="839" class="small">失败保留输入，不推进消费水位</text>
+  <text x="692" y="789" class="node-copy">结构、来源、可选证据收据</text>
+  <text x="692" y="813" class="node-copy">校验不证明正文语义准确</text>
+  <text x="692" y="839" class="small">文字步骤累计失败三次后暂停</text>
 
   <text x="1002" y="775" class="node-title">幂等结算</text>
   <text x="1002" y="800" class="node-copy">create / replace</text>
   <text x="1002" y="823" class="small">写入 receipt · 可安全重试</text>
+
+  <text x="620" y="887" text-anchor="middle" class="small">失败恢复：成功步骤保留 · 同一聊天等待，其他聊天继续 · 图片单独计失败预算</text>
 
   <!-- 04 / canonical and downstream -->
   <line x1="56" y1="904" x2="1184" y2="904" class="rule"/>

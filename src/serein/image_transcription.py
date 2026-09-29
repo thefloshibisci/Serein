@@ -7,7 +7,7 @@ import json
 from collections import defaultdict
 
 from .compat.germany.raw_events import RawEventStore
-from .core.store import now
+from .core.store import Store, now
 from .extensions.pipeline_images import bind_transcriptions, verify_images
 from .model_runtime import complete
 
@@ -16,6 +16,97 @@ PROMPT = """逐张转录实际附图中的可见文字。保留标题、正文�
 {"image_transcriptions":[{"input_image":1,"text":"可见原文","unreadable":false}]}
 在同一 text 中用 [画面] 简述可见的人物、物件、布局和关系，用 [文字] 放逐字转录；没有文字也保留画面描述。只写实际可见内容，不猜身份、动机或前后经过。Event Writer 只读这份转录，不接收原图。
 每张图恰好一项。无法可靠辨认时 text 可留空并令 unreadable=true；不要补写看不清的内容。"""
+
+FAILURE_LIMIT = 3
+
+
+def initialize_failures(conn):
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS pipeline_image_failures(
+            sha256 TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS pipeline_image_holds(
+            raw_id INTEGER NOT NULL, sha256 TEXT NOT NULL, event_hash TEXT NOT NULL,
+            PRIMARY KEY(raw_id,sha256));
+    ''')
+
+
+def image_failures(database, sha256):
+    with Store(database,read_only=True) as store:
+        row=store.conn.execute('SELECT failures FROM pipeline_image_failures WHERE sha256=?',(sha256,)).fetchone()
+    return row[0] if row else 0
+
+
+def record_image_failure(database, image, error):
+    with Store(database) as store,store.transaction(immediate=True):
+        store.conn.execute('''INSERT INTO pipeline_image_failures VALUES (?,1,?,?)
+            ON CONFLICT(sha256) DO UPDATE SET failures=failures+1,
+            error=excluded.error,updated_at=excluded.updated_at''',
+            (image['sha256'],type(error).__name__,now()))
+
+
+def retry_failed_image(database, sha256):
+    if not isinstance(sha256,str) or len(sha256)!=64 or any(c not in '0123456789abcdef' for c in sha256):
+        raise ValueError('图片摘要无效')
+    with Store(database) as store,store.transaction(immediate=True):
+        row=store.conn.execute('SELECT failures FROM pipeline_image_failures WHERE sha256=?',(sha256,)).fetchone()
+        if row is None:raise ValueError('找不到失败图片')
+        store.conn.execute('DELETE FROM pipeline_image_holds WHERE sha256=?',(sha256,))
+        store.conn.execute('DELETE FROM pipeline_image_failures WHERE sha256=?',(sha256,))
+        # A new generation must not reuse a completed downstream task or its
+        # earlier host deferral. The raw archive and successful receipts survive.
+        store.conn.execute("UPDATE pipeline_batches SET status='superseded_image_retry' WHERE status IN ('pending','routed','needs_repair') AND EXISTS (SELECT 1 FROM json_each(input_json,'$.components') c, json_each(c.value,'$.unavailable_images') i WHERE json_extract(i.value,'$.sha256')=?)",(sha256,))
+        store.conn.execute("DELETE FROM pipeline_routes WHERE raw_id IN (SELECT p.raw_id FROM pipeline_route_provenance p JOIN pipeline_batches b ON b.id=p.batch_id WHERE b.status='superseded_image_retry')")
+        store.conn.execute("DELETE FROM pipeline_route_provenance WHERE batch_id IN (SELECT id FROM pipeline_batches WHERE status='superseded_image_retry')")
+        from .core.store import encode
+        for row in store.conn.execute("SELECT id,image_transcription_json FROM raw_events WHERE EXISTS (SELECT 1 FROM json_each(image_transcription_json,'$.failed_images') i WHERE json_extract(i.value,'$.sha256')=?)",(sha256,)).fetchall():
+            payload=json.loads(row['image_transcription_json'])
+            payload.update(status='retry_requested',updated_at=now())
+            store.conn.execute('UPDATE raw_events SET image_transcription_json=?,image_transcription_status=? WHERE id=?',(encode(payload),'retry_requested',row['id']))
+    return {'status':'retry_requested','sha256':sha256}
+
+
+def apply_image_holds(database, plan, component, *, require_context=False, held_sources=None):
+    """Defer whole proposals/ownership atoms with missing image evidence."""
+    failed=component.get('unavailable_images') or []
+    if not failed:return plan
+    from copy import deepcopy
+    result=deepcopy(plan)
+    stable={m['id'] for m in component['messages']}
+    from .extensions.pipeline_rules import dialogue_units
+    units=[set(u['source_message_ids']) for u in component['memberships']]
+    units.extend({m['id'] for m in unit} for unit in dialogue_units(component['messages']))
+    bases={b['event_id']:set(b['source_message_ids']) for b in component['base_event_candidates']}
+    dependencies=[]
+    for event in result['events']:
+        ids=set(event['source_message_ids'])
+        ids.update(m['source_message_id'] for m in event.get('source_materials',[]))
+        for base in event['base_event_ids']:ids.update(bases[base])
+        dependencies.append(ids)
+    pending=set();holds={}
+    for image in failed:
+        source_id=image['source_message_id']
+        blocked=stable & ({source_id}|set((held_sources or {}).get(image['sha256'],[])))
+        while True:
+            previous=set(blocked)
+            for unit in units:
+                if source_id in unit or unit & blocked:blocked.update(unit & stable)
+            for event,ids in zip(result['events'],dependencies):
+                if require_context or source_id in ids or set(event['source_message_ids']) & blocked:
+                    blocked.update(set(event['source_message_ids']) & stable)
+            if blocked==previous:break
+        pending.update(blocked)
+        for raw_id in blocked:holds.setdefault(raw_id,set()).add(image['sha256'])
+    accepted=[e for e in result['events'] if not set(e['source_message_ids']) & pending]
+    result['events']=accepted
+    result['skip_source_message_ids']=sorted(set(result['skip_source_message_ids'])-pending)
+    result['defer_source_message_ids']=sorted(set(result['defer_source_message_ids'])|pending)
+    result['image_deferrals']=failed
+    with Store(database) as store,store.transaction(immediate=True):
+        for raw_id,hashes in holds.items():
+            for sha256 in hashes:
+                store.conn.execute('INSERT OR IGNORE INTO pipeline_image_holds SELECT id,?,event_hash FROM raw_events WHERE id=?',(sha256,raw_id))
+    return result
 
 
 def _content_text(value):
@@ -45,7 +136,7 @@ async def _transcribe_one(model, image, timeout_seconds):
     response = await complete(
         {**model, "request_timeout_seconds": timeout_seconds},
         {"messages": [{"role": "user", "content": content}],
-         "response_format": {"type": "json_object"}},
+         "response_format": {"type": "json_object"}, "temperature": 0},
     )
     try:
         choice = response['choices'][0]
@@ -120,6 +211,12 @@ def reusable_transcriptions(target, messages, images):
 def persist_transcriptions(target, items):
     if not items:
         return
+    database=target.database if hasattr(target,'database') else target
+    with Store(database) as store:
+        initialize_failures(store.conn)
+        for item in items:
+            store.conn.execute('DELETE FROM pipeline_image_failures WHERE sha256=?',(item['sha256'],))
+            store.conn.execute('DELETE FROM pipeline_image_holds WHERE sha256=?',(item['sha256'],))
     grouped = defaultdict(list)
     for item in items:
         grouped[int(item["source_message_id"])].append(dict(item))

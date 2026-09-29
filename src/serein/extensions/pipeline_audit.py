@@ -5,6 +5,7 @@ These checks verify references and exact quotes, not the truth of a paraphrase.
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 
@@ -13,6 +14,56 @@ CLAIM_TYPES = {'trigger', 'fact', 'subjective_claim', 'subjective_comparison',
 OWNERS = {'我', '她', '双方', '外部', '混合'}
 RENDER_MODES = {'direct', 'attribution_once', 'speech_act'}
 FOCUS_ROLES = {'core', 'supporting'}
+
+
+def canonicalize_claim_group_ids(result: dict) -> None:
+    """Renumber unambiguous model labels without changing their references."""
+    groups, sentences = result.get('claim_groups'), result.get('sentence_evidence')
+    if not isinstance(groups, list) or not groups or not isinstance(sentences, list):
+        return
+    old = [str(group.get('claim_group_id') or '').strip() if isinstance(group, dict) else ''
+           for group in groups]
+    if any(not value for value in old) or len(old) != len(set(old)):
+        return
+    mapping = {value: f'g{index + 1}' for index, value in enumerate(old)}
+    if any(not isinstance(row, dict) or not isinstance(row.get('claim_group_ids'), list)
+           or any(not isinstance(value, str) or value.strip() not in mapping
+                  for value in row['claim_group_ids']) for row in sentences):
+        return
+    for group, value in zip(groups, old):
+        group['claim_group_id'] = mapping[value]
+    for row in sentences:
+        row['claim_group_ids'] = [mapping[value.strip()] for value in row['claim_group_ids']]
+
+
+def closest_verbatim_boundary_quote(content: str, quote: str) -> str | None:
+    """Recover a nearby exact sentence when the Curator paraphrases its citation."""
+    if quote in content:
+        return quote
+    compact_quote = re.sub(r"[\s`*_>#\[\](){}]+", "", quote)
+    if len(compact_quote) < 4:
+        return None
+    candidates = [
+        match.group(0).strip()
+        for match in re.finditer(r"[^。！？!?\n]+[。！？!?]*", content)
+        if match.group(0).strip()
+    ]
+    ranked: list[tuple[int, float, int, str]] = []
+    for index, candidate in enumerate(candidates):
+        compact_candidate = re.sub(r"[\s`*_>#\[\](){}]+", "", candidate)
+        if not compact_candidate:
+            continue
+        matcher = SequenceMatcher(None, compact_quote, compact_candidate)
+        longest = matcher.find_longest_match().size
+        ranked.append((longest, matcher.ratio(), -index, candidate))
+    if not ranked:
+        return None
+    longest, ratio, _position, candidate = max(ranked)
+    minimum_overlap = min(6, max(4, len(compact_quote) // 4))
+    if longest < minimum_overlap or ratio < 0.18:
+        return None
+    return candidate
+
 
 
 def _source_span(span: Any, sources: dict[int, dict] | None, label: str, errors: list[str]) -> tuple[int, str] | None:
@@ -34,23 +85,41 @@ def _source_span(span: Any, sources: dict[int, dict] | None, label: str, errors:
     return source_id, quote
 
 
-def _compact(text: str) -> str:
-    return re.sub(r'[\W_]+', '', text, flags=re.UNICODE).lower()
+def _sentences_match_body(sentences: list[str], body: object) -> bool:
+    if not isinstance(body, str):
+        return False
+    position = 0
+    for sentence in sentences:
+        while position < len(body) and body[position].isspace():
+            position += 1
+        text = sentence.strip()
+        if not body.startswith(text, position):
+            return False
+        position += len(text)
+    return not body[position:].strip()
 
 
-def _quote_attributed_to_user(prefix: str) -> bool:
+def _quote_attributed_to_user(prefix: str, user_name: str | None = None) -> bool:
     clause = re.split(r'[。！？!?；;\n]', prefix)[-1]
-    return bool(re.search(r'(?:她|用户)', clause))
+    if re.search(r'(?:她|用户)', clause):
+        return True
+    if not user_name:
+        return False
+    name = re.escape(user_name)
+    if user_name.isascii():
+        name = rf'(?<![A-Za-z0-9]){name}(?![A-Za-z0-9])'
+    return bool(re.search(name, clause))
 
 
-def _direct_quote_errors(text: str, source_id: int, quote: str, label: str) -> list[str]:
+def _direct_quote_errors(text: str, source_id: int, quote: str, label: str,
+                         user_name: str | None = None) -> list[str]:
     errors: list[str] = []
     start = text.find(quote)
     while start >= 0:
         prefix = text[:start].rstrip()
         if prefix.endswith(('“', '"', '‘', "'")):
             before_open = prefix[:-1].rstrip()
-            attributed = _quote_attributed_to_user(before_open)
+            attributed = _quote_attributed_to_user(before_open, user_name)
             if not attributed:
                 errors.append(f'{label} 直接引用来源 {source_id} 却没有在引语所在句标明她／用户')
             end = start + len(quote)
@@ -66,7 +135,8 @@ def _direct_quote_errors(text: str, source_id: int, quote: str, label: str) -> l
     return list(dict.fromkeys(errors))
 
 
-def writer_receipt_errors(result: dict, owned_sources: list[dict] | None) -> list[str]:
+def writer_receipt_errors(result: dict, owned_sources: list[dict] | None,
+                          user_name: str | None = None) -> list[str]:
     sources = ({item['id']: item for item in owned_sources if type(item.get('id')) is int}
                if owned_sources is not None else None)
     groups, sentences = result.get('claim_groups'), result.get('sentence_evidence')
@@ -162,39 +232,58 @@ def writer_receipt_errors(result: dict, owned_sources: list[dict] | None) -> lis
                 if (source and source.get('role') == 'user' and
                         valid[1] in str(source.get('content') or '')):
                     user_quotes_in_body.append(valid)
-                    errors.extend(_direct_quote_errors(sentence, valid[0], valid[1], label))
-        if quotes and owned_sources is not None:
-            sentence_text, evidence_text = _compact(sentence), _compact(''.join(quotes))
-            if sentence_text and evidence_text:
-                if len(evidence_text) > max(40, len(sentence_text) * 3):
-                    errors.append(f'{label} 引文范围过宽')
+                    errors.extend(_direct_quote_errors(sentence, valid[0], valid[1], label, user_name))
         for group_id in ids:
             covered.setdefault(group_id, []).extend(valid_spans)
-    if ''.join(text_parts) != result.get('event_draft'):
+    if not _sentences_match_body(text_parts, result.get('event_draft')):
         errors.append('event_draft 与 sentence_evidence 逐句拼接不一致')
     body = str(result.get('event_draft') or '')
     for source_id, quote in dict.fromkeys(user_quotes_in_body):
-        errors.extend(error for error in _direct_quote_errors(body, source_id, quote, 'event_draft')
+        errors.extend(error for error in _direct_quote_errors(body, source_id, quote, 'event_draft', user_name)
                       if '缺少标点' in error)
     for group_id, spans in by_id.items():
         if group_id not in used:
             errors.append(f'{group_id} 未被正文引用')
-        elif any(not any(sentence_id == source_id and quote in sentence_quote
-                         for sentence_id, sentence_quote in covered.get(group_id, []))
-                 for source_id, quote in spans):
+        elif spans and not any(sentence_id == source_id and quote in sentence_quote
+                               for source_id, quote in spans
+                               for sentence_id, sentence_quote in covered.get(group_id, [])):
             errors.append(f'{group_id} 的来源未被引用它的句子覆盖')
     return errors
 
 
+
+def canonicalize_curator_review(review: Any) -> Any:
+    """Repair only schema details whose intended meaning is deterministic."""
+    if not isinstance(review, dict):
+        return review
+    normalized = dict(review)
+    dispositions = review.get('dispositions')
+    if isinstance(dispositions, list):
+        rows = []
+        for row in dispositions:
+            if not isinstance(row, dict):
+                rows.append(row)
+                continue
+            item = dict(row)
+            if 'disposition' not in item and item.get('status') in {'skip', 'defer'}:
+                item['disposition'] = item.pop('status')
+            if item.get('disposition') == 'skip' and 'parked_source_message_ids' not in item:
+                item['parked_source_message_ids'] = []
+            rows.append(item)
+        normalized['dispositions'] = rows
+    return normalized
+
 def curator_receipt_errors(review: Any, plan: dict, component: dict) -> list[str]:
     errors: list[str] = []
-    if not isinstance(review, dict) or set(review) != {'events', 'boundaries', 'dispositions'} or any(not isinstance(value, list) for value in review.values()):
+    required = {'events', 'boundaries', 'dispositions'}
+    allowed = required | {'bridge_exclusions'} | ({'continuations'} if component.get('continuity_pairs') else set())
+    if not isinstance(review, dict) or not required.issubset(review) or set(review) - allowed or any(not isinstance(value, list) for value in review.values()):
         return ['decision_review 必须包含 events、boundaries、dispositions 数组']
     events = plan['events']
     event_indexes = set(range(len(events)))
     seen_events = set()
     for row in review['events']:
-        if not isinstance(row, dict) or set(row) != {'event_index', 'reason'} or type(row['event_index']) is not int or row['event_index'] not in event_indexes or row['event_index'] in seen_events or not isinstance(row['reason'], str) or not row['reason'].strip():
+        if not isinstance(row, dict) or not {'event_index', 'reason'}.issubset(row) or set(row) - {'event_index', 'reason', 'materials', 'admission'} or type(row['event_index']) is not int or row['event_index'] not in event_indexes or row['event_index'] in seen_events or not isinstance(row['reason'], str) or not row['reason'].strip():
             errors.append('decision_review.events 存在无效索引或理由')
             continue
         seen_events.add(row['event_index'])
@@ -203,7 +292,10 @@ def curator_receipt_errors(review: Any, plan: dict, component: dict) -> list[str
     by_track: dict[str, list[int]] = {}
     for index, event in enumerate(events):
         by_track.setdefault(event['primary_track_id'], []).append(index)
-    pairs = {(left, right) for indexes in by_track.values() for left, right in zip(indexes, indexes[1:])}
+    pairs = {(left, right) for indexes in by_track.values()
+             for left, right in zip(indexes, indexes[1:])}
+    if component.get('continuity_pairs'):
+        pairs.update((left, left + 1) for left in range(len(events) - 1))
     transcriptions: dict[int, list[str]] = {}
     for item in component.get('curator_image_transcriptions') or []:
         if item.get('evidence_role') in (None, 'owned') and type(item.get('source_message_id')) is int:
@@ -226,6 +318,16 @@ def curator_receipt_errors(review: Any, plan: dict, component: dict) -> list[str
             errors.append('decision_review.boundaries 缺少双方证据')
             continue
         for span in row['evidence']:
+            if isinstance(span, dict) and set(span) == {'source_message_id', 'quote'}:
+                source_id, quote = span['source_message_id'], span['quote']
+                if (type(source_id) is int and source_id in messages and isinstance(quote, str)
+                        and quote.strip() and sum(source_id in ids for ids in owners) == 1):
+                    content = str(messages[source_id].get('content') or '')
+                    materials = [content, *[str(text or '') for text in messages[source_id].get('evidence_texts') or []]]
+                    if not any(quote in text for text in materials):
+                        repaired = closest_verbatim_boundary_quote(content, quote)
+                        if repaired is not None:
+                            span['quote'] = repaired
             valid = _source_span(span, messages, 'boundary', errors)
             if valid:
                 sides = [side for side, ids in enumerate(owners) if valid[0] in ids]

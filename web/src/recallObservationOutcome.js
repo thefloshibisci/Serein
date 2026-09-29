@@ -23,6 +23,14 @@ export function gatewayRequestLabel(payload) {
   if (!payload?.observation_version) return '历史记录';
   const states = {preparing:'正在准备召回', upstream_pending:'等待完整回复；已准备的记忆尚未确认成功交付',
     failed:'请求失败，未确认成功交付', interrupted:'回复中断或缺少结束标志，未确认成功交付'};
+  if (payload.request_status === 'completed') {
+    states.completed = payload.injected_bucket_ids?.length
+      ? `已向聊天模型注入 ${payload.injected_bucket_ids.length} 条记忆，上游回复已完成`
+      : payload.recall_state === 'disabled' ? '自动召回已关闭，本轮未注入记忆'
+      : payload.recall_state === 'no_match' ? '本轮没有选出可注入的记忆'
+      : payload.recall_state === 'resume' ? '本轮使用续接上下文，没有执行自动召回'
+      : '本轮未注入自动召回的记忆';
+  }
   const reason = payload.recall_diagnostics?.reason;
   const reasons = {hook_deadline_before_reranker:'召回时间预算不足，未进入重排评分',hook_deadline_before_candidates:'召回时间预算不足，未检索候选',daily_surface_without_memory_intent:'本次没有明确的记忆需求'};
   const rerankerError = payload.recall_diagnostics?.reranker_error;

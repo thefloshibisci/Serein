@@ -1,5 +1,35 @@
 import { defaultWindowShadows } from "../data/windowShadows.js";
 
+export function windowShadowViews(shadow) {
+  const sections = shadow?.sections;
+  if (sections && typeof sections === "object" && ("user_view" in sections || "self_view" in sections)) {
+    return {
+      user: typeof sections.user_view === "string" ? sections.user_view.trim() : "",
+      assistant: typeof sections.self_view === "string" ? sections.self_view.trim() : "",
+    };
+  }
+  // Older retained shadows may have only the authored Markdown sections.
+  const views = { user: "", assistant: "" };
+  let current = null;
+  let level = 0;
+  let fence = null;
+  for (const line of String(shadow?.text ?? "").split(/\r?\n/)) {
+    const marker = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (marker) {
+      if (!fence) fence = marker[1];
+      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length) fence = null;
+    }
+    const heading = !fence && !marker && line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      const key = { "我眼中的你": "user", "我眼中的自己": "assistant" }[heading[2]];
+      if (key) { current = key; level = heading[1].length; continue; }
+      if (heading[1].length <= level) current = null;
+    }
+    if (current) views[current] += `${line}\n`;
+  }
+  return { user: views.user.trim(), assistant: views.assistant.trim() };
+}
+
 function normalizeShadow(shadow) {
   if (
     !shadow

@@ -55,6 +55,16 @@ export function ConversationImport({onImported}) {
     try{await request('/'+encodeURIComponent(job.id)+'/pause',{});setStatus('将在当前批次保存后暂停。');await refresh();}
     catch(error){if(mounted.current)setStatus(error.message);}
   }
+  async function includeInEvents(skip=false) {
+    if(!job || busy || job.format==='operit' || (skip&&!job.event_boundary_active))return;
+    setBusy(true);setStatus(skip?'正在保存处理边界…':'正在提交后台摘要任务…');
+    try{
+      await request('/'+encodeURIComponent(job.id)+(skip?'/skip-summary':'/summarize'),{});
+      await refresh();
+      setStatus(skip?'已跳过这份导入至最后一句；原文保留，后续新聊天可正常整理。':'已提交后台摘要，从这份导入的开头处理尚未摘要的原文；可离开页面，在配置页查看进度。无需开启自动摘要。');
+      onImported?.();
+    }catch(error){setStatus(error.message);}finally{setBusy(false);}
+  }
   async function retryTagging(limit) {
     if(busy)return;
     setBusy(true);
@@ -63,7 +73,7 @@ export function ConversationImport({onImported}) {
   }
   return <div className="conversation-import">
     <div className="settings-group__heading"><h4>对话与记忆导入</h4>
-      <p>历史聊天仅归档，自动整理从后续新聊天开始；Operit 记忆备份逐条保留为 Scene，正文不改写。</p></div>
+      <p>历史聊天导入后，可立即在后台从头摘要，或暂不处理并跳到末尾；Operit 记忆备份逐条保留为 Scene，正文不改写。</p></div>
     <label className="settings-field"><span>文件类型</span><select disabled={busy} value={mode} onChange={event=>setMode(event.target.value)}>
       <option value="auto">自动识别</option><option value="conversation">聊天记录</option><option value="operit">Operit 记忆库</option></select></label>
     <label className="settings-toggle"><span><strong>Operit 导入后自动打标</strong>
@@ -80,7 +90,9 @@ export function ConversationImport({onImported}) {
       {history.map(item=><option key={item.id} value={item.id}>{item.filename} · {item.processed}/{item.total}</option>)}</select></label>}
     {job&&<div className="import-preview">
       <p><strong>{job.filename}</strong> · {job.format==='operit'?'Operit 记忆库':`${job.sessions} 个对话`} · {job.total} 条</p>
-      {job.format!=='operit'&&<p className="import-help">历史聊天仅归档，可搜索、读取和绑定证据；自动归线与 Event 整理只处理后续新增聊天。</p>}
+      {job.format!=='operit'&&<p className="import-help">{job.event_boundary_active
+        ?(job.summary_choice==='skip'?'已暂不处理：这份导入已跳到最后一句，原文仍可搜索、读取和绑定证据。':'历史聊天已保留，尚未摘要。导入完成后请选择处理方式。')
+        :'这份历史聊天已加入 Event 整理池，会和后续新聊天一样按原话归线、切分。'}</p>}
       {job.warnings.map((message,index)=><p key={index} className="import-help">{message}</p>)}
       <details><summary>查看内容预览</summary>{job.preview.map((item,index)=><blockquote key={index}>
         <strong>{item.title || (item.role==='user'?'用户':'AI')}</strong><p>{item.text}</p></blockquote>)}</details>
@@ -90,7 +102,10 @@ export function ConversationImport({onImported}) {
       <p>已处理 {job.processed}/{job.total} · 新增 {job.inserted} · 重复 {job.duplicate} · 失败 {job.failed}</p>
       {job.errors.map(error=><p className="import-error" key={error.entry}>第 {error.entry} 条：{error.message}</p>)}
       <div className="settings-actions">{job.status!=='completed'&&<button type="button" disabled={busy||running} onClick={run}>{job.processed?'继续导入':'开始导入'}</button>}
-        {running&&<button type="button" onClick={pause}>暂停</button>}</div>
+        {running&&<button type="button" onClick={pause}>暂停</button>}
+        {job.status==='completed'&&job.format!=='operit'&&job.inserted>0&&
+          <><button type="button" disabled={busy} onClick={()=>includeInEvents()}>{job.event_boundary_active?'立即从头摘要（后台）':'继续后台摘要'}</button>
+          <button type="button" disabled={busy||!job.event_boundary_active||job.summary_choice==='skip'} onClick={()=>includeInEvents(true)}>暂不处理，并推游标到最后一句</button></>}</div>
     </div>}
     {Object.keys(tags).length>0&&<p className="import-help">记忆打标：等待 {tags.pending||0} · 完成 {tags.done||0} · 失败 {tags.failed||0} · 因编辑跳过 {tags.stale||0}
       <button className="import-refresh" type="button" disabled={busy} onClick={()=>refresh().catch(error=>setStatus(error.message))}>刷新</button>

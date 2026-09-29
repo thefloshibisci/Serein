@@ -18,13 +18,21 @@ try {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   let calls = 0;
+  const savedReviews = [];
   let navigations = 0;
   page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations++; });
   const makeRow = (id, status = 'completed') => ({ id, session_id: 'synthetic', created_at: '2026-01-01T10:00:00Z', payload: {
     observation_version: 1, observation_revision: 1, query: `Synthetic query ${id}`,
     request_kind: 'user_turn', request_status: status, recall_state: 'selected', memory_enabled: true,
-    prepared_ids: ['scene:s'], prepared_items: [{ id: 'scene:s', title: 'Synthetic memory', source_kind: 'scene' }],
-    injected_bucket_ids: status === 'completed' ? ['scene:s'] : [],
+    prepared_ids: ['scene:s', 'event:e'], prepared_items: [
+      { id: 'scene:s', title: 'Synthetic memory', source_kind: 'scene', score: .509 },
+      { id: 'event:e', title: 'Synthetic event', source_kind: 'event', score: .709 },
+    ],
+    injected_bucket_ids: status === 'completed' ? ['scene:s', 'event:e'] : [],
+    recall_why_summary: { injected: status === 'completed' ? [
+      { id: 'event:e', score: .709 },
+      { id: 'scene:unselected', title: 'Unselected candidate', score: .99 },
+    ] : [] },
   } });
   const rows = Array.from({ length: 40 }, (_, n) => makeRow(n + 1));
   rows[39] = makeRow(40, 'upstream_pending');
@@ -45,6 +53,7 @@ try {
         reviewed_items: rows.filter(row => args.reviewIds?.includes(row.id) && !items.some(item => item.id === row.id)),
       };
     } else if (url.pathname === '/__serein/personal' && route.request().method() === 'POST') {
+      savedReviews.push(args);
       payload = { ...args, revision: 1 };
     } else if (url.pathname === '/__serein/gateway/semantic-routes') {
       payload = { routes: [{ name: 'general', label: '通用', action: 'recall', utterances: [] }], dataset_version: 1 };
@@ -56,11 +65,26 @@ try {
   await cards.nth(19).waitFor();
   assert.equal(await cards.count(), 20);
   const current = page.locator('[data-observation-id="40"]');
+  assert.match(await current.textContent(), /准备的记忆/);
+  assert.match(await current.textContent(), /Synthetic memory/);
+  assert.equal(await current.locator('.observation-memory-review').count(), 0, 'preparation is not reviewed as delivered');
   await current.evaluate(element => { window.firstObservationNode = element; });
   rows[39] = { ...makeRow(40), payload: { ...makeRow(40).payload, observation_revision: 3 } };
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.waitForFunction(() => document.querySelector('[data-observation-id="40"] .observation-outcome')?.textContent === '已注入');
   assert.equal(await current.evaluate(element => window.firstObservationNode === element), true);
+  assert.match(await current.textContent(), /Synthetic memory/);
+  assert.match(await current.textContent(), /已向聊天模型注入 2 条记忆/);
+  assert.match(await current.textContent(), /真正送入模型/);
+  assert.equal(await current.locator('.observation-memory-row').count(), 2);
+  assert.deepEqual(await current.locator('.observation-memory-kind').allTextContents(), ['Scene', 'Event']);
+  assert.deepEqual(await current.locator('.observation-memory-row em').allTextContents(), ['50.9%', '70.9%']);
+  assert.doesNotMatch(await current.textContent(), /Unselected candidate/);
+  const sceneReview = current.getByRole('group', { name: '记忆相关度：Synthetic memory', exact: true });
+  await sceneReview.getByRole('button', { name: '核心相关', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('[data-observation-id="40"] .observation-memory-review button.is-active')?.textContent === '核心相关');
+  assert.ok(savedReviews.some(row => row.scope === 'recall_review' && row.key === '40' && row.value.candidateReviews?.['scene:s'] === 'core'), 'Gateway relevance saved through canonical personal API');
+  assert.equal(await sceneReview.getByRole('button', { name: '重跑 shadow 校准' }).isDisabled(), true);
 
   const reading = page.locator('[data-observation-id="30"]');
   await reading.scrollIntoViewIfNeeded();

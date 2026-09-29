@@ -1,6 +1,6 @@
 """Build the local Chinese reading edition from the Markdown sources.
 
-Requires ReportLab and pypdf. Existing figure PDFs are embedded as vectors.
+Requires ReportLab, pypdf and svglib. Figure PDFs are embedded as vectors.
 This exporter supports the Markdown constructs used by this manuscript; it is
 not a general Markdown converter. No model, database, or network is accessed.
 """
@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import re
 import tempfile
+from io import BytesIO
 from urllib.parse import quote, unquote
 
 from pypdf import PdfReader, PdfWriter, Transformation
@@ -157,7 +158,7 @@ class ReadingDoc(BaseDocTemplate):
             canvas.setLineWidth(.4)
             canvas.line(MARGIN, PAGE_H - 39, PAGE_W - MARGIN, PAGE_H - 39)
         canvas.setFont('Sans', 8)
-        canvas.drawString(MARGIN, 29, '中文研究稿 v0.18  |  2026-09-13')
+        canvas.drawString(MARGIN, 29, '中文研究稿 v0.19  |  2026-09-27')
         canvas.drawRightString(PAGE_W - MARGIN, 29, str(doc.page))
         canvas.restoreState()
 
@@ -250,7 +251,7 @@ def assemble(source, supplementary=False):
         story.extend([Spacer(1, 30), Paragraph(escape(primary), styles['title']),
                       Paragraph(escape(subtitle), styles['subtitle']),
                       Paragraph('ChiYouyu · Haven', styles['body']),
-                      Paragraph('中文稿 v0.18 · 仓库阅读版 · 2026-09-13', styles['meta'])])
+                      Paragraph('中文稿 v0.19 · 仓库阅读版 · 2026-09-27', styles['meta'])])
         material_note = blocks.pop(0).removeprefix('> ').removeprefix('ChiYouyu · Haven。')
         story.append(Paragraph(inline(material_note), styles['meta']))
     i, number, references = 0, 0, False
@@ -336,7 +337,7 @@ def build(source, output, supplementary=False):
                         NameObject('/D'): TextStringObject(destination) if destination else
                             ArrayObject([NumberObject(0), NameObject('/Fit')]),
                     })
-        writer.add_metadata({'/Title': title, '/Subject': '中文研究稿 v0.18，PDF 阅读版',
+        writer.add_metadata({'/Title': title, '/Subject': '中文研究稿 v0.19，PDF 阅读版',
                              '/Creator': 'Markdown / ReportLab / pypdf', '/Author': 'ChiYouyu and Haven'})
         writer.write(output)
     return {'source': str(source.relative_to(PAPER)), 'output': output.name,
@@ -357,6 +358,21 @@ def main():
     pdfmetrics.registerFontFamily('Sans', normal='Sans', bold='Sans', italic='Sans', boldItalic='Sans')
     pdfmetrics.registerFontFamily('Latin', normal='Latin', bold='Latin', italic='Latin', boldItalic='Latin')
     OUT.mkdir(parents=True, exist_ok=True)
+    # Use the selected heading font for the SVG's Chinese labels. The browser
+    # font subset embedded in the SVG is independent of ReportLab registration.
+    from svglib.svglib import svg2rlg
+    from reportlab.graphics import renderPDF
+    svg = (PAPER / 'figures/figure-1-system-flow.svg').read_text(encoding='utf-8')
+    svg = re.sub(r'<style>.*?</style>', '', svg, flags=re.S)
+    svg = svg.replace('font-family="PaperSans"', 'font-family="Sans"')
+    drawing = svg2rlg(BytesIO(svg.encode('utf-8')))
+    def set_figure_font(node):
+        if hasattr(node, 'fontName'):
+            node.fontName = 'Sans'
+        for child in getattr(node, 'contents', []):
+            set_figure_font(child)
+    set_figure_font(drawing)
+    renderPDF.drawToFile(drawing, str(OUT / 'figure-1-system-flow.pdf'))
     outputs = [build(PAPER / 'manuscript.zh-CN.md', OUT / MAIN_NAME),
                build(PAPER / 'supplementary-tables.md', OUT / SUPP_NAME, supplementary=True)]
     (OUT / 'reading-edition-build.json').write_text(

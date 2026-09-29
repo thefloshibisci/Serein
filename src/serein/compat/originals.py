@@ -1,16 +1,32 @@
 """Unambiguous original IDs for resume and explicit original-message reads."""
 import json
 import re
-from datetime import date as Date
+from datetime import date as Date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from ..core.store import Store
 
 
-# Naive archive timestamps follow the instance's UTC+8 date convention.
-TIME = "COALESCE(CASE WHEN substr(created_at,11) GLOB '*[Zz+-]*' THEN julianday(created_at) ELSE julianday(created_at,'-8 hours') END,0)"
+# Bridge's SQLite timestamps are UTC; other legacy archives use UTC+8.
+BRIDGE_TIME = "(source='haven_bridge' OR substr(source,1,13)='haven_bridge_')"
+TIME = ("COALESCE(CASE WHEN substr(created_at,11) GLOB '*[Zz+-]*' OR " + BRIDGE_TIME +
+        " THEN julianday(created_at) ELSE julianday(created_at,'-8 hours') END,0)")
 READABLE = """role IN ('user','assistant') AND source != 'error'
     AND CASE WHEN json_valid(metadata_json) THEN
         COALESCE(json_extract(metadata_json,'$.draft'),0) IN (0,'')
         AND COALESCE(json_extract(metadata_json,'$.discarded'),0) IN (0,'') ELSE 0 END"""
+
+
+def original_timestamp(row, zone):
+    """Render original times with an explicit offset without rewriting evidence."""
+    value = row['created_at']
+    try:
+        stamp = datetime.fromisoformat(value.replace('Z', '+00:00').replace('z', '+00:00'))
+    except (ValueError, AttributeError):
+        return value
+    if stamp.tzinfo is None:
+        bridge = row['source'] == 'haven_bridge' or row['source'].startswith('haven_bridge_')
+        stamp = stamp.replace(tzinfo=timezone.utc if bridge else timezone(timedelta(hours=8)))
+    return stamp.astimezone(ZoneInfo(zone)).isoformat()
 
 
 def raw_id(value):

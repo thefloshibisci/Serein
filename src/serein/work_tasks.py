@@ -32,13 +32,22 @@ def status(database,key):
         return value
 
 
-def enqueue(database,key,arguments=None):
+def _queue(value,arguments):
+    value.pop('followup_arguments',None)
+    value.update(status='queued',stage='queued',error='',arguments=arguments or {},run_id=uuid4().hex,
+                 result=None,updated_at=time.time(),stop_requested=False,completed=0,events=0,
+                 job_id='',attempt=0,prompt_chars=0)
+
+
+def enqueue(database,key,arguments=None,*,followup_if_running=False):
     with Store(database) as store,store.transaction(immediate=True):
         value=_recover(_get(store,key))
-        if value['status'] in ('queued','running'):return value
-        value.update(status='queued',stage='queued',error='',arguments=arguments or {},run_id=uuid4().hex,
-                     result=None,updated_at=time.time(),stop_requested=False,completed=0,events=0,
-                     job_id='',attempt=0,prompt_chars=0)
+        if value['status'] in ('queued','running'):
+            if followup_if_running and (value['status']=='running' or value.get('arguments')!=arguments):
+                value['followup_arguments']=arguments or {}
+                _save(store,key,value)
+            return value
+        _queue(value,arguments)
         _save(store,key,value)
         return value
 
@@ -129,13 +138,22 @@ async def execute(database,key,operation,*,queued_id=None):
     try:
         result=await operation()
         state=result.get('status')
-        if state in ('current','settled_today','waiting_settlement_window','auto_paused') and previous['status'] not in ('queued','running'):
-            with Store(database) as store,store.transaction(immediate=True):
-                if _get(store,key).get('run_id')==run_id:_save(store,key,previous)
-            return result
-        progress(result=result,status=state if state in ('awaiting_agent','paused','needs_repair') else 'completed',
-                 stage=state or 'completed',lease_until=0,
-                 error=str(result.get('reason','归线材料需要修复')) if state=='needs_repair' else '')
+        # Finish under the same lock used by enqueue so a request arriving while
+        # a scheduled pass is returning cannot be overwritten or silently lost.
+        with Store(database) as store,store.transaction(immediate=True):
+            value=_get(store,key)
+            if value.get('run_id')==run_id and value['status']=='running':
+                followup=value.get('followup_arguments')
+                if followup is not None and not value.get('stop_requested') and state in (
+                        'current','processed','settled_today','waiting_settlement_window','auto_paused'):
+                    _queue(value,followup)
+                elif followup is None and state in ('current','settled_today','waiting_settlement_window','auto_paused') and previous['status'] not in ('queued','running'):
+                    value=previous
+                else:
+                    value.update(result=result,status=state if state in ('awaiting_agent','paused','needs_repair') else 'completed',
+                                 stage=state or 'completed',lease_until=0,updated_at=time.time(),
+                                 error=str(result.get('reason','归线材料需要修复')) if state=='needs_repair' else '')
+                _save(store,key,value)
         return result
     except asyncio.CancelledError:
         progress(status='interrupted',lease_until=0,error='服务已停止；已完成步骤保留，点击继续可恢复。')
@@ -195,6 +213,8 @@ async def work(settings,key,arguments):
             protected.extend(result.get('protected_deferrals',[]))
             result={**result,'deferred':deferred,'skipped':skipped,'protected_deferrals':protected}
             progress(events=events)
+            if result['status']=='paused' and result.get('job_id'):
+                continue  # The held scope is excluded; try independent chats.
             if result['status']!='processed':return {**result,'events':events}
             if not result.get('processed_originals',0):
                 return {**result,'status':'current','events':events,'note':'本批需要后续上下文，原话仍待整理；不会反复请求同一批。'}

@@ -325,3 +325,171 @@ def test_retry_one_preserves_success_and_other_failures(settings):
     with Store(settings.database) as store:
         rows=store.conn.execute('SELECT document_id,status,attempts,error FROM import_tag_jobs ORDER BY document_id').fetchall()
         assert [tuple(row) for row in rows]==[('a','pending',3,'prior reason'),('b','failed',3,'prior reason'),('c','done',3,'prior reason')]
+
+def test_import_history_uses_compact_boundary_without_consuming_live_chat(settings):
+    from serein.compat.raw_archive import raw_archive
+    preview=stage(settings.database,json.dumps(messages(2)),'history.json','auto',False)
+    assert advance_import(settings,preview['id'])['inserted']==2
+    with Store(settings.database,read_only=True) as store:
+        assert store.conn.execute('SELECT count(*) FROM pipeline_import_boundaries').fetchone()[0]==1
+        assert store.conn.execute("SELECT count(*) FROM raw_processing WHERE outcome='archived_only'").fetchone()[0]==0
+    raw_archive(settings).ingest([
+        {'source_event_id':'live-u','session_id':'live','role':'user','text':'new question',
+         'created_at':'2026-09-26T12:00:00Z'},
+        {'source_event_id':'live-a','session_id':'live','role':'assistant','text':'new answer',
+         'created_at':'2026-09-26T12:01:00Z'}],source='live')
+    task=asyncio.run(advance(settings.database,include_recent=True))
+    assert task['role']=='track_router'
+    assert {item['content'] for item in task['request']['messages']}=={'new question','new answer'}
+
+def test_completed_import_can_be_released_into_event_pipeline(settings):
+    client=TestClient(create_app(settings,token='test',live=True),headers={'Authorization':'Bearer test'})
+    preview=stage(settings.database,json.dumps(messages(2)),'backfill.json','auto',False)
+    assert advance_import(settings,preview['id'])['inserted']==2
+    before=client.get('/v1/imports').json()['items']
+    item=next(row for row in before if row['id']==preview['id'])
+    assert item['event_boundary_active'] is True
+    released=client.post('/v1/imports/'+preview['id']+'/include-in-events',json={})
+    assert released.status_code==200 and released.json()['released'] is True
+    assert released.json()['originals']==2
+    after=client.get('/v1/imports').json()['items']
+    assert next(row for row in after if row['id']==preview['id'])['event_boundary_active'] is False
+    task=asyncio.run(advance(settings.database,include_recent=True))
+    assert task['role']=='track_router'
+    assert {row['content'] for row in task['request']['messages']}=={'  original 0\n','  original 1\n'}
+    again=client.post('/v1/imports/'+preview['id']+'/include-in-events',json={})
+    assert again.status_code==200 and again.json()['released'] is False
+
+
+def test_legacy_import_without_archived_marker_stays_released(settings):
+    preview=stage(settings.database,json.dumps(messages(2)),'manually-restored.json','auto',False)
+    assert advance_import(settings,preview['id'])['inserted']==2
+    with Store(settings.database) as store:
+        store.conn.execute('DELETE FROM pipeline_import_boundaries WHERE upload_id=?',(preview['id'],))
+        store.conn.execute("DELETE FROM raw_processing WHERE outcome='archived_only' AND operation_id LIKE 'file-import:%'")
+    from serein.imports import archive_imported_originals
+    with Store(settings.database) as store:
+        archive_imported_originals(store.conn)
+        assert store.conn.execute('SELECT count(*) FROM pipeline_import_boundaries WHERE upload_id=?',(preview['id'],)).fetchone()[0]==0
+
+
+
+def test_import_summary_choice_runs_without_automatic_switch(settings):
+    from serein.work_tasks import work, status
+    client=TestClient(create_app(settings,token='test',live=True),headers={'Authorization':'Bearer test'})
+    preview=stage(settings.database,json.dumps(messages(2)),'choice.json','auto',False)
+    advance_import(settings,preview['id'])
+    skipped=client.post('/v1/imports/'+preview['id']+'/skip-summary',json={})
+    assert skipped.status_code==200 and skipped.json()['status']=='skipped'
+    assert status(settings.database,'pipeline')['status']=='idle'
+    item=next(row for row in client.get('/v1/imports').json()['items'] if row['id']==preview['id'])
+    assert item['summary_choice']=='skip' and item['event_boundary_active']
+    assert asyncio.run(advance(settings.database,include_recent=True))['status']=='current'
+    response=client.post('/v1/imports/'+preview['id']+'/summarize',json={})
+    assert response.status_code==200
+    task=response.json()['task']
+    assert task['status']=='queued' and task['arguments']['include_recent'] is True
+    again=client.post('/v1/imports/'+preview['id']+'/summarize',json={}).json()
+    assert again['task']['run_id']==task['run_id']
+    result=asyncio.run(work(settings,'pipeline',task['arguments']))
+    assert result['role']=='track_router'
+    assert {row['content'] for row in result['request']['messages']}=={'  original 0\n','  original 1\n'}
+    from serein.imports import release_imported_originals
+    with pytest.raises(ValueError,match='不能再跳过'):
+        release_imported_originals(settings.database,preview['id'],skip=True)
+
+
+@pytest.mark.parametrize('terminal',['current','settled_today','waiting_settlement_window','auto_paused','processed'])
+def test_summary_request_during_running_pass_is_not_lost(settings,terminal):
+    from serein.work_tasks import execute, enqueue, status, work
+    from serein.imports import release_imported_originals
+    preview=stage(settings.database,json.dumps(messages()),'racing.json','auto',False)
+    advance_import(settings,preview['id'])
+    async def ending_pass():
+        release_imported_originals(settings.database,preview['id'])
+        first=enqueue(settings.database,'pipeline',{'include_recent':True},followup_if_running=True)
+        second=enqueue(settings.database,'pipeline',{'include_recent':True},followup_if_running=True)
+        assert first['run_id']==second['run_id'] and second['status']=='running'
+        return {'status':terminal}
+    asyncio.run(execute(settings.database,'pipeline',ending_pass))
+    task=status(settings.database,'pipeline')
+    assert task['status']=='queued' and task['arguments']=={'include_recent':True}
+    result=asyncio.run(execute(settings.database,'pipeline',lambda:work(settings,'pipeline',task['arguments']),queued_id=task['run_id']))
+    assert result['role']=='track_router'
+    assert len(result['request']['messages'])==2
+    assert status(settings.database,'pipeline')['status']=='awaiting_agent'
+
+
+@pytest.mark.parametrize('terminal',['awaiting_agent','paused','needs_repair','error'])
+def test_summary_followup_does_not_retry_held_or_failed_tasks(settings,terminal):
+    from serein.work_tasks import execute, enqueue, status
+    async def held_pass():
+        enqueue(settings.database,'pipeline',{'include_recent':True},followup_if_running=True)
+        if terminal=='error':raise ValueError('synthetic failure')
+        return {'status':terminal}
+    if terminal=='error':
+        with pytest.raises(ValueError,match='synthetic failure'):
+            asyncio.run(execute(settings.database,'pipeline',held_pass))
+    else:
+        asyncio.run(execute(settings.database,'pipeline',held_pass))
+    assert status(settings.database,'pipeline')['status']==('failed' if terminal=='error' else terminal)
+
+
+def test_summary_choice_rejects_incomplete_operit_and_missing_imports(settings):
+    from serein.imports import release_imported_originals
+    preview=stage(settings.database,json.dumps(messages(26)),'unfinished.json','auto',False)
+    advance_import(settings,preview['id'])
+    for skip in (True,False):
+        with pytest.raises(ValueError,match='先完成'):
+            release_imported_originals(settings.database,preview['id'],skip=skip)
+        with pytest.raises(ValueError,match='找不到'):
+            release_imported_originals(settings.database,'missing',skip=skip)
+    operit=stage(settings.database,json.dumps({'memories':[{'uuid':'synthetic-memory','title':'Example','content':'Synthetic text'}]}),'operit.json','operit',False)
+    advance_import(settings,operit['id'])
+    for skip in (True,False):
+        with pytest.raises(ValueError,match='Operit'):
+            release_imported_originals(settings.database,operit['id'],skip=skip)
+
+
+def test_skip_only_affects_selected_import_and_not_live_originals(settings):
+    from serein.imports import release_imported_originals
+    from serein.compat.raw_archive import raw_archive
+    first=stage(settings.database,json.dumps(messages()),'first.json','auto',False)
+    other=messages();other['id']='other-session'
+    second=stage(settings.database,json.dumps(other),'second.json','auto',False)
+    for item in (first,second):advance_import(settings,item['id'])
+    release_imported_originals(settings.database,first['id'],skip=True)
+    release_imported_originals(settings.database,first['id'],skip=True)
+    raw_archive(settings).ingest([{'source_event_id':'new-live','session_id':'live',
+        'role':'user','text':'Synthetic live message','created_at':'2026-09-26T12:00:00Z'},
+        {'source_event_id':'new-live-answer','session_id':'live','role':'assistant',
+         'text':'Synthetic live answer','created_at':'2026-09-26T12:01:00Z'}],source='live')
+    task=asyncio.run(advance(settings.database,include_recent=True))
+    assert [row['content'] for row in task['request']['messages']]==['Synthetic live message','Synthetic live answer']
+    with Store(settings.database,read_only=True) as store:
+        assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==6
+        assert store.conn.execute('SELECT count(*) FROM pipeline_import_boundaries WHERE released=0').fetchone()[0]==2
+        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==0
+
+
+def test_summary_followup_respects_explicit_pause(settings):
+    from serein.work_tasks import execute, enqueue, pause, status
+    async def finishing():
+        enqueue(settings.database,'pipeline',{'include_recent':True},followup_if_running=True)
+        pause(settings.database,'pipeline')
+        return {'status':'current'}
+    asyncio.run(execute(settings.database,'pipeline',finishing))
+    assert status(settings.database,'pipeline')['status']!='queued'
+
+
+def test_duplicate_only_import_summary_does_not_queue_unrelated_work(settings):
+    from serein.work_tasks import status
+    client=TestClient(create_app(settings,token='test',live=True),headers={'Authorization':'Bearer test'})
+    first=stage(settings.database,json.dumps(messages()),'first.json','auto',False)
+    advance_import(settings,first['id'])
+    second=stage(settings.database,json.dumps(messages(),indent=2),'duplicate.json','auto',False)
+    assert second['id']!=first['id']
+    assert advance_import(settings,second['id'])['inserted']==0
+    response=client.post('/v1/imports/'+second['id']+'/summarize',json={})
+    assert response.status_code==200 and response.json()['originals']==0
+    assert status(settings.database,'pipeline')['status']=='idle'
