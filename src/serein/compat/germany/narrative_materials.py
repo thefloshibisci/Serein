@@ -8,8 +8,11 @@ from typing import Any
 
 MATERIAL_KEYS = ("event_ids", "scene_ids", "diary_ids", "darkroom_ids", "upload_ids")
 _EVENT_ID_RE = re.compile(r"^event_[0-9a-f]{24}$")
-# Imported legacy Scenes retain their original 12-character hex IDs.
-_SCENE_ID_RE = re.compile(r"^(?:scene_[A-Za-z0-9_.:-]{1,120}|[0-9a-f]{12})$")
+# Imports retain either bare Ombre IDs or their namespaced source identity.
+_SCENE_ID_RE = re.compile(
+    r"^(?:scene_[A-Za-z0-9_.:-]{1,120}|(?:ombre_)?[0-9a-f]{12}|"
+    r"ombre_legacy-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$"
+)
 _UPLOAD_ID_RE = re.compile(r"^upload_[0-9a-f]{32}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 

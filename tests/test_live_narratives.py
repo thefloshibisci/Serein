@@ -90,10 +90,13 @@ def test_arc_receipt_appends_without_changing_body_or_revision(live):
     assert client.post('/api/narrative-arcs/append-event-materials',json=payload).status_code==409
 
 
-def test_legacy_scene_material_survives_preview_and_sealed_save(live):
+@pytest.mark.parametrize('legacy', [
+    '2151802bad5c', 'ombre_2151802bad5c',
+    'ombre_legacy-12345678-1234-5678-9abc-123456789abc',
+])
+def test_legacy_scene_material_survives_preview_and_sealed_save(live, legacy):
     settings, client = live
     event, _ = seed(client, settings)
-    legacy = '2151802bad5c'
     with Store(settings.database) as store:
         store.create(legacy, 'scene', '旧记忆', '保留原来的短 ID。')
     with narrative_transaction(settings.database, write=True) as rolls:
@@ -113,7 +116,12 @@ def test_legacy_scene_material_survives_preview_and_sealed_save(live):
     assert current['linked_scene_ids'] == [legacy]
 
 
-@pytest.mark.parametrize('invalid', ['../2151802bad5c', 'not-a-scene', '2151802bad5', '2151802bad5c/'])
+@pytest.mark.parametrize('invalid', [
+    '../2151802bad5c', 'not-a-scene', '2151802bad5', '2151802bad5c/',
+    'ombre_not-a-scene', 'ombre_2151802bad5', 'ombre_2151802bad5c/',
+    'ombre_legacy-12345678-1234-5678-9abc-123456789ab',
+    'ombre_legacy-12345678-1234-5678-9abc-123456789abc/extra',
+])
 def test_narrative_material_ids_still_reject_malformed_scene_ids(invalid):
     from serein.compat.germany.narrative_materials import normalize_material_ids
     with pytest.raises(ValueError, match='invalid_scene_id'):

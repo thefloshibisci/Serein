@@ -51,6 +51,36 @@ def test_create_theme_line_retry_conflict_and_writer_focus(live):
     assert stale.status_code == 409 and '材料已变化' in stale.text
 
 
+@pytest.mark.parametrize('legacy', [
+    'ombre_2151802bad5c',
+    'ombre_legacy-12345678-1234-5678-9abc-123456789abc',
+])
+def test_create_line_accepts_imported_ids_without_rewriting_sources(live, legacy):
+    from serein.core import Store
+    settings, client = live
+    event, _ = seed(client, settings)
+    with Store(settings.database) as store:
+        store.create(legacy, 'scene', 'Imported rain', 'A retained source memory.')
+        before = store.read(legacy)
+    with narrative_transaction(settings.database) as rolls:
+        rows = material_rows(endpoints(settings, rolls).materialize({
+            'linked_event_ids': [event], 'linked_scene_ids': [legacy]}))
+    body = {'theme': 'Remembering rain', 'title': 'Rain', 'request_id': str(uuid4()),
+            'sources': [dict(row, receipt=source_receipt(row)) for row in rows]}
+    response = client.post('/api/narrative-rolls/create-line', json=body)
+    assert response.status_code == 200, response.text
+    key = response.json()['narrative_id']
+    assert client.post('/api/narrative-rolls/create-line', json=body).json()['status'] == 'idempotent'
+    line = client.get('/api/narrative-rolls', params={'narrative_id': key}).json()
+    assert line['linked_scene_ids'] == [legacy]
+    preview = client.post('/api/narrative-rolls/preview-input', json={
+        'narrative_id': key, 'mode': 'edit', 'expected_revision': line['revision']})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()['materials']['scenes'][0]['scene_id'] == legacy
+    with Store(settings.database) as store:
+        assert store.read(legacy) == before
+
+
 def test_discover_mixed_sources_excludes_locked_and_does_not_write(live, monkeypatch):
     settings, client = live
     event, scene = seed(client, settings)
