@@ -41,7 +41,8 @@ def routes(settings, auth):
             reviewed=store.conn.execute('SELECT * FROM host_deliveries WHERE id IN ('+','.join('?' for _ in ids)+') ORDER BY id DESC',ids).fetchall() if ids else []
         def serialize(row):
             payload=json.loads(row['payload'])
-            return {'id':row['id'],**payload,'gateway_memory_injected_ids':payload['delivered_ids'],
+            return {'id':row['id'],**payload,'reported_by':payload.get('reported_by','host'),
+                'gateway_memory_injected_ids':payload['delivered_ids'],
                 'hook_memory_outcome':'injected' if payload['delivered_ids'] else 'no_match',
                 'gateway_memory_trigger':'host_acknowledgement','session_id':payload['window_id']}
         items=[serialize(row) for row in rows[:limit]]

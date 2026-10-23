@@ -127,3 +127,102 @@ def test_narrative_material_ids_still_reject_malformed_scene_ids(invalid):
     with pytest.raises(ValueError, match='invalid_scene_id'):
         normalize_material_ids({'event_ids': [], 'scene_ids': [invalid],
             'diary_ids': [1], 'darkroom_ids': [], 'upload_ids': []})
+
+
+def preview_with_materials(client, mode, material_ids=None):
+    current = client.get('/api/narrative-rolls?narrative_id=narrative_test').json()
+    return client.post('/api/narrative-rolls/preview-input', json={
+        'narrative_id': 'narrative_test', 'mode': mode,
+        'expected_revision': current['revision'],
+        'expected_document_sha256': current['document_sha256'],
+        'proposed_material_ids': material_ids,
+    })
+
+
+def save_preview(client, preview, body):
+    return client.post('/api/narrative-rolls/save-body', json={
+        'narrative_id': 'narrative_test', 'body': body,
+        'expected_revision': preview['base_revision'],
+        'expected_document_sha256': preview['base_document_sha256'],
+        'proposed_material_ids': preview['proposed_material_ids'],
+        'expected_material_snapshot_sha256': preview['material_snapshot_sha256'],
+        'preview_fingerprint': narrative_preview_fingerprint(
+            narrative_id='narrative_test', revision=preview['base_revision'],
+            document_sha256=preview['base_document_sha256'], body=body,
+            material_snapshot_sha256_value=preview['material_snapshot_sha256']),
+    })
+
+
+@pytest.mark.parametrize('remove_original', [False, True])
+def test_saved_materials_remain_pending_until_body_changes(live, remove_original):
+    settings, client = live
+    original, scene = seed(client, settings)
+    added = [row['item_id'] for row in client.post('/api/fact-events/batch', json={
+        'items': [item('后来又听见雨声', 'test:later'), item('雨停以后散步', 'test:walk')],
+    }).json()['items']]
+    ids = {'event_ids': ([] if remove_original else [original]) + added,
+           'scene_ids': [scene], 'diary_ids': [], 'darkroom_ids': [], 'upload_ids': []}
+    edit = preview_with_materials(client, 'edit', ids)
+    assert edit.status_code == 200, edit.text
+    saved = save_preview(client, edit.json(), '记下雨声。')
+    assert saved.status_code == 200, saved.text
+    assert saved.json()['revision'] == 2
+
+    # Reloading or re-previewing saved membership must not consume pending sources.
+    for _ in range(2):
+        update = preview_with_materials(client, 'update')
+        assert update.status_code == 200, update.text
+        preview = update.json()
+        assert [source['event_id'] for source in preview['materials']['events']] == added
+        assert preview['material_counts']['scenes'] == 0
+        assert not any(preview['material_delta']['added'].values())
+        assert preview['base_revision'] == 2
+
+    saved = save_preview(client, preview, '我记下雨声，也写下后来雨停时的散步。')
+    assert saved.status_code == 200, saved.text
+    assert saved.json()['revision'] == 3
+    update = preview_with_materials(client, 'update')
+    assert update.status_code == 409, update.text
+    assert update.json()['reason'] == 'no_new_materials'
+    with Store(settings.database, read_only=True) as store:
+        assert '后来雨停时的散步' not in store.read('narrative_test', revision=2)['body_md']
+
+
+def test_scout_saved_events_and_diaries_are_pending_without_membership_edits(live):
+    settings, client = live
+    seed(client, settings)
+    added = client.post('/api/fact-events/batch', json={
+        'items': [item('雨停以后散步', 'test:walk')],
+    }).json()['items'][0]['item_id']
+    diary = client.post('/diaries', json={
+        'content': '今天把散步写进日记', 'title': '雨后', 'author': 'ai',
+    }).json()['id']
+    with narrative_transaction(settings.database, write=True) as rolls:
+        saved = rolls.append_materials_without_body('narrative_test', {
+            'event_ids': [added], 'diary_ids': [diary],
+        })
+        assert saved['body_unchanged'] is True
+    update = preview_with_materials(client, 'update')
+    assert update.status_code == 200, update.text
+    preview = update.json()
+    assert preview['material_counts'] == {
+        'events': 1, 'scenes': 0, 'diaries': 1, 'darkrooms': 0, 'uploads': 0,
+    }
+    assert preview['materials']['events'][0]['event_id'] == added
+    assert preview['materials']['diaries'][0]['diary_id'] == diary
+    assert not any(preview['material_delta']['added'].values())
+
+
+def test_update_still_requires_rewrite_for_new_material_removals(live):
+    settings, client = live
+    _, scene = seed(client, settings)
+    added = client.post('/api/fact-events/batch', json={
+        'items': [item('雨停以后散步', 'test:walk')],
+    }).json()['items'][0]['item_id']
+    update = preview_with_materials(client, 'update', {
+        'event_ids': [added], 'scene_ids': [scene],
+        'diary_ids': [], 'darkroom_ids': [], 'upload_ids': [],
+    })
+    assert update.status_code == 409, update.text
+    assert update.json()['reason'] == 'update_requires_rewrite_after_material_removal'
+    assert client.get('/api/narrative-rolls?narrative_id=narrative_test').json()['revision'] == 1

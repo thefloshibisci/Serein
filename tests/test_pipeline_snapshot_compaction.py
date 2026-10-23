@@ -2,14 +2,145 @@ import asyncio
 import copy
 import json
 
-from test_public_features import settings, output_for, synthetic_runner
+import pytest
+
+from test_public_features import settings, ingest, output_for, synthetic_runner
 from serein.compat.raw_archive import raw_archive
-from serein.core.store import Store, encode
-from serein.extensions import pipeline as p
-from serein.extensions.pipeline_images import hydrate_request_images
+from serein.core.store import Store, digest, encode
+from serein.extensions import pipeline as p, pipeline_recovery as recovery
+from serein.extensions.pipeline_images import compact_batch_snapshot, hydrate_request_images
 
 
 PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ'
+
+REPLAY_KEYS = ('tracks', 'recent', 'next_track_ordinal', 'input_policy')
+
+
+def legacy_compact(data):
+    return {key:value for key,value in compact_batch_snapshot(data).items() if key not in REPLAY_KEYS}
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_completed_batch_with_prior_state_remains_replayable(settings, legacy):
+    ingest(settings)
+    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))['events']==1
+    ingest(settings,2)
+    result=asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
+    assert result['events']==1
+    with Store(settings.database) as store:
+        batch=dict(store.conn.execute('SELECT * FROM pipeline_batches WHERE id=?',(result['batch_id'],)).fetchone())
+        data=json.loads(batch['input_json'])
+        if legacy:
+            data=legacy_compact(data)
+            batch['input_json']=encode(data)
+            store.conn.execute('UPDATE pipeline_batches SET input_json=? WHERE id=?',(batch['input_json'],batch['id']))
+        jobs=[tuple(row) for row in store.conn.execute('SELECT * FROM pipeline_jobs ORDER BY rowid')]
+    frames=recovery._frames(settings.database,batch)
+    assert frames[0]['assignments']==data['routing_result']['assignments']
+    assert frames[0]['tracks']==data['routing_result']['tracks']
+    assert frames[0]['next_track_ordinal']==data['routing_result']['next_track_ordinal']
+    recovered=p.cached_route_result(settings.database,data)
+    assert recovered['assignments']==frames[0]['assignments']
+    with Store(settings.database,read_only=True) as store:
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM pipeline_jobs ORDER BY rowid')]==jobs
+        assert store.conn.execute('SELECT input_json FROM pipeline_batches WHERE id=?',(batch['id'],)).fetchone()[0]==batch['input_json']
+
+
+def test_compaction_retains_complete_replay_seed_and_policy():
+    data={'tracks':[{'track_id':'earlier'}],'recent':[{'id':1}],
+          'next_track_ordinal':7,'input_policy':{'track_candidates_enabled':True},
+          'components':[{'large':'completed material'}],'messages':[{'id':2}]}
+    compact=compact_batch_snapshot(data)
+    assert {key:compact[key] for key in REPLAY_KEYS}=={key:data[key] for key in REPLAY_KEYS}
+    assert 'components' not in compact and 'messages' not in compact
+
+
+def completed_history(settings,monkeypatch,legacy):
+    from test_pipeline_route_history import freeze, history
+    from serein.extensions import pipeline_track_candidates as candidates
+    ingest(settings)
+    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))['events']==1
+    for number in (2,3,4):ingest(settings,number)
+    consumer,data=freeze(settings)
+    with Store(settings.database,read_only=True) as store:
+        data['routing_messages']=[p.task_message(row) for row in store.conn.execute('SELECT * FROM raw_events WHERE id>2 ORDER BY id')]
+    extra=copy.deepcopy(data['tracks'][0]);extra['track_id']='session_'+data['scope']+'_track_0009'
+    data['tracks'].append(extra);data['next_track_ordinal']=10
+    data['input_policy']['track_candidates_enabled']=True
+    def alternating(cards,messages,recent,policy):
+        if not policy.get('track_candidates_enabled'):return list(cards)
+        return [cards[1 if messages[0]['id']==5 else 0]]
+    monkeypatch.setattr(candidates,'select',alternating)
+    routed=history(settings,data)
+    with Store(settings.database) as store:
+        batch=dict(store.conn.execute("SELECT * FROM pipeline_batches WHERE id='route:synthetic'").fetchone())
+        compact=(legacy_compact if legacy else compact_batch_snapshot)(json.loads(batch['input_json']))
+        batch.update(input_json=encode(compact),status='done')
+        store.conn.execute("UPDATE pipeline_batches SET input_json=?,status='done',result_json=? WHERE id=?",
+                           (batch['input_json'],encode({'task_snapshot_compacted':True}),batch['id']))
+    return consumer,batch,routed
+
+
+@pytest.mark.parametrize('legacy',[False,True])
+def test_completed_multiframe_candidates_reuse_routes_without_scope_hold(settings,monkeypatch,legacy):
+    consumer,batch,routed=completed_history(settings,monkeypatch,legacy)
+    frames=recovery._frames(settings.database,batch)
+    assert [frame['messages'][0]['id'] for frame in frames]==[3,5,7]
+    assert [a for frame in frames for a in frame['assignments']]==routed['assignments']
+    assert frames[-1]['tracks'][0]==routed['tracks'][0]
+    calls=[]
+    async def runner(role,request):
+        calls.append(role)
+        assert role!='track_router'
+        return output_for(role,request)
+    result=asyncio.run(p.advance(settings.database,include_recent=True,runner=runner))
+    assert result['status']=='processed' and result['batch_id']==consumer['id']
+    assert result['processed_originals']==2 and p.scope_holds(settings.database)==[]
+    assert calls and set(calls)=={'event_curator','event_writer'}
+
+
+@pytest.mark.parametrize('upgraded',[False,True])
+@pytest.mark.parametrize('damage',['card','ordinal','recent','hash','source','future_card','missing_proof'])
+def test_compacted_replay_still_rejects_damaged_frames(settings,monkeypatch,damage,upgraded):
+    _,batch,_=completed_history(settings,monkeypatch,not upgraded)
+    if upgraded:
+        data=json.loads(batch['input_json']);data['runtime_revision']='synthetic-before-upgrade'
+        batch['input_json']=encode(data)
+    with Store(settings.database) as store:
+        jobs=store.conn.execute("SELECT * FROM pipeline_jobs WHERE batch_id=? ORDER BY rowid",(batch['id'],)).fetchall()
+        job=jobs[1 if damage=='future_card' else 2]
+        request=json.loads(job['request_json'])
+        proof=request['routing_frame']
+        if damage=='card':
+            request['active_tracks'][0]['throughline']='wrong predecessor'
+            proof['pre_tracks_sha256']=digest(encode(request['active_tracks']))
+        elif damage=='ordinal':
+            request['next_track_ordinal']+=1;proof['next_track_ordinal']=request['next_track_ordinal']
+        elif damage=='recent':
+            request['recent_context']=[];proof['recent_context_sha256']=digest(encode([]))
+        elif damage=='hash':proof['messages_sha256']='wrong hash'
+        elif damage=='source':
+            store.conn.execute("UPDATE raw_events SET event_hash='changed' WHERE id=?",(request['messages'][0]['id'],))
+        elif damage=='future_card':
+            request['active_tracks'][0]['recent_source_message_ids']=[4]
+            proof['pre_tracks_sha256']=digest(encode(request['active_tracks']))
+        else:request.pop('routing_frame')
+        store.conn.execute('UPDATE pipeline_jobs SET request_json=? WHERE id=?',(encode(request),job['id']))
+    with pytest.raises(p.RoutingRecoveryError):recovery._frames(settings.database,batch)
+
+
+@pytest.mark.parametrize('revision',[*sorted(recovery.COMPACTED_ROUTER_REVISIONS),'unsupported'])
+def test_legacy_compacted_runtime_compatibility_is_limited_to_known_completed_producers(settings,monkeypatch,revision):
+    _,batch,_=completed_history(settings,monkeypatch,True)
+    data=json.loads(batch['input_json']);data['runtime_revision']=revision;batch['input_json']=encode(data)
+    if revision=='unsupported':
+        with pytest.raises(p.RoutingRecoveryError,match='incompatible frozen contract'):
+            recovery._frames(settings.database,batch)
+    else:
+        assert len(recovery._frames(settings.database,batch))==3
+        batch['status']='routing_only'
+        with pytest.raises(p.RoutingRecoveryError,match='incompatible frozen contract'):
+            recovery._frames(settings.database,batch)
 
 
 def image_rows():

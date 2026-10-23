@@ -24,9 +24,9 @@ def add_tools(server,settings):
         """Read diaries by ID or date, respecting locked/deleted entries."""
         return diaries.read(diary_id=diary_id,date=date,limit=limit)
 
-    def write_diary(content:str,date:str='',title:str='',author:str='ai',unlock_at:str=''):
-        """Write an authored diary or sealed diary; retains the shared notebook author."""
-        return diaries.create(content=content,date=date,title=title,author=author,unlock_at=unlock_at)
+    def write_diary(content:str,date:str='',title:str='',unlock_at:str=''):
+        """Write an AI-authored diary or sealed diary in the shared notebook."""
+        return diaries.create(content=content,date=date,title=title,author='ai',unlock_at=unlock_at)
 
     def revise_diary(diary_id:int,content:str,title:str|None=None,date:str|None=None):
         """Revise an existing readable diary; retain authorship and previous versions."""

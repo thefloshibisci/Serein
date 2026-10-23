@@ -32,7 +32,7 @@ export function ResumeMemoryPicker({ids,disabled,onChange}) {
     <button className="resume-picker-trigger" type="button" disabled={disabled} onClick={begin}>选择内容 · {ids.length} 条</button>
     {createPortal(<dialog ref={dialog} className="resume-picker" aria-labelledby="resume-picker-title" onCancel={()=>setOpen(false)}>
       <header><div><span>RESUME</span><h3 id="resume-picker-title">自选事件 / Scene</h3></div><button type="button" aria-label="关闭选择器" onClick={close}><X size={22}/></button></header>
-      <p>选好要带进新窗口的内容，确认后保存功能设置。</p>
+      <p>确认后会更新预览；在换窗页保存选择，用于下次续接。</p>
       <div className="resume-picker-tabs" role="tablist" aria-label="续接内容类型">
         {[['event','事件'],['scene','Scene'],['selected','已选内容']].map(([key,label])=><button type="button" role="tab" key={key} aria-selected={key==='selected'?selectedOnly:!selectedOnly&&kind===key}
           onClick={()=>{setSelectedOnly(key==='selected');if(key!=='selected')setKind(key);setOffset(0);}}>{label}</button>)}

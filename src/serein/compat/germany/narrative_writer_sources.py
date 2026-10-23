@@ -45,8 +45,10 @@ def conversation_source_messages(source_refs: list[dict[str, Any]]) -> dict[str,
     return {"status": "ok", "messages": messages}
 
 
-def writer_material_ids(mode: str, current: dict, proposed: dict) -> dict[str, Any]:
-    """Select all bound sources for rewrite, or only additions for update."""
+def writer_material_ids(
+    mode: str, current: dict, proposed: dict, *, body_material_ids: dict | None = None,
+) -> dict[str, Any]:
+    """Select all sources for rewrite, or sources added since this body was written."""
     delta = material_delta(current, proposed)
     if mode != "update":
         return {"status": "ok", "scope": "all_bound", "material_ids": proposed, "delta": delta}
@@ -58,7 +60,10 @@ def writer_material_ids(mode: str, current: dict, proposed: dict) -> dict[str, A
             "message": "这次删减了旧材料，请使用重写，让正文按新的完整材料重新落定。",
             "delta": delta,
         }
-    if not any(delta["added"].get(key) for key in MATERIAL_ID_KEYS):
+    additions = material_delta(
+        current if body_material_ids is None else body_material_ids, proposed,
+    )["added"]
+    if not any(additions.get(key) for key in MATERIAL_ID_KEYS):
         return {
             "status": "invalid",
             "reason": "no_new_materials",
@@ -68,6 +73,6 @@ def writer_material_ids(mode: str, current: dict, proposed: dict) -> dict[str, A
     return {
         "status": "ok",
         "scope": "newly_added",
-        "material_ids": delta["added"],
+        "material_ids": additions,
         "delta": delta,
     }

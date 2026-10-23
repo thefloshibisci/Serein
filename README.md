@@ -1,12 +1,16 @@
 # Serein
 
-<a href="https://github.com/DasterProkio/awesome-ai-companion/blob/main/README.zh-CN.md">
-  <img src="https://raw.githubusercontent.com/DasterProkio/awesome-ai-companion/main/assets/featured-in-awesome-ai-companion-zh-CN.png" alt="已收录于人机恋开源项目大全" height="24">
+<a href="https://github.com/DasterProkio/awesome-ai-companion">
+  <img src="https://raw.githubusercontent.com/DasterProkio/awesome-ai-companion/main/assets/featured-in-awesome-ai-companion.png" alt="Featured in Awesome AI Companion" height="24">
 </a>
 
 让聊天里值得留下的东西，有地方保存，也有机会在下一次被想起。
 
 Serein 是一个可自行部署、面向个人使用的 AI 记忆服务。它提供网页、聊天 API 网关和 MCP 工具，让不同聊天窗口读写同一份记忆。公开版从空库开始，不附带私人记忆或模型密钥。
+
+历史导入默认每批最多 25 条，也可在文件预览下主动开启“大批量导入”（最多 250 条一批）。历史聊天默认只归档，按需再做摘要；聊天条数不等于需要生成向量的 Event／Scene 数量。[导入说明](docs/file-imports.md)和[规模与本机测量](docs/import-performance.md)列出了处理方式、耗时及适用范围；现有测量不构成任意长度的超大记忆库性能保证。
+
+向量每批条数、请求并发和后台积压追赶可在“配置 → 索引处理速度”按需调整，默认仍串行；Event Writer 的首轮并发在“自动摘要配置”调整。
 
 [功能](#功能) · [记忆怎么存](#记忆怎么存) · [Scene 与 Event](#scene-与-event) · [怎么召回](#怎么召回) · [Hook 接入](#hook-接入已有聊天宿主) · [召回格式](#召回的是什么格式) · [日记与暗房](#日记与暗房) · [Arc／叙事卷](#arc与叙事卷) · [自动摘要](#自动摘要) · [换窗](#换窗窗影与-resume) · [可选功能](#其他可选功能) · [论文](#设计与论文) · [雨夜花园](#雨夜花园) · [安装](#一键脚本与开始使用)
 
@@ -18,7 +22,7 @@ Serein 是一个可自行部署、面向个人使用的 AI 记忆服务。它提
 | 在之后的聊天里想起来 | Scene、Event 混合召回，也可以用工具主动查找、按 ID 读取 |
 | 把长期经历连起来 | 按主题收集材料，建立 Arc，逐步写成叙事卷 |
 | 管理自己的资料 | 网页阅读、编辑、收藏、归档；导入旧库、导出正文和下载数据库备份 |
-| 接着上一窗聊 | 用 `/resume` 带入选定的窗影、记忆等接续资料 |
+| 接着上一窗聊 | 在“换窗”页选择资料，用 `/resume` 或只读 MCP 工具接起 |
 | 留下别的东西 | 日记与暗房、心绪、备忘、梦境，以及雨夜花园 |
 
 可选功能按需开启；模型在“设置 → 模型”中添加，再到“配置”页选择各功能使用的模型。使用说明位于侧栏的 **圆圈问号**。
@@ -57,7 +61,9 @@ Serein 只能读到已进入实例的资料。聊天客户端接上 MCP，并不
 
 在“设置 → 配置”为“Event · Arc 归档”选择模型后，以后由 Event Writer 落库的正式 Event 会先用标题和正文在已有 Arc 的标题、别名和检索词中找候选，再由 Arc Linker 判断是否属于其中一条。最多自动归入一条已有叙事卷；不创建新 Arc，不读聊天原话或叙事正文，也不依赖另一个模型抽取的实体。留空就不开启。
 
-开启设置 → 功能中的“Event 升为 Scene”（默认关闭）后，主窗口可以先用 `read_memory(..., with_evidence=True)` 读正文与原话，自己编辑标题和正文，再调用 `promote_event_to_scene` 保存为新的 Scene。工具沿用 Event 绑定的原话，记录来源 Event 的 ID 和版本；Event 原件保持可读，但不再自动浮现或作为叙事卷修订箱的材料，避免同一段经历重复出现。这一步由主窗口主动决定，不是自动摘要的固定后续。
+开启设置 → 功能中的“Event 升为 Scene”（默认关闭）后，主窗口可以先用 `read_memory(..., with_evidence=True)` 读正文与原话，自己编辑标题和正文，再调用 `promote_event_to_scene` 保存为新的 Scene。工具沿用 Event 绑定的原话，记录来源 Event 的 ID 和版本；Event 原件保持可读，但不再自动浮现或作为叙事卷修订箱的材料，避免同一段经历重复出现。这一步由主窗口主动决定，不是自动摘要的固定后续。晋升时可同时提交 `cues`（1–8 条、每条不超过 80 字），省去再编辑一次 Scene。
+
+「沉淀」自动展示有效、尚未晋升的 Event，无需从 Event 详情手动加入。人只选“选入”或“跳过”，支持批量选择；正文和原话可读，不需要手写或补绑定。主窗口用 `list_event_mailbox` 看已选入的候选、`read_event_mailbox` 读全文和原话，再通过现有 `promote_event_to_scene(candidate_id, title, body, cues)` 一次提交重写正文和召回入口。成功后显示已写成 Scene，失败保留已选状态。沉淀不删除 Event、不自动唤醒 AI，与收藏、换窗选材、Scene 草稿审核独立。[接口与并发约定](docs/event-mailbox.md)。
 
 打标时，Event 和 Scene 会在同一次模型请求里获得主域建议与实体候选。后台每十五秒检查一次变化队列，但只处理新建、修改或来源绑定变化的记忆，空队列不扫全库也不调模型。实体只收明确命名的人、地点、作品、项目等；每个名字都要能在当前记忆的绑定原话或正文中逐字核对出处，没有可靠实体时允许为空。实体用于寻找候选记忆，不会自动建立记忆关系，也不凭名字直接注入上下文。旧库迁移只给活动 Scene 重新打标；归档记忆和日记不走这一步。细节见 [实体提取规则](docs/entity-tagging.md)。
 
@@ -83,7 +89,7 @@ Serein 只能读到已进入实例的资料。聊天客户端接上 MCP，并不
 
 如果聊天已经由你自己的服务或 Agent 驱动，可以让宿主在**新的用户轮**调用 `POST /api/hook/recall`，把返回的 `additional_context` 放进实际发送给模型的消息。它返回 `recalled_ids`，但同时标记 `injected: false`：查到材料不等于已经交给模型。工具续轮沿用本轮上下文，不重复查找。
 
-一键安装的实例地址可直接用 Gateway Key（`Authorization: Bearer <Gateway Key>`）访问这个 Hook 接口。模型请求完整成功后，宿主再调用 `POST /v1/host/deliveries` 登记**实际交付**的 ID；失败、中断或仅准备了材料都不登记。宿主为每个会话保留稳定的窗口 ID，并传最近成功交付的 ID 做冷却，避免同一张卡连轮重复出现。Hook 不负责调用聊天模型，也不会自动归档宿主的对话。
+一键安装的实例地址可直接用 Gateway Key（`Authorization: Bearer <Gateway Key>`）访问这个 Hook 接口。主示例由宿主持久保存**实际交付**记录，并传同一窗口最近五次成功交付的 ID 做冷却；这条接法不读写 Serein 的 `/v1/host/deliveries`。也可单独选择服务端历史方式，完整成功后再调用该接口登记，两种方式不要同时用于同一轮。失败、中断或仅准备了材料都不登记。每个会话保持稳定的窗口 ID。Hook 不负责调用聊天模型，也不会自动归档宿主的对话。
 
 可直接参考 [Python Hook 宿主示例](examples/hook_host.py) 和 [接入步骤、请求格式](docs/hook-integration.md)。只连接 MCP 的客户端仍需主动调用工具；需要 Serein 自动完成模型调用与注入时，使用上面的聊天网关。
 
@@ -159,6 +165,8 @@ Event 使用同样的文本块结构，`ref` 以 `event:` 开头。没有明确�
 2. **延迟判断（Curator）。** 对照原话和已有 Event，决定新建、续接、合并、跳过或暂缓，并冻结来源。图片先逐张转录为材料；Curator 和 Writer 读取转录，Writer 不接收原图。
 3. **依据原文写作（Writer）。** 在已经确定的来源范围内组织正文；续接时同时读取前版和绑定原话，保留重要经过及后来的变化。程序检查后直接保存到 Serein。
 
+依据维护者早期多轮测试，DeepSeek 在 Writer 阶段的正文质量与遵循约束的表现未达到项目预期，因此**不建议用于 Writer**。这条建议只针对该阶段和早期测试结果，不代表所有型号及后续版本的表现；模型仍可自行配置。
+
 如果另行为“Event · Arc 归档”选了模型，流程就多一个落库后的可选结果：`Event Writer → 正式 Event → 自动归入已有叙事卷`。程序先用 Event 标题和正文找 Arc 关键词，再让 Arc Linker 在有界候选中判断相关性；它不等待或使用实体打标。
 
 现在采用这三个模型阶段，不再另设“证据整理”调用；原话编号、来源绑定、图片转录和续接关系仍然保留。共同展开的讨论、玩笑或体验可以形成 Event，单纯的状态汇报与附随提醒可以跳过。自动 Event 只按绑定原话判断，不以已有 Scene 代替本轮事实或省略经历。
@@ -181,7 +189,7 @@ Track 不设按时间删除的期限。归线默认回看最近三天内实际�
 
 窗影由当前聊天主模型在换窗前明确写下，分成“我眼中的你”“我眼中的自己”和“这一窗发生的事”。醒来页的两张画像只读展示最新窗影的前两节，长文可展开，不需要手动编辑。它保存这一窗的视角，不生成 Scene，也不进入普通向量召回；关闭窗影功能会停用写入工具，但不会删除已有内容。
 
-开窗续接是另一项独立开关。可以选择最新窗影、最近 10 条 Event、收藏的 Scene、自选 Event／Scene，以及最近或尚未整理的原话；新窗口使用独立的 `X-Serein-Window-ID`，再在经过 Serein 网关的聊天中发送 `/resume`。只有勾选的材料会在这次明确触发后进入上下文，不会整库注入，也不会额外运行一次语义召回。`/resume` 是聊天指令，不是 MCP 工具。
+开窗续接是另一项独立开关，默认关闭。在侧栏“换窗”页选择最新窗影、最近 10 条 Event、收藏的 Scene、自选 Event／Scene，以及最近或尚未整理的原话。两个续接入口在功能设置独立开关，可同时开启：默认在经过 Serein 网关的聊天中发送 `/resume`；开启 MCP 入口后，客户端也可调用只读 `resume` 工具。已通过指令加载本轮资料时，无须再次调用工具。新窗口使用独立的 `X-Serein-Window-ID`。换窗页可分页预览，读完全部资料后复制；资料仍来自当前实例。只有勾选的材料在明确触发后进入上下文，不会额外运行语义召回。
 
 如果聊天界面、后端和换窗动作都由自己管理，还可以读取同一份结构化续接资料，通过 Codex App Server 新建 thread 并预装所选内容。这个示例不会让 Serein 网页直接控制 Codex，也不改写 Codex 会话文件；见 [Codex 换窗包接入说明](docs/codex-continuity-packet.md) 与 [示例目录](examples/codex-continuity-packet/README.md)。
 
@@ -233,6 +241,10 @@ Track 不设按时间删除的期限。归线默认回看最近三天内实际�
 
 ## 一键脚本与开始使用
 
+第一次安装看 [部署指南与常用命令](docs/deployment-guide.md)，遇到错误按 [排错指南](docs/troubleshooting.md)检查。只想快速操作：进入安装目录运行 `se`，菜单 1 安装／更新，菜单 4 查看服务与日志，菜单 12 只读排查。
+
+Zeabur 用户见 [手动部署参考](docs/deploy-zeabur.md)；按当前两服务结构整理，尚未在 Zeabur 实测。
+
 升级兼容：只配置 Scene Linker 的旧安装继续使用已准备的语义路由，无须手工补 Live Policy 发布文件；已有正式发布策略优先生效。更新后及菜单 4「查看状态」会本地校验路由、向量配置与 domain 策略，不调用模型。详见[升级后的检索校验](docs/interactive-install.md#升级后的检索校验)。
 
 先下载并解压发行目录，再在该目录运行：
@@ -281,7 +293,7 @@ bash scripts/one_click.sh
 
 OAuth 按规范只在 HTTPS 域名（或本机 localhost）上授权；直接使用公网 IP 的 HTTP 入口时，使用支持自定义请求头的静态 Key 方式。MCP OAuth 会自动发现授权端点，使用 PKCE；Gateway Key 只输入 Serein 自己的授权页，不放进服务器 URL、回调 URL或客户端名称。静态 MCP 与聊天 API 继续共用 Gateway Key，可从安装输出、`deploy/connection-guide.txt` 或 `deploy/secrets/api-token` 读取。主菜单 6 更换 Key 后，旧静态 Key 和已发放的 OAuth code/token 都会失效。模型厂商的 API Key 仅填在 **设置 → 模型**。
 
-新窗口需要独立的 `X-Serein-Window-ID`；未填写时使用默认会话，共用召回冷却。开启开窗续接后，可自选带入最近 1–50 条原话；“最近原话”和“尚未整理的原话”互斥，打开一个会关闭另一个。在经过网关的聊天中发送 `/resume`，也可以在指令后接上想聊的话。[模型与客户端配置](docs/model-settings.md)
+新窗口需要独立的 `X-Serein-Window-ID`；未填写时使用默认会话，共用召回冷却。开启开窗续接后，可自选带入最近 1–50 条原话；“最近原话”和“尚未整理的原话”互斥，打开一个会关闭另一个。命令方式在经过网关的聊天中发送 `/resume`，也可以在指令后接上想聊的话；MCP 方式调用 `resume` 并读完全部分页。两个入口可独立开启或同时开启，侧栏“换窗”可预览资料。[模型与客户端配置](docs/model-settings.md)
 
 ### 导入、备份与升级
 
@@ -310,9 +322,9 @@ OAuth 按规范只在 HTTPS 域名（或本机 localhost）上授权；直接使
 | 查找叙事卷 | `find_arc` | 基础读取；按标题或关键词找卷，返回标题与 ID |
 | 读取卷内材料 | `read_arc_materials` | 基础读取；含上传材料，支持目录编号选择与分页 |
 | 保存与管理记忆 | `write_scene`、`edit_scene`、`set_scene_status`、`set_memory_state`、`annotate` | 可写实例；分别新建 Scene、局部修改 Scene、管理状态与自动浮现资格；收藏修改另需开启收藏工具。自动 Event 正文由摘要流水线维护 |
-| 记忆候选 | `propose_memory`、`list_candidates`、`review_memory` | 可写实例；提出、接受 Scene 候选，未接受的候选不作为正式记忆召回；历史 Event / Narrative 候选可查看或忽略，不在此接受 |
+| 记忆候选 | `propose_memory`、`list_candidates`、`review_memory` | 可写实例且开启「记忆候选工具」（默认关闭）；提出、接受 Scene 候选，未接受的候选不作为正式记忆召回；历史 Event / Narrative 候选可查看或忽略，不在此接受 |
 | 日记与暗房 | `read_diary`、`write_diary`、`revise_diary`、`comment_diary`、`delete_diary` | 可写实例；写条目、评论和软删除，保留作者与暗房解锁约束 |
-| 自动摘要 Agent | `pipeline_next`、`pipeline_submit` | 暴露给自动摘要专用 Agent 的 MCP 任务协议，不是主聊天模型的日常工具，也可由 `mcp_tools` 白名单隐藏；仅限可写实例，负责领取冻结任务、提交结果，具体执行方式见 [扩展说明](docs/extensions.md) |
+| 自动摘要 Agent | `pipeline_next`、`pipeline_submit`、`pipeline_rebuild` | 可写实例且开启「自动摘要 Agent 工具」（默认关闭）；领取冻结任务、提交结果或修复计划，与自动摘要启停独立；`mcp_tools` 白名单继续生效，具体执行方式见 [扩展说明](docs/extensions.md) |
 
 `write_scene` 按自用版方式调用，只必填 `content` 和 `cues`（1–8 条，每条最多 80 字符）；`title`、`date`、`domain` 可选，默认不绑定证据。ID 和内部操作编号自动生成。`edit_scene` 传 `scene_id`、读回的 `expected_updated_at` 和要改的 title/content/cues。日记恢复独立的 `read_diary`、`write_diary`、`revise_diary`、`comment_diary`、`delete_diary`，批注使用 `annotate`。新工具不需要模型管理 operation_id 或数字版本号；响应丢失时先读回确认，避免重复新建。完整 rc65 旧参数仍保留内部兼容。升级后刷新工具列表。叙事卷和 Event 各自的写入边界不变。
 
@@ -326,10 +338,16 @@ OAuth 按规范只在 HTTPS 域名（或本机 localhost）上授权；直接使
 | 将 Event 写成 Scene | `promote_event_to_scene` | 可写实例且开启“Event 升为 Scene”；主窗口编辑后提交，保留 Event 原件并停止其自动浮现和修订箱候选 |
 | 读取收藏 | `read_favorites` | 开启“收藏工具”；分页读收藏的 Event / Scene，可附原文证据 |
 | 照顾备忘 | `memo_create`、`memo_list`、`memo_update` | 可写实例且开启备忘；创建、查询、修改安排或标完成，独立于 Scene / Event |
-| 写窗影 | `window_shadow_write` | 可写实例且开启窗影；保存供之后续接的窗口记录 |
+| 读写窗影 | `window_shadow_read`、`window_shadow_write` | 开启窗影后按倒数序号读取；`index="1,3,5"` 一次读多篇，写入需可写实例 |
+| 读梦境 | `dream_read` | 开启梦境读取；默认最新一篇，可用 `index="1,3,5"` 读多篇，不消耗晨间注入 |
+| 读取续接资料 | `resume` | 开启开窗续接及 MCP 入口；只读，按游标读完全部资料；可与网关 `/resume` 同时开启 |
 | 主模型读写叙事卷 | `narrative_volume` | 可写实例且开启对应功能；查卷、读材料、预览、确认保存，不另调用 Writer 模型 |
 
-**`/resume` 是经过聊天网关的指令，不是 MCP 工具。** 参数、证据与分页规则见 [功能与工具约定](docs/public-feature-contracts.md)。
+**`/resume` 是经过聊天网关的指令，`resume` 是 MCP 方式下的只读工具；两者互斥。** 参数、证据与分页规则见 [功能与工具约定](docs/public-feature-contracts.md)。
+
+## 问题反馈
+
+提交问题或功能建议前，请阅读[提交说明](CONTRIBUTING.md)，再到 [Issues](https://github.com/Yinglianchun/Serein/issues/new/choose) 选择表单。问题报告请写清环境、复现步骤和实测结果，提供最小脱敏样例。
 
 ## 更多文档
 

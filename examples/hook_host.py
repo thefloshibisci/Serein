@@ -1,14 +1,18 @@
 """Minimal host-side Hook adapter. This file never calls a chat model by itself.
 
-Use a stable window ID. Pass PreparedTurn.messages to your existing model call,
-then call record_success only after that call succeeds. Tool continuations reuse
+Use a stable window ID. Pass PreparedTurn.messages to your existing model call.
+With LocalDeliveries, pass its recent IDs to prepare and record success locally;
+do not also read or write Serein's delivery history. The server-history mode
+remains available through SereinHook.record_success. Tool continuations reuse
 the prepared messages from the same turn; they do not call prepare again.
 """
 
 from copy import deepcopy
+from contextlib import closing
 from dataclasses import dataclass
 import json
 import os
+import sqlite3
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -20,6 +24,36 @@ class PreparedTurn:
     receipt_id: str
     messages: list[dict]
     delivered_ids: list[str]
+
+
+class LocalDeliveries:
+    """Host-owned persistent receipts; the last five successful turns per window."""
+
+    def __init__(self, path: str):
+        self.path = path
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute('CREATE TABLE IF NOT EXISTS hook_deliveries ('
+                'id INTEGER PRIMARY KEY, receipt_id TEXT UNIQUE NOT NULL, '
+                'window_id TEXT NOT NULL, delivered_ids TEXT NOT NULL)')
+            connection.commit()
+
+    def recent_delivered_ids(self, window_id: str) -> list[str]:
+        with closing(sqlite3.connect(self.path)) as connection:
+            rows = connection.execute('SELECT delivered_ids FROM hook_deliveries '
+                'WHERE window_id=? ORDER BY id DESC LIMIT 5', (window_id,)).fetchall()
+        return list(dict.fromkeys(value for row in rows for value in json.loads(row[0])))
+
+    def record_success(self, turn: PreparedTurn) -> None:
+        """Only after the host received turn.messages and completed successfully."""
+        ids = json.dumps(turn.delivered_ids, ensure_ascii=False, separators=(',', ':'))
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute('INSERT OR IGNORE INTO hook_deliveries '
+                '(receipt_id,window_id,delivered_ids) VALUES (?,?,?)',
+                (turn.receipt_id, turn.window_id, ids))
+            old = connection.execute('SELECT window_id,delivered_ids FROM hook_deliveries '
+                'WHERE receipt_id=?', (turn.receipt_id,)).fetchone()
+            if old != (turn.window_id, ids):
+                raise ValueError('Delivery receipt already records a different acknowledgement')
 
 
 class SereinHook:
@@ -70,7 +104,8 @@ class SereinHook:
             before_id = next_id
         return list(dict.fromkeys(ids))
 
-    def prepare(self, window_id: str, messages: list[dict], *, max_notes: int = 2) -> PreparedTurn:
+    def prepare(self, window_id: str, messages: list[dict], *, max_notes: int = 2,
+                delivered_ids: list[str] | None = None) -> PreparedTurn:
         """Call once for a new text user turn, before your existing model call."""
         if not window_id or not messages or messages[-1].get("role") != "user":
             raise ValueError("Hook needs a stable window ID and a new user message")
@@ -79,9 +114,13 @@ class SereinHook:
             raise ValueError("This minimal example supports text user messages")
         if not 0 <= max_notes <= 5:
             raise ValueError("max_notes must be between 0 and 5")
+        if delivered_ids is not None and (not isinstance(delivered_ids, list)
+                or any(not isinstance(value, str) for value in delivered_ids)):
+            raise ValueError("delivered_ids must contain actually delivered memory IDs")
         result = self._json("POST", "/api/hook/recall", {
             "query": query.strip(), "session_id": window_id,
-            "max_notes": max_notes, "delivered_ids": self.recent_delivered_ids(window_id),
+            "max_notes": max_notes, "delivered_ids": self.recent_delivered_ids(window_id)
+                if delivered_ids is None else list(dict.fromkeys(delivered_ids)),
         })
         if result.get("ok") is not True:
             raise ValueError("Serein Hook recall failed")
@@ -98,7 +137,7 @@ class SereinHook:
         return PreparedTurn(window_id, "hook:" + uuid4().hex, prepared, ids)
 
     def record_success(self, turn: PreparedTurn) -> dict:
-        """Call only when the model actually received turn.messages and succeeded."""
+        """Server-history mode only; do not also use LocalDeliveries for this turn."""
         return self._json("POST", "/v1/host/deliveries", {
             "receipt_id": turn.receipt_id, "window_id": turn.window_id,
             "delivered_ids": turn.delivered_ids,

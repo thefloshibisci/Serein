@@ -47,13 +47,31 @@ def test_nightly_arc_organization_is_opt_in(deployment):
     assert read_settings(settings.database)['features']['narrative_nightly_organize'] is True
 
 
+def test_compact_router_switch_roundtrips_and_survives_other_settings(deployment):
+    settings, client = deployment
+    assert client.get('/v1/settings').json()['pipeline']['router_compact_cards'] is False
+    enabled = client.patch('/v1/settings', json={'pipeline': {'router_compact_cards': True}})
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()['pipeline']['router_compact_cards'] is True
+    assert client.patch('/v1/settings', json={'pipeline': {'track_lookback_days': 5}}).status_code == 200
+    assert read_settings(settings.database)['pipeline']['router_compact_cards'] is True
+    for invalid in ('true', 1):
+        assert client.patch('/v1/settings', json={'pipeline': {'router_compact_cards': invalid}}).status_code in (400, 422)
+    # Like other optional pipeline fields, null is omitted by the PATCH API.
+    unchanged = client.patch('/v1/settings', json={'pipeline': {'router_compact_cards': None}})
+    assert unchanged.status_code == 200 and unchanged.json()['pipeline']['router_compact_cards'] is True
+    disabled = client.patch('/v1/settings', json={'pipeline': {'router_compact_cards': False}})
+    assert disabled.json()['pipeline']['router_compact_cards'] is False
+
+
 def test_passage_settings_are_optional_strict_and_independent(deployment):
     from serein.configured_models import recall_settings
     from serein.deployment import save_settings
     settings,client=deployment
     initial=client.get('/v1/settings').json()
     assert initial['recall']=={'direct_threshold':.65,'body_candidate_threshold':.5,
-                               'cue_candidate_threshold':.55,'passages_enabled':False,'passage_min_chars':500}
+                               'cue_candidate_threshold':.55,'direct_pool_limit':20,'passages_enabled':False,'passage_min_chars':500,
+                               'embedding_batch_size':16,'embedding_concurrency':1,'index_catch_up':False}
     enabled=client.patch('/v1/settings',json={'recall':{'passages_enabled':True,'passage_min_chars':800}})
     assert enabled.status_code==200
     client.patch('/v1/settings',json={'recall':{'direct_threshold':.6}})
@@ -108,7 +126,8 @@ def test_candidate_thresholds_default_persist_and_survive_old_client_updates(dep
     client.patch('/v1/settings',json={'recall':{'direct_threshold':.61}}).raise_for_status()
     current=client.get('/v1/settings').json()['recall']
     assert current=={'direct_threshold':.61,'body_candidate_threshold':.47,
-                     'cue_candidate_threshold':.59,'passages_enabled':False,'passage_min_chars':500}
+                     'cue_candidate_threshold':.59,'direct_pool_limit':20,'passages_enabled':False,'passage_min_chars':500,
+                     'embedding_batch_size':16,'embedding_concurrency':1,'index_catch_up':False}
     assert effective_settings(settings).recall['body_candidate_threshold']==.47
     assert not (settings.database.parent/'model-indexes').exists()
     for field in ('body_candidate_threshold','cue_candidate_threshold'):
@@ -124,6 +143,31 @@ def test_unset_recall_threshold_preserves_toml(deployment):
     assert effective_settings(settings).recall==settings.recall
     client=TestClient(create_app(settings,token='synthetic',live=True),headers={'Authorization':'Bearer synthetic'})
     assert client.get('/v1/settings').json()['recall']['direct_threshold']==.78
+
+
+def test_direct_pool_limit_persists_validates_and_overrides_toml(deployment):
+    from dataclasses import replace
+    from serein.configured_models import effective_settings
+    from serein.deployment import save_settings
+    from serein.recall.policy import RecallPolicy
+    settings,client=deployment
+    assert client.get('/v1/settings').json()['recall']['direct_pool_limit']==20
+    configured=replace(settings,recall={'direct_pool_limit':30})
+    assert RecallPolicy.from_config(effective_settings(configured).recall).direct_pool_limit==30
+    for limit in (6,50,100):
+        saved=client.patch('/v1/settings',json={'recall':{'direct_pool_limit':limit}})
+        assert saved.status_code==200,saved.text
+        assert saved.json()['recall']['direct_pool_limit']==limit
+        assert RecallPolicy.from_config(effective_settings(configured).recall).direct_pool_limit==limit
+    client.patch('/v1/settings',json={'recall':{'direct_threshold':.61}}).raise_for_status()
+    assert client.get('/v1/settings').json()['recall']['direct_pool_limit']==100
+    version=read_settings(settings.database)['settings_version']
+    for value in (0,5,101,20.5,True,'30',None):
+        assert client.patch('/v1/settings',json={'recall':{'direct_pool_limit':value}}).status_code==422
+        with pytest.raises(ValueError,match='direct_pool_limit'):
+            save_settings(settings.database,{'recall':{'direct_pool_limit':value}})
+    assert read_settings(settings.database)['settings_version']==version
+    assert not (settings.database.parent/'model-indexes').exists()
 
 
 def test_pipeline_prompt_budget_accepts_large_context_models(deployment):
@@ -585,8 +629,8 @@ def test_deepseek_tool_requests_fill_only_missing_reasoning_content_without_muta
     unchanged,count=deepseek_tool_reasoning_compat(
         {'model':'ordinary','base_url':'https://provider.example/v1','protocol':'openai'},payload)
     assert unchanged is payload and count==0
-    unchanged,count=deepseek_tool_reasoning_compat(model,{**payload,'tools':[]})
-    assert count==0 and unchanged['messages'] is payload['messages']
+    patched,count=deepseek_tool_reasoning_compat(model,{**payload,'tools':[]})
+    assert count==2 and patched['messages'][2]['reasoning_content']==''
     _,_,forwarded=request_for({**model,'api_key':'synthetic'},payload,window_id='operit-window')
     assert [message.get('reasoning_content') for message in forwarded['messages'] if message.get('role')=='assistant']==[
         '', '', 'actual reasoning']
@@ -616,3 +660,365 @@ def test_persona_task_replaces_legacy_thinking_with_provider_option(deployment,m
     private={key:captured[0][key] for key in ('thinking','reasoning','enable_thinking') if key in captured[0]}
     assert private==expected
     assert captured[0]['response_format']=={'type':'json_object'}
+
+
+def test_legacy_models_explicit_null_clears_tokenizer_but_omission_preserves_it(deployment):
+    from serein.api.settings import SettingsPatch
+    from serein.deployment import save_settings
+    settings,client=deployment
+    model={'id':'embed','label':'Embedding','model':'synthetic','base_url':'http://127.0.0.1',
+           'tokenizer':{'path':'synthetic-local','max_tokens':24}}
+    assert client.patch('/v1/settings',json={'models':[model]}).status_code==200
+    omitted={k:v for k,v in model.items() if k!='tokenizer'}
+    assert client.patch('/v1/settings',json={'models':[omitted]}).status_code==200
+    assert read_settings(settings.database)['models'][0]['tokenizer']==model['tokenizer']
+    cleared={**model,'tokenizer':None}
+    serialized=SettingsPatch(models=[cleared]).model_dump(exclude_none=True)
+    assert serialized['models'][0]['tokenizer'] is None
+    assert client.patch('/v1/settings',json={'models':[cleared]}).status_code==200
+    assert read_settings(settings.database)['models'][0].get('tokenizer') is None
+    # Same legacy serialization/storage contract without HTTP, as reported.
+    save_settings(settings.database,SettingsPatch(models=[model]).model_dump(exclude_none=True))
+    save_settings(settings.database,SettingsPatch(models=[cleared]).model_dump(exclude_none=True))
+    assert read_settings(settings.database)['models'][0].get('tokenizer') is None
+
+
+def reasoning_tool_message(call_id, reasoning=None, *, arguments='{}', name='lookup'):
+    call = {'type':'function', 'function':{'name':name, 'arguments':arguments}}
+    if call_id is not None:
+        call['id'] = call_id
+    message = {'role':'assistant', 'content':None, 'tool_calls':[call]}
+    if reasoning is not None:
+        message['reasoning_content'] = reasoning
+    return message
+
+
+def restore_reasoning(context, *messages, session='window-a'):
+    context._restore_cached_reasoning_content(session, [*messages, {'role':'tool', 'content':'synthetic result'}])
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_reasoning_cache_repeated_arguments_keep_each_call_original(reverse):
+    context = ClientContext()
+    first = reasoning_tool_message('call-a', 'original A')
+    second = reasoning_tool_message('call-b', 'original B')
+    for message in (first, second):
+        context._update_reasoning_cache('window-a', message)
+    missing = [reasoning_tool_message('call-a'), reasoning_tool_message('call-b')]
+    restore_reasoning(context, *reversed(missing) if reverse else missing)
+    assert [message['reasoning_content'] for message in missing] == ['original A', 'original B']
+
+
+@pytest.mark.parametrize('replayed_id', ['rewritten-id', None, ''])
+def test_reasoning_cache_unique_call_allows_rewritten_or_missing_id(replayed_id):
+    context = ClientContext()
+    context._update_reasoning_cache('window-a', reasoning_tool_message('original-id', 'original', arguments='{"a":1,"b":2}'))
+    replay = reasoning_tool_message(replayed_id, arguments=' { "b": 2, "a": 1 } ')
+    restore_reasoning(context, replay)
+    assert replay['reasoning_content'] == 'original'
+
+
+@pytest.mark.parametrize('cached_ids', [('call-a','call-b'), (None,None), ('reused','reused')])
+@pytest.mark.parametrize('replayed_id', ['rewritten-id', None])
+def test_reasoning_cache_ambiguous_cache_never_guesses(cached_ids, replayed_id):
+    context = ClientContext()
+    for call_id, text in zip(cached_ids, ('original A','original B')):
+        context._update_reasoning_cache('window-a', reasoning_tool_message(call_id, text))
+    replay = reasoning_tool_message(replayed_id)
+    restore_reasoning(context, replay)
+    assert 'reasoning_content' not in replay
+
+
+@pytest.mark.parametrize('same_id', [False, True])
+def test_reasoning_cache_duplicate_incoming_calls_do_not_share_one_entry(same_id):
+    context = ClientContext()
+    context._update_reasoning_cache('window-a', reasoning_tool_message('call-a', 'original'))
+    first = reasoning_tool_message('call-a' if same_id else 'rewritten-a')
+    second = reasoning_tool_message('call-a' if same_id else 'rewritten-b')
+    restore_reasoning(context, first, second)
+    assert 'reasoning_content' not in first and 'reasoning_content' not in second
+
+
+def test_reasoning_cache_exact_id_wins_without_lending_to_unknown_same_arguments():
+    context = ClientContext()
+    context._update_reasoning_cache('window-a', reasoning_tool_message('call-a', 'original A'))
+    exact = reasoning_tool_message('call-a')
+    unknown = reasoning_tool_message('rewritten-b')
+    restore_reasoning(context, exact, unknown)
+    assert exact['reasoning_content'] == 'original A'
+    assert 'reasoning_content' not in unknown
+
+
+def test_reasoning_cache_known_id_with_changed_arguments_does_not_fall_back():
+    context = ClientContext()
+    context._update_reasoning_cache('window-a', reasoning_tool_message('call-a', 'original A', arguments='{"x":1}'))
+    context._update_reasoning_cache('window-a', reasoning_tool_message('call-b', 'original B', arguments='{"x":2}'))
+    altered = reasoning_tool_message('call-a', arguments='{"x":2}')
+    restore_reasoning(context, altered)
+    assert 'reasoning_content' not in altered
+
+
+def test_reasoning_cache_reused_id_is_ambiguous_even_with_exact_match():
+    context = ClientContext()
+    for text in ('original A','original B'):
+        context._update_reasoning_cache('window-a', reasoning_tool_message('reused', text))
+    replay = reasoning_tool_message('reused')
+    restore_reasoning(context, replay)
+    assert 'reasoning_content' not in replay
+
+
+@pytest.mark.parametrize('changed', ['swapped_ids','partial_batch','malformed'])
+def test_reasoning_cache_does_not_restore_changed_or_malformed_batches(changed):
+    context = ClientContext()
+    batch = reasoning_tool_message('call-a', 'batch original')
+    batch['tool_calls'].extend(reasoning_tool_message('call-b')['tool_calls'])
+    context._update_reasoning_cache('window-a', batch)
+    replay = json.loads(json.dumps(batch))
+    replay.pop('reasoning_content')
+    if changed == 'swapped_ids':
+        replay['tool_calls'].reverse()
+    elif changed == 'partial_batch':
+        replay['tool_calls'].pop()
+    else:
+        replay['tool_calls'].append(None)
+    restore_reasoning(context, replay)
+    assert 'reasoning_content' not in replay
+
+
+def test_reasoning_cache_preserves_existing_fields_and_deepcopies_details():
+    context = ClientContext()
+    original = reasoning_tool_message('call-a', 'cached original')
+    original['reasoning_details'] = [{'type':'reasoning.text','text':'cached detail'}]
+    context._update_reasoning_cache('window-a', original)
+    original['reasoning_details'][0]['text'] = 'changed after caching'
+    replay = reasoning_tool_message('call-a', 'client original')
+    restore_reasoning(context, replay)
+    assert replay['reasoning_content'] == 'client original'
+    assert replay['reasoning_details'][0]['text'] == 'cached detail'
+    replay['reasoning_details'][0]['text'] = 'changed after restoring'
+    again = reasoning_tool_message('call-a')
+    restore_reasoning(context, again)
+    assert again['reasoning_details'][0]['text'] == 'cached detail'
+
+
+def test_reasoning_cache_keeps_window_isolation_and_final_reply_cleanup():
+    context = ClientContext()
+    context._update_reasoning_cache('window-a', reasoning_tool_message('call-a', 'original'))
+    other_window = reasoning_tool_message('call-a')
+    restore_reasoning(context, other_window, session='window-b')
+    assert 'reasoning_content' not in other_window
+    context._update_reasoning_cache('window-a', {'role':'assistant','content':'final answer','reasoning_content':'final reasoning'})
+    after_final = reasoning_tool_message('call-a')
+    restore_reasoning(context, after_final)
+    assert 'reasoning_content' not in after_final
+    assert 'window-a' not in context.pending_tool_reasoning
+
+
+def test_proxy_repeated_same_tool_arguments_restore_originals_before_forwarding(deployment, monkeypatch):
+    settings, client = deployment
+    assert configure(client).is_success
+    forwarded = []
+    responses = [reasoning_tool_message('call-a', 'original A'), reasoning_tool_message('call-b', 'original B'),
+                 {'role':'assistant','content':'done'}]
+    async def complete(model, payload, **options):
+        forwarded.append(json.loads(json.dumps(payload)))
+        return {'choices':[{'message':responses[len(forwarded)-1]}]}
+    monkeypatch.setattr('serein.api.chat.complete', complete)
+    messages = [{'role':'user','content':'Perform the synthetic lookup twice.'}]
+    for index in range(3):
+        response = client.post('/v1/chat/completions', headers={'X-Serein-Window-ID':'repeat-test'},
+            json={'messages':messages,'tools':[{'type':'function','function':{'name':'lookup','parameters':{'type':'object'}}}]})
+        assert response.status_code == 200, response.text
+        assistant = response.json()['choices'][0]['message']
+        if index < 2:
+            assert assistant.pop('reasoning_content') == f'original {"AB"[index]}'
+            messages.extend([assistant, {'role':'tool','tool_call_id':f'call-{"ab"[index]}','content':'synthetic result'}])
+    assert [message['reasoning_content'] for message in forwarded[-1]['messages'] if message['role']=='assistant'] == [
+        'original A', 'original B']
+
+
+def test_reasoning_cache_call_without_reasoning_blocks_borrowing_another_call():
+    context = ClientContext()
+    context._update_reasoning_cache('window-a', reasoning_tool_message('call-a', 'original A'))
+    context._update_reasoning_cache('window-a', reasoning_tool_message('call-b'))
+    exact_without_reasoning = reasoning_tool_message('call-b')
+    rewritten = reasoning_tool_message('rewritten-id')
+    restore_reasoning(context, exact_without_reasoning)
+    restore_reasoning(context, rewritten)
+    assert 'reasoning_content' not in exact_without_reasoning
+    assert 'reasoning_content' not in rewritten
+    exact_original = reasoning_tool_message('call-a')
+    restore_reasoning(context, exact_original)
+    assert exact_original['reasoning_content'] == 'original A'
+
+
+def test_reasoning_cache_does_not_store_partially_malformed_tool_batches():
+    context = ClientContext()
+    malformed = reasoning_tool_message('call-a', 'must not be restored')
+    malformed['tool_calls'].append(None)
+    context._update_reasoning_cache('window-a', malformed)
+    replay = reasoning_tool_message('call-a')
+    restore_reasoning(context, replay)
+    assert 'reasoning_content' not in replay
+
+
+def configure_reasoning_routes(client):
+    routes = [
+        {'id':'auto-ds','upstream_model':'deepseek-synthetic','label':'auto route'},
+        {'id':'opaque-on','upstream_model':'opaque-chat','label':'on route','reasoning_content_compat':'on'},
+        {'id':'ds-off','upstream_model':'deepseek-synthetic-off','label':'off route','reasoning_content_compat':'off'},
+        {'id':'opaque-auto','upstream_model':'opaque-default','label':'deepseek display only'},
+    ]
+    result = client.patch('/v1/settings', json={'upstreams':[{'id':'compat','name':'Compat',
+        'base_url':'https://synthetic.invalid/v1','protocol':'openai','models':routes}],
+        'assignments':{'chat':'opaque-auto'}})
+    assert result.is_success, result.text
+    return routes
+
+
+def mock_reasoning_upstream(monkeypatch, captured, *, stream=False, responses=None, require_reasoning=False):
+    original_client = httpx.AsyncClient
+    def handler(request):
+        payload = json.loads(request.content)
+        captured.append(payload)
+        if require_reasoning and any(m.get('role')=='assistant' and m.get('tool_calls')
+                and ('reasoning_content' not in m or m['reasoning_content'] is None) for m in payload['messages']):
+            return httpx.Response(400,json={'error':{'message':'synthetic missing reasoning_content'}})
+        message = (responses[len(captured)-1] if responses else {'role':'assistant','content':'synthetic answer'})
+        if stream:
+            delta = json.loads(json.dumps(message))
+            for index, call in enumerate(delta.get('tool_calls', [])):
+                call['index'] = index
+            event = {'choices':[{'index':0,'delta':delta,'finish_reason':'tool_calls' if delta.get('tool_calls') else 'stop'}]}
+            return httpx.Response(200, headers={'content-type':'text/event-stream'},
+                text='data: '+json.dumps(event)+'\n\ndata: [DONE]\n\n')
+        return httpx.Response(200, json={'choices':[{'index':0,'message':message}]})
+    monkeypatch.setattr('serein.model_runtime.httpx.AsyncClient',
+        lambda **options: original_client(transport=httpx.MockTransport(handler), **options))
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('tools_state', ['omitted','empty','present'])
+@pytest.mark.parametrize('reasoning', ['MISSING',None,'','original reasoning'])
+@pytest.mark.parametrize('route_index', range(4))
+def test_chat_entrypoint_reasoning_compat_routes_and_history_matrix(deployment, monkeypatch, stream, tools_state, reasoning, route_index):
+    _, client = deployment
+    route = configure_reasoning_routes(client)[route_index]
+    assistant = reasoning_tool_message('call-synthetic')
+    if reasoning != 'MISSING':
+        assistant['reasoning_content'] = reasoning
+    body = {'model':'Compat/'+route['label'], 'messages':[{'role':'user','content':'synthetic'}, assistant,
+        {'role':'tool','tool_call_id':'call-synthetic','content':'synthetic result'}],
+        'stream':stream,'max_tokens':37,'temperature':0.23,'thinking':{'type':'disabled'},
+        # A client-echoed option cannot override the selected local model policy.
+        'reasoning_content_compat':'off' if route_index in (0,1) else 'on'}
+    if tools_state != 'omitted':
+        body['tools'] = [] if tools_state == 'empty' else [{'type':'function','function':{'name':'lookup','parameters':{'type':'object'}}}]
+    before = json.loads(json.dumps(body))
+    captured = []
+    mock_reasoning_upstream(monkeypatch, captured, stream=stream)
+    response = client.post('/v1/chat/completions', json=body)
+    assert response.status_code == 200, response.text
+    assert body == before
+    assert len(captured) == 1
+    forwarded = captured[0]
+    assert forwarded['model'] == route['upstream_model']
+    assert forwarded['max_tokens'] == 37 and forwarded['temperature'] == 0.23
+    assert forwarded['thinking'] == {'type':'disabled'}
+    assert 'reasoning_content_compat' not in forwarded
+    actual = next(message for message in forwarded['messages'] if message['role']=='assistant')
+    if route_index in (0,1) and reasoning in ('MISSING',None):
+        assert actual['reasoning_content'] == ''
+    elif reasoning == 'MISSING':
+        assert 'reasoning_content' not in actual
+    else:
+        assert actual['reasoning_content'] == reasoning
+    if stream:
+        assert response.text.count('synthetic answer') == 1 and '[DONE]' in response.text
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('policy', ['on','off'])
+def test_chat_entrypoint_recovers_real_reasoning_before_optional_empty_fallback(deployment, monkeypatch, stream, policy):
+    _, client = deployment
+    routes = configure_reasoning_routes(client)
+    route = routes[1 if policy=='on' else 2]
+    captured = []
+    first = reasoning_tool_message('call-original', 'real cached reasoning')
+    mock_reasoning_upstream(monkeypatch,captured,stream=stream,responses=[first,{'role':'assistant','content':'finished'}])
+    body = {'model':'Compat/'+route['label'],'stream':stream,'messages':[{'role':'user','content':'synthetic'}],
+        'tools':[{'type':'function','function':{'name':'lookup','parameters':{'type':'object'}}}]}
+    response = client.post('/v1/chat/completions',headers={'X-Serein-Window-ID':'same-window'},json=body)
+    assert response.status_code == 200 and 'real cached reasoning' in response.text
+    body.pop('tools')
+    body['messages'].extend([reasoning_tool_message('call-original'),{'role':'tool','tool_call_id':'call-original','content':'result'}])
+    response = client.post('/v1/chat/completions',headers={'X-Serein-Window-ID':'same-window'},json=body)
+    assert response.status_code == 200
+    restored = next(message for message in captured[-1]['messages'] if message['role']=='assistant')
+    assert restored['reasoning_content'] == 'real cached reasoning'
+
+
+def test_reasoning_compat_pure_chat_and_non_openai_never_inject():
+    from serein.model_runtime import deepseek_tool_reasoning_compat
+    for protocol in ('openai','anthropic'):
+        payload = {'messages':[{'role':'user','content':'hello'},{'role':'assistant','content':'hi'}]}
+        if protocol == 'anthropic':
+            payload['messages'].append(reasoning_tool_message('call-a'))
+            payload['tools'] = [{'type':'function','function':{'name':'lookup'}}]
+        result,count = deepseek_tool_reasoning_compat({'model':'deepseek-test','protocol':protocol,'reasoning_content_compat':'on'},payload)
+        assert result is payload and count == 0
+
+
+def test_reasoning_compat_settings_validation_import_export_and_legacy_grouping(deployment):
+    from serein.deployment import grouped_upstreams, save_settings
+    settings,client = deployment
+    routes = configure_reasoning_routes(client)
+    result = client.get('/v1/settings').json()
+    exported = result['upstreams'][0]
+    assert exported['models'][1]['reasoning_content_compat'] == 'on'
+    assert exported['models'][2]['reasoning_content_compat'] == 'off'
+    assert task_model(settings.database,'chat',requested='Compat/on route')['reasoning_content_compat']=='on'
+    template = {'gateway':{'upstreams':[exported]}}
+    template['gateway']['upstreams'][0].pop('api_key_configured',None)
+    imported = client.post('/v1/settings/upstreams-template',json={'template':json.dumps(template)})
+    assert imported.status_code == 200, imported.text
+    assert imported.json()['upstreams'][0]['models'][1]['reasoning_content_compat']=='on'
+    for invalid in (True,False,None,'enabled',1):
+        bad = {**exported,'models':[{**routes[1],'reasoning_content_compat':invalid}]}
+        bad.pop('api_key_configured',None)
+        assert client.patch('/v1/settings',json={'upstreams':[bad]}).status_code==422
+        with pytest.raises(ValueError,match='reasoning content compatibility'):
+            save_settings(settings.database,{'upstreams':[bad],'assignments':{'chat':'opaque-on'}})
+    legacy = {'upstreams':[],'models':[{'id':'a','label':'A','model':'opaque','base_url':'https://synthetic.invalid',
+        'protocol':'openai','api_key':'','reasoning_content_compat':'on'},
+        {'id':'b','label':'B','model':'opaque-2','base_url':'https://synthetic.invalid',
+        'protocol':'openai','api_key':'','reasoning_content_compat':'off'}]}
+    groups = grouped_upstreams(legacy)
+    assert len(groups)==1
+    assert 'reasoning_content_compat' not in groups[0]
+    assert [item['reasoning_content_compat'] for item in groups[0]['models']]==['on','off']
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('tools_state', ['omitted','empty','present'])
+def test_chat_entrypoint_missing_reasoning_no_longer_becomes_upstream_502(deployment, monkeypatch, stream, tools_state):
+    _, client = deployment
+    routes = configure_reasoning_routes(client)
+    captured = []
+    mock_reasoning_upstream(monkeypatch,captured,stream=stream,require_reasoning=True)
+    body = {'model':'Compat/'+routes[0]['label'],'stream':stream,'messages':[{'role':'user','content':'synthetic'},
+        reasoning_tool_message('synthetic-call'),{'role':'tool','tool_call_id':'synthetic-call','content':'result'}]}
+    if tools_state!='omitted':
+        body['tools']=[] if tools_state=='empty' else [{'type':'function','function':{'name':'lookup','parameters':{'type':'object'}}}]
+    response=client.post('/v1/chat/completions',json=body)
+    assert response.status_code==200,response.text
+    assert captured[-1]['messages'][1]['reasoning_content']==''
+    # Explicit off retains the existing provider rejection, rather than secretly
+    # injecting a field or silently retrying/altering the upstream request.
+    body['model']='Compat/'+routes[2]['label']
+    response=client.post('/v1/chat/completions',json=body)
+    assert response.status_code==400,response.text
+    assert response.json()['detail']['code']=='upstream_invalid_request'
+    assert response.json()['detail']['upstream_status']==400
+    assert 'synthetic missing reasoning_content' not in response.text
+    assert 'reasoning_content' not in captured[-1]['messages'][1]

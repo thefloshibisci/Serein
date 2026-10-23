@@ -886,7 +886,7 @@ label:has(input:focus-visible) {
 .sidebar__mark { justify-self: center; }
 .sidebar__name { padding-left: 9px; white-space: nowrap; opacity: 0; transform: translateX(-6px); transition: opacity var(--sidebar-duration) var(--sidebar-ease), transform var(--sidebar-duration) var(--sidebar-ease); }
 .sidebar:hover .sidebar__name, .sidebar:focus-within .sidebar__name { opacity: 1; transform: translateX(0); }
-.sidebar__nav { display: grid; gap: 4px; }
+.sidebar__nav { display: grid; gap: 4px; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-width: none; }
 .nav-item {
   width: 168px;
   min-height: 38px;
@@ -907,7 +907,7 @@ label:has(input:focus-visible) {
 .sidebar:hover .nav-item span, .sidebar:focus-within .nav-item span { opacity: 1; transform: translateX(0); }
 .nav-item:hover { color: #40504c; background: rgba(96, 124, 117, 0.07); }
 .nav-item.is-active { color: #35564f; background: rgba(96, 124, 117, 0.1); }
-.sidebar__footer { margin-top: auto; display: grid; gap: 4px; }
+.sidebar__footer { margin-top: auto; display: grid; gap: 4px; flex-shrink: 0; }
 .sidebar__garden { border-bottom: 1px solid var(--line); border-radius: 0; }
 .memory-page > .sidebar, .narrative-page > .sidebar, .diary-page > .sidebar, .basement-page > .sidebar { animation: sidebar-arrive var(--sidebar-duration) var(--sidebar-ease) both; }
 @keyframes sidebar-arrive { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
@@ -1559,7 +1559,13 @@ label:has(input:focus-visible) {
   line-height: 1.7;
 }
 .fact-event-timeline .scene-entry__button time { margin-bottom: 8px; }
-.fact-event-timeline .scene-entry__excerpt:not(.is-fact) { max-width: min(820px, calc(100% - 60px)); }
+.fact-event-timeline .scene-entry__excerpt:not(.is-fact) {
+  max-width: min(820px, calc(100% - 60px));
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
 .scene-entry__meta {
   display: inline-flex;
   flex-wrap: wrap;
@@ -4687,6 +4693,7 @@ label:has(input:focus-visible) {
   width: 100%;
   min-height: 100%;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   place-content: center;
   justify-items: center;
   overflow: hidden;
@@ -4699,7 +4706,7 @@ label:has(input:focus-visible) {
 .darkroom-door__content {
   position: relative;
   z-index: 1;
-  width: min(680px, calc(100vw - 48px));
+  width: min(680px, 100%);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -4764,6 +4771,86 @@ label:has(input:focus-visible) {
   border-color: rgba(255, 255, 255, 0.4);
   background: rgba(255, 255, 255, 0.1);
 }
+.diary-modal-layer--darkroom-locked .diary-modal-layer__veil {
+  background: rgba(10, 15, 20, 0.82);
+}
+.darkroom-door__countdown p { margin: 18px 0 0; }
+.darkroom-door:focus { outline: none; }
+.darkroom-door--sequenced .darkroom-door__lock {
+  animation: darkroom-lock-appear 180ms ease-out both, darkroom-lock-shake 300ms ease-out 180ms;
+}
+.darkroom-door--sequenced .darkroom-door__line {
+  animation: darkroom-door-line-arrive 1s ease both;
+}
+.darkroom-door--sequenced .darkroom-door__line:nth-child(1) { animation-delay: 500ms; }
+.darkroom-door--sequenced .darkroom-door__line:nth-child(2) { animation-delay: 2000ms; }
+.darkroom-door--sequenced .darkroom-door__line:nth-child(3) { animation-delay: 4500ms; }
+.darkroom-door--sequenced .darkroom-door__line:nth-child(4) { animation-delay: 6500ms; }
+.darkroom-door--sequenced .darkroom-door__countdown,
+.darkroom-door--sequenced .darkroom-door__actions {
+  animation: darkroom-door-details-arrive 1s ease 6500ms both;
+}
+@keyframes darkroom-lock-appear {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes darkroom-lock-shake {
+  0%, 100% { transform: translateX(0) rotate(0); }
+  20%, 60% { transform: translateX(-2px) rotate(-5deg); }
+  40%, 80% { transform: translateX(2px) rotate(5deg); }
+}
+@keyframes darkroom-door-line-arrive {
+  from { visibility: hidden; opacity: 0; transform: translateY(10px); }
+  to { visibility: visible; opacity: 1; transform: translateY(0); }
+}
+@keyframes darkroom-door-details-arrive {
+  from { visibility: hidden; opacity: 0; }
+  to { visibility: visible; opacity: 1; }
+}
+.darkroom-open-room__page h3:focus { outline: none; }
+.darkroom-open-room__body > aside > button:focus-visible {
+  outline: 1px solid #a2b3a9;
+  outline-offset: -1px;
+}
+.darkroom-typewriter { position: relative; }
+.darkroom-typewriter.is-typing .darkroom-open-room__content { cursor: pointer; }
+.darkroom-typewriter__skip {
+  position: absolute;
+  top: 18px;
+  right: 0;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  color: #96a19c;
+  font-family: var(--font-editorial-cjk);
+  font-size: 11px;
+  cursor: pointer;
+}
+.darkroom-typewriter__cursor {
+  display: inline-block;
+  width: 1px;
+  height: 1em;
+  margin-left: 3px;
+  background: #dbe4de;
+  vertical-align: -0.12em;
+  animation: darkroom-cursor-blink 1s steps(1) infinite;
+}
+@keyframes darkroom-cursor-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .darkroom-typewriter__cursor { animation: none; }
+  .darkroom-door, .darkroom-open-room, .darkroom-open-room__page { animation: none; }
+  .darkroom-door__line { transition: none; }
+  .darkroom-door--sequenced .darkroom-door__lock,
+  .darkroom-door--sequenced .darkroom-door__line,
+  .darkroom-door--sequenced .darkroom-door__countdown,
+  .darkroom-door--sequenced .darkroom-door__actions {
+    animation: none;
+    visibility: visible;
+    opacity: 1;
+    transform: none;
+  }
+}
+.diary-modal-layer--darkroom-open .diary-modal-layer__veil { background: transparent; backdrop-filter: none; }
 .darkroom-open-room {
   position: relative;
   z-index: 1;
@@ -4773,31 +4860,30 @@ label:has(input:focus-visible) {
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   background:
-    radial-gradient(circle at 72% 18%, rgba(127, 145, 137, 0.08), transparent 34%),
-    #151b19;
-  color: #dde3e0;
-  animation: darkroom-door-arrive 720ms ease both;
+    radial-gradient(ellipse at 32% 28%, rgba(187, 177, 159, 0.045), transparent 52%),
+    #151514;
+  color: #e5e2db;
 }
 .darkroom-open-room > header {
   min-height: 88px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 28px;
   padding: 20px 38px;
-  border-bottom: 1px solid rgba(226, 234, 230, 0.1);
+  border-bottom: 0;
 }
 .darkroom-open-room > header span {
-  color: #7f8a86;
+  color: #a29a8e;
   font-family: var(--font-editorial);
   font-size: 8px;
   letter-spacing: 0.22em;
 }
 .darkroom-open-room > header h2 {
   margin: 3px 0 0;
-  color: #edf1ef;
+  color: #eee8dd;
   font-family: var(--font-editorial-cjk);
-  font-size: 23px;
+  font-size: 16px;
   font-weight: 400;
 }
 .darkroom-open-room > header button {
@@ -4807,7 +4893,7 @@ label:has(input:focus-visible) {
   padding: 7px 0;
   border: 0;
   background: transparent;
-  color: #96a19c;
+  color: #b0a79b;
   font-family: var(--font-editorial-cjk);
   font-size: 11px;
   cursor: pointer;
@@ -4827,7 +4913,7 @@ label:has(input:focus-visible) {
 .darkroom-open-room__body > aside::-webkit-scrollbar { display: none; }
 .darkroom-open-room__body > aside > p {
   margin: 0 10px 22px;
-  color: #77827e;
+  color: #a29a8e;
   font-family: var(--font-editorial-cjk);
   font-size: 10px;
   letter-spacing: 0.08em;
@@ -4857,7 +4943,7 @@ label:has(input:focus-visible) {
   letter-spacing: 0.05em;
 }
 .darkroom-open-room__body > aside strong {
-  color: #d8dfdb;
+  color: #ded8cc;
   font-size: 14px;
   font-weight: 400;
   line-height: 1.5;
@@ -4873,10 +4959,9 @@ label:has(input:focus-visible) {
   width: min(780px, calc(100% - 72px));
   margin: 0 auto;
   padding: clamp(66px, 9vh, 104px) 0 100px;
-  animation: diary-page-arrive 520ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .darkroom-open-room__page > header time {
-  color: #7f8b86;
+  color: #a29a8e;
   font-family: var(--font-editorial-cjk);
   font-size: 11px;
   letter-spacing: 0.05em;
@@ -4884,7 +4969,7 @@ label:has(input:focus-visible) {
 .darkroom-open-room__page > header h3 {
   max-width: 700px;
   margin: 22px 0 0;
-  color: #edf1ef;
+  color: #eee8dd;
   font-family: var(--font-editorial-cjk);
   font-size: clamp(35px, 4.2vw, 58px);
   font-weight: 400;
@@ -4895,9 +4980,148 @@ label:has(input:focus-visible) {
   padding-top: clamp(44px, 7vh, 68px);
 }
 .darkroom-open-room__content {
-  color: #bec8c3;
+  color: #ded8cc;
   font-family: var(--font-editorial-cjk);
 }
+.darkroom-open-room__body--letters { grid-template-columns: minmax(0, 1fr); }
+.darkroom-letter-table {
+  width: min(1100px, calc(100% - 112px));
+  margin: 0 auto;
+  padding: clamp(34px, 6vh, 72px) 0 96px;
+  display: grid;
+  grid-template-columns: minmax(240px, 360px) minmax(0, 1fr);
+  column-gap: clamp(56px, 8vw, 120px);
+  align-items: start;
+  font-family: var(--font-editorial-cjk);
+}
+.darkroom-letter-table > header { position: sticky; top: 24px; padding-bottom: 32px; }
+.darkroom-title-art { display: block; width: 100%; height: auto; color: #edeae3; overflow: visible; }
+.darkroom-title-art__grid { color: #c7c3b9; opacity: .42; }
+.darkroom-title-art__stroke { opacity: .86; }
+.darkroom-letter-table > header h3 {
+  margin: 36px 0 0;
+  color: #e5e0d6;
+  font-size: 16px;
+  font-weight: 400;
+  letter-spacing: 0.12em;
+}
+.darkroom-letter-table > header h3:focus { outline: none; }
+.darkroom-whisper { display: flex; align-items: center; justify-content: center; gap: 22px; white-space: nowrap; }
+.darkroom-whisper > span:first-child, .darkroom-whisper > span:last-child { flex: 1; height: 1px; background: linear-gradient(90deg, transparent, #8e8a81); }
+.darkroom-whisper > span:last-child { transform: rotate(180deg); }
+.darkroom-whisper > span:nth-child(2) { text-shadow: 0 0 14px #edeae333; }
+.darkroom-whisper__emphasis { display: inline-block; font-size: 22px; transform: translateY(2px); }
+.darkroom-letter-list { display: flex; flex-direction: column; min-width: 0; }
+.darkroom-letter-count { margin: 0 0 8px; color: #99968c; font-size: 11px; letter-spacing: .18em; }
+.darkroom-letter-item { position: relative; min-width: 0; }
+.darkroom-letter-frame { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; color: #ded8cc70; }
+.darkroom-letter-frame path { fill: none; stroke: currentColor; stroke-width: .7; stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset 520ms cubic-bezier(.22,1,.36,1); }
+.darkroom-letter-item.is-open .darkroom-letter-frame path { stroke-dashoffset: 0; transition-duration: 760ms; }
+.darkroom-letter-item:nth-of-type(2n) { margin-left: 28px; width: calc(100% - 28px); }
+.darkroom-letter-fold { height: 0; overflow: hidden; }
+.darkroom-letter-paper { padding: 16px 28px 52px; }
+.darkroom-letter-paper .darkroom-open-room__content { font-size: clamp(15px, 1.2vw, 17px); line-height: 2.1; overflow-wrap: anywhere; }
+.darkroom-letter-paper .darkroom-open-room__content > :first-child { margin-top: 0; }
+.darkroom-letter-paper .darkroom-open-room__content > :last-child { margin-bottom: 0; }
+.darkroom-ink-word { white-space: nowrap; }
+.darkroom-ink-glyph { display: inline-block; }
+.darkroom-ink-glyph.is-pending { opacity: 0; }
+.darkroom-ink-glyph.darkroom-ink-initial { font-size: 2.35em; line-height: .85; vertical-align: baseline; margin-right: .12em; color: #eee9de; }
+.darkroom-ink-run > .sr-only { user-select: none; }
+.darkroom-letter-signature { display: flex; justify-content: flex-end; align-items: baseline; flex-wrap: wrap; gap: 12px; margin-top: 28px; color: #a9a296; font-size: 11px; letter-spacing: .03em; }
+.darkroom-letter-wait { display: flex; align-items: center; gap: 10px; min-height: 44px; color: #aaa69a; font-size: 12px; }
+.darkroom-letter-sealed-notice { height: 0; overflow: hidden; }
+.darkroom-letter-sealed-notice__inner { padding: 0 28px 28px; }
+.darkroom-letter-countdown { display: block; }
+.darkroom-letter-wait time { display: block; margin-bottom: 8px; color: #c5bfb3; }
+.darkroom-letter {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 22px;
+  width: 100%;
+  min-height: 124px;
+  padding: 22px 28px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #e5e0d6;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-editorial-cjk);
+}
+.darkroom-letter:focus-visible { outline: 1px solid #c9bda9; outline-offset: 4px; }
+.darkroom-letter time { color: #aaa093; font-family: var(--font-editorial); font-size: 11px; letter-spacing: 0.08em; }
+.darkroom-letter strong { font-size: clamp(20px, 1.8vw, 28px); font-weight: 400; line-height: 1.55; overflow-wrap: anywhere; }
+.darkroom-letter .darkroom-letter-title { display: block; padding-block: 5px; line-height: 1.6; letter-spacing: .015em; text-shadow: 0 0 10px #fff5, 0 0 22px #f0ebe11f; }
+.darkroom-letter-title > span { display: inline-block; font-size: var(--glyph-scale); font-weight: 300; transform: translateY(var(--glyph-lift)); opacity: var(--glyph-brightness); filter: blur(var(--glyph-blur)); white-space: pre; }
+.darkroom-letter-title > span:nth-child(11n + 5) { font-weight: 600; color: #faf8f5; text-shadow: 0 0 12px #fffa; }
+.darkroom-letter-title > span:nth-child(11n + 10) { font-weight: 400; }
+.darkroom-letter__sender { color: #a6a299; font-size: 10px; letter-spacing: .06em; }
+.darkroom-letter__footer { margin-top: 4px; color: #9c988e; font-size: 10px; line-height: 1.8; }
+.darkroom-letter__status {
+  position: absolute;
+  top: 56px;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #b9ae9f;
+  font-size: 10px;
+  transition: transform 520ms cubic-bezier(.22,1,.36,1);
+}
+.darkroom-letter[aria-expanded="true"] .darkroom-letter__status { transform: rotate(180deg); }
+.darkroom-letter--sealed strong { color: #c8bfb0; }
+.darkroom-letter .darkroom-letter-title--sealed { display: block; max-width: 100%; color: #e7e1d4; filter: blur(9px); opacity: .7; user-select: none; pointer-events: none; text-shadow: 0 0 8px #e7e1d4aa; }
+@media (min-width: 761px) {
+  .darkroom-letter-table > header .darkroom-whisper { display: none; }
+}
+.darkroom-reader-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  margin-bottom: 40px;
+  border: 0;
+  background: transparent;
+  color: #b5aa9b;
+  font-family: var(--font-editorial-cjk);
+  font-size: 12px;
+  cursor: pointer;
+}
+.darkroom-reader-back:focus-visible { outline: 1px solid #c9bda9; outline-offset: 6px; }
+@media (max-width: 760px) {
+  .darkroom-letter-table { width: calc(100% - 56px); grid-template-columns: minmax(0, 1fr); gap: 40px; padding: 24px 0 64px; }
+  .darkroom-letter-table > header { position: static; width: min(260px, 85%); margin: 0 auto; padding: 0; }
+  .darkroom-letter-table > header h3 { margin-top: 24px; font-size: 14px; }
+  .darkroom-letter-list { padding-top: 0; }
+  .darkroom-letter { min-height: 124px; padding-inline: 18px; }
+  .darkroom-letter .darkroom-letter-title { font-size: clamp(16px, 4.6vw, 20px); }
+  .darkroom-letter-item:nth-of-type(2n) { margin-left: 18px; width: calc(100% - 18px); }
+  .darkroom-letter-paper { padding-inline: 18px; }
+  .darkroom-letter-sealed-notice__inner { padding-inline: 18px; }
+  .darkroom-open-room__body.darkroom-open-room__body--letters { grid-template-rows: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .darkroom-letter, .darkroom-letter-frame path { transition: none; }
+  .darkroom-letter:hover { transform: none; }
+}
+.darkroom-letter-status { display: inline-flex; align-items: center; gap: 5px; }
+.darkroom-letter-sealed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 64px 16px;
+  color: #96a19c;
+  text-align: center;
+  font-family: var(--font-editorial-cjk);
+}
+.darkroom-open-room__page > .darkroom-letter-sealed p { margin: 0; color: #d8dfdb; }
+.darkroom-letter-sealed time { font-size: 14px; }
+.darkroom-letter-sealed small { font-size: 12px; line-height: 1.7; }
 .darkroom-open-room__page > div p {
   margin: 0 0 28px;
   color: #bec8c3;
@@ -5444,7 +5668,7 @@ label:has(input:focus-visible) {
     padding-inline: 28px;
   }
   .darkroom-door__content {
-    width: calc(100vw - 24px);
+    width: 100%;
   }
   .darkroom-door__dialogue { font-size: 16px; }
   .darkroom-open-room > header { padding-inline: 20px; }

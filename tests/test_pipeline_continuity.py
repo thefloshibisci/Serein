@@ -91,6 +91,86 @@ def test_bridge_owner_is_explicit_or_excluded_with_verbatim_evidence():
     validate_bridge_owners(output, component, {'bridge_exclusions': []})
 
 
+@pytest.fixture
+def bridge_exclusion_case():
+    component = {
+        'memberships': [{'unit_root_message_id': 2, 'source_message_ids': [2],
+                         'track_id': 'a', 'routing_role': 'bridge'}],
+        'context_edges': [{'unit_root_message_id': 2, 'track_id': 'b', 'relation': 'bridge'}],
+        'messages': [{'id': 2, 'content': 'Use the same paper to sketch a label.'}],
+    }
+    output = {'events': [
+        {'primary_track_id': 'a', 'source_bindings': [{'source_message_id': 1}]},
+        {'primary_track_id': 'b', 'source_bindings': [
+            {'source_message_id': 2}, {'source_message_id': 3}]},
+    ]}
+    exclusion = {'unit_root_message_id': 2, 'excluded_track_id': 'a',
+                 'reason': 'The label starts a separate activity',
+                 'evidence': [{'source_message_id': 2, 'quote': 'sketch a label'}]}
+    return component, output, exclusion
+
+
+@pytest.mark.parametrize('state', ['both_own', 'neither_owns', 'one_event', 'no_events'])
+def test_no_missing_bridge_side_requests_empty_exclusions_without_changing_owners(bridge_exclusion_case, state):
+    component, output, exclusion = bridge_exclusion_case
+    if state == 'both_own':
+        output['events'][0]['source_bindings'].append({'source_message_id': 2})
+    elif state == 'neither_owns':
+        output['events'][1]['source_bindings'] = [{'source_message_id': 3}]
+    elif state == 'one_event':
+        output['events'] = output['events'][1:]
+    else:
+        output['events'] = []
+    before = copy.deepcopy(output)
+    with pytest.raises(ValueError) as error:
+        validate_bridge_owners(output, component, {'bridge_exclusions': [exclusion]})
+    message = str(error.value)
+    assert "Unexpected bridge exclusion (2, 'a')" in message
+    assert 'Event ownership are []' in message
+    assert 'No missing side' in message and 'bridge_exclusions: []' in message
+    assert 'Do not create an Event or change ownership' in message
+    assert output == before
+    validate_bridge_owners(output, component, {'bridge_exclusions': []})
+    validate_bridge_owners(output, component, {})
+    assert output == before
+
+
+@pytest.mark.parametrize('root,track', [(2, 'b'), (2, 'unknown'), (999, 'a')])
+def test_wrong_bridge_exclusion_reports_the_required_pair(bridge_exclusion_case, root, track):
+    component, output, exclusion = bridge_exclusion_case
+    exclusion.update(unit_root_message_id=root, excluded_track_id=track)
+    with pytest.raises(ValueError) as error:
+        validate_bridge_owners(output, component, {'bridge_exclusions': [exclusion]})
+    message = str(error.value)
+    assert repr((root, track)) in message
+    assert "Event ownership are [(2, 'a')]" in message
+    assert 'Remove this extra exclusion entry' in message
+    assert 'No missing side' not in message
+
+
+def test_duplicate_bridge_exclusion_identifies_the_duplicate(bridge_exclusion_case):
+    component, output, exclusion = bridge_exclusion_case
+    with pytest.raises(ValueError, match=r"Duplicate bridge exclusion \(2, 'a'\)"):
+        validate_bridge_owners(output, component, {'bridge_exclusions': [exclusion, exclusion]})
+
+
+@pytest.mark.parametrize('root,track', [('2', 'a'), (True, 'a'), (2, ['a'])])
+def test_bridge_exclusion_id_types_have_a_separate_error(bridge_exclusion_case, root, track):
+    component, output, exclusion = bridge_exclusion_case
+    exclusion.update(unit_root_message_id=root, excluded_track_id=track)
+    with pytest.raises(ValueError, match='integer unit_root_message_id and string excluded_track_id'):
+        validate_bridge_owners(output, component, {'bridge_exclusions': [exclusion]})
+
+
+def test_missing_bridge_exclusion_reports_the_pair_and_available_decisions(bridge_exclusion_case):
+    component, output, _ = bridge_exclusion_case
+    with pytest.raises(ValueError) as error:
+        validate_bridge_owners(output, component, {})
+    message = str(error.value)
+    assert "Missing bridge ownership decision for [(2, 'a')]" in message
+    assert 'share the whole unit' in message and 'decision_review.bridge_exclusions' in message
+
+
 def test_compact_curator_does_not_add_a_second_bridge_owner():
     messages = [
         {'id': 1, 'track_id': 'a', 'session_id': 1, 'role': 'user',

@@ -1,4 +1,5 @@
 import {useEffect,useRef,useState} from 'react';
+import {importProgressSummary} from '../utils/importProgress.js';
 
 async function request(path='',body) {
   const response=await fetch('/__serein/imports'+path,{method:body?'POST':'GET',
@@ -12,9 +13,11 @@ export function ConversationImport({onImported}) {
   const [mode,setMode]=useState('auto'),[tagging,setTagging]=useState(true),[job,setJob]=useState(null);
   const [history,setHistory]=useState([]),[tags,setTags]=useState({}),[status,setStatus]=useState(''),[busy,setBusy]=useState(false);
   const [dragging,setDragging]=useState(false);
+  const [largeBatch,setLargeBatch]=useState(false);
   const running=['queued','running'].includes(job?.task?.status);
   const mounted=useRef(true),notified=useRef(new Set()),polling=useRef(false);
   const [tagErrors,setTagErrors]=useState([]);
+  useEffect(()=>{setLargeBatch(job?.task?.arguments?.large_batch===true);},[job?.id]);
   async function refresh() {
     const result=await request();if(!mounted.current)return;
     setHistory(result.items);setTags(result.tagging);setTagErrors(result.tagging_errors||[]);
@@ -46,7 +49,7 @@ export function ConversationImport({onImported}) {
     if(!job || busy || running)return;
     setBusy(true);setStatus('正在提交后台导入任务…');
     try {
-      const task=await request('/'+encodeURIComponent(job.id)+'/continue',{});
+      const task=await request('/'+encodeURIComponent(job.id)+'/continue',{large_batch:largeBatch});
       if(mounted.current){setJob(current=>({...current,task}));setStatus('后台任务已启动，可切换页面；回来会恢复当前进度。');await refresh();}
     }catch(error){if(mounted.current)setStatus(error.message);}
     finally{if(mounted.current)setBusy(false);}
@@ -81,7 +84,7 @@ export function ConversationImport({onImported}) {
       <input type="checkbox" role="switch" checked={tagging} disabled={busy} onChange={event=>setTagging(event.target.checked)}/></label>
     <label className={'import-upload'+(dragging?' is-dragging':'')} onDragOver={event=>{event.preventDefault();if(!busy)setDragging(true);}}
       onDragLeave={()=>setDragging(false)} onDrop={event=>{event.preventDefault();setDragging(false);preview(event.dataTransfer.files[0]);}}>
-      <strong>选择文件，或拖到这里</strong><span>Claude、ChatGPT、DeepSeek / 通用 JSON、JSONL、Markdown、TXT、Operit 备份 · 最大 32 MB</span>
+      <strong>选择文件，或拖到这里</strong><span>Claude、ChatGPT、SillyTavern（酒馆）、DeepSeek / 通用 JSON、JSONL、Markdown、TXT、Operit 备份 · 最大 32 MB</span>
       <input type="file" aria-label="导入聊天记录或 Operit 记忆库" accept=".json,.jsonl,.md,.txt" disabled={busy}
         onChange={event=>{preview(event.target.files[0]);event.target.value='';}}/>
     </label>
@@ -100,6 +103,10 @@ export function ConversationImport({onImported}) {
       <p>当前阶段：{({queued:'等待后台处理',running:'正在导入',completed:'导入结束',paused:'已暂停',interrupted:'已中断，可继续',failed:'导入失败'})[job.task?.status]||'等待导入'}</p>
       {job.task?.error&&<p className="import-error">{job.task.error}</p>}
       <p>已处理 {job.processed}/{job.total} · 新增 {job.inserted} · 重复 {job.duplicate} · 失败 {job.failed}</p>
+      {importProgressSummary(job.task)&&<p className="import-help">{importProgressSummary(job.task)}</p>}
+      {job.status!=='completed'&&<label className="settings-toggle"><span><strong>大批量导入</strong>
+        <small>适合较大的历史文件。每批最多 250 条；关闭时最多 25 条。长内容会自动缩小批次，暂停在当前批次保存后生效。</small></span>
+        <input type="checkbox" role="switch" checked={largeBatch} disabled={busy||running} onChange={event=>setLargeBatch(event.target.checked)}/></label>}
       {job.errors.map(error=><p className="import-error" key={error.entry}>第 {error.entry} 条：{error.message}</p>)}
       <div className="settings-actions">{job.status!=='completed'&&<button type="button" disabled={busy||running} onClick={run}>{job.processed?'继续导入':'开始导入'}</button>}
         {running&&<button type="button" onClick={pause}>暂停</button>}

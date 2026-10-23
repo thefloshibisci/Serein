@@ -91,6 +91,16 @@ def ready(deploy, service):
         return False
 
 
+def check_ports(ports):
+    # POSIX reuse permits TIME_WAIT without sharing an active listener. Windows
+    # SO_REUSEADDR can share live ports, so retain exclusive ownership there.
+    for port in ports:
+        with socket.socket() as probe:
+            option = socket.SO_EXCLUSIVEADDRUSE if os.name == 'nt' else socket.SO_REUSEADDR
+            probe.setsockopt(socket.SOL_SOCKET, option, 1)
+            probe.bind(('127.0.0.1', port))
+
+
 def supervise(deploy, service):
     runtime = deploy/'runtime'
     record = runtime/f'{service}.control.json'
@@ -99,9 +109,7 @@ def supervise(deploy, service):
         config = settings(deploy)
         ports = [config['memory_port']] if service == 'memory' else [config['preview_port'], int(env_file(deploy)['SEREIN_PORT'])]
         # Fail before creating a child if another instance already owns a port.
-        for port in ports:
-            with socket.socket() as probe:
-                probe.bind(('127.0.0.1', port))
+        check_ports(ports)
         with socket.socket() as server:
             server.bind(('127.0.0.1', 0))
             server.listen(4)
@@ -109,11 +117,34 @@ def supervise(deploy, service):
             token = secrets.token_urlsafe(32)
             child = subprocess.Popen(args, cwd=deploy.parent, env=env,
                                      creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+            started_at = time.monotonic()
+            restart_at = None
+            delay = 1
             try:
                 fd = os.open(record, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 with os.fdopen(fd, 'w', encoding='utf-8') as out:
                     json.dump({'port': server.getsockname()[1], 'token': token}, out)
-                while child.poll() is None:
+                while True:
+                    now = time.monotonic()
+                    if child.poll() is not None:
+                        if restart_at is None:
+                            if now - started_at >= 60:
+                                delay = 1
+                            print(f'{service} exited ({child.returncode}); restarting in {delay}s.', flush=True)
+                            restart_at = now + delay
+                            delay = min(delay * 2, 30)
+                        if now >= restart_at:
+                            try:
+                                child = subprocess.Popen(args, cwd=deploy.parent, env=env,
+                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                            except OSError as exc:
+                                print(f'{service} restart failed: {exc}; retrying in {delay}s.', flush=True)
+                                restart_at = now + delay
+                                delay = min(delay * 2, 30)
+                            else:
+                                started_at = now
+                                restart_at = None
+                                print(f'{service} restarted.', flush=True)
                     try:
                         conn, _ = server.accept()
                     except socket.timeout:
@@ -126,7 +157,9 @@ def supervise(deploy, service):
                                 conn.sendall(b'{"ok":false}\n')
                                 continue
                             action = request.get('action')
-                            conn.sendall(json.dumps({'ok': True, 'running': child.poll() is None}).encode()+b'\n')
+                            running = child.poll() is None
+                            conn.sendall(json.dumps({'ok': True, 'running': running,
+                                                     'restarting': not running}).encode()+b'\n')
                             if action == 'stop':
                                 break
                         except (OSError, ValueError):
@@ -144,8 +177,16 @@ def supervise(deploy, service):
 
 def start(deploy, service):
     current = control(deploy, service, 'status')
-    if not current or not current.get('running'):
-        logs = deploy/'runtime'/'logs'
+    if current and current.get('running'):
+        if not ready(deploy, service):
+            raise ValueError(f'{service} 进程仍在但未就绪，请查看日志后重启。')
+        print(f'{service} 已在运行。')
+        return
+    logs = deploy/'runtime'/'logs'
+    process = None
+    # A supervisor in backoff still owns this service. Wait for its recovery
+    # instead of spawning a duplicate that would fail the ownership lock.
+    if not current or not current.get('ok'):
         logs.mkdir(parents=True, exist_ok=True)
         with (logs/f'{service}.log').open('ab') as log:
             process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
@@ -153,19 +194,17 @@ def start(deploy, service):
                 stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
                 start_new_session=os.name != 'nt')
-        for _ in range(120):
-            current = control(deploy, service, 'status')
-            if current and current.get('running') and ready(deploy, service):
-                print(f'{service} 已启动并就绪。')
-                return
-            if process.poll() is not None:
-                break
-            time.sleep(.5)
+    for _ in range(120):
+        current = control(deploy, service, 'status')
+        if current and current.get('running') and ready(deploy, service):
+            print(f'{service} 已启动并就绪。')
+            return
+        if (process is not None and process.poll() is not None) or (process is None and not current):
+            break
+        time.sleep(.5)
+    if process is not None:
         control(deploy, service, 'stop')
-        raise ValueError(f'{service} 未就绪，请查看 {logs/service}.log')
-    if not ready(deploy, service):
-        raise ValueError(f'{service} 进程仍在但未就绪，请查看日志后重启。')
-    print(f'{service} 已在运行。')
+    raise ValueError(f'{service} 未就绪，请查看 {logs/service}.log')
 
 
 def stop(deploy, service):

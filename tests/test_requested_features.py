@@ -127,6 +127,80 @@ def test_narrative_main_model_preview_save_cas_and_writer_interlock(live):
     with pytest.raises(ValueError):asyncio.run(tool('read',narrative_id='narrative_test'))
 
 
+def test_narrative_main_model_update_after_saving_only_materials(live):
+    from test_live_events import item
+
+    settings, client = live
+    original, scene = seed_narrative(client, settings)
+    added = client.post('/api/fact-events/batch', json={
+        'items': [item('A later synthetic event.', 'synthetic:later')],
+    }).json()['items'][0]['item_id']
+    save_settings(settings.database, {'features': {'narrative_tools': True}})
+    tool = Application(settings).contributions.tools['narrative_volume']
+    read = asyncio.run(tool('read', narrative_id='narrative_test', mode='edit', material_ids={
+        'event_ids': [original, added], 'scene_ids': [scene],
+        'diary_ids': [], 'darkroom_ids': [], 'upload_ids': [],
+    }))
+    assert read['status'] == 'ok'
+    unchanged_body = read['narrative']['body']
+    draft = asyncio.run(tool('preview', narrative_id='narrative_test',
+        body=unchanged_body, receipt=read['receipt']))
+    saved = asyncio.run(tool('save', narrative_id='narrative_test', receipt=draft['save_arguments']))
+    assert saved['status'] == 'updated' and saved['revision'] == 2
+
+    read = asyncio.run(tool('read', narrative_id='narrative_test', mode='update'))
+    assert read['status'] == 'ok'
+    assert read['receipt']['current_body'] == unchanged_body
+    assert [row['event_id'] for row in read['receipt']['materials']['events']] == [added]
+    assert read['receipt']['material_counts']['scenes'] == 0
+    draft = asyncio.run(tool('preview', narrative_id='narrative_test',
+        body='The narrative now includes the later synthetic event.', receipt=read['receipt']))
+    assert draft['writes_performed'] == []
+    saved = asyncio.run(tool('save', narrative_id='narrative_test', receipt=draft['save_arguments']))
+    assert saved['status'] == 'updated' and saved['model_called'] is False
+    assert asyncio.run(tool('read', narrative_id='narrative_test', mode='update'))['reason'] == 'no_new_materials'
+
+
+def test_narrative_api_writer_uses_text_only(settings, monkeypatch):
+    save_settings(settings.database, {'models':[
+        {'id':'writer','model':'synthetic-writer','base_url':'http://127.0.0.1:9/v1'}],
+        'assignments':{'writer':'writer'}, 'upstream':{'writer_enabled':True}})
+    client=TestClient(create_app(settings,token='synthetic',live=True),headers={'Authorization':'Bearer synthetic'})
+    calls=[]
+    async def complete(model,payload):
+        calls.append((model,payload))
+        return {'choices':[{'message':{'content':'{"body":"A sourced sentence."}'}}]}
+    monkeypatch.setattr('serein.api.chat.complete',complete)
+    task={'prompt':'Bound text only','output_schema':{'type':'object'}}
+    assert client.post('/v1/models/writer',json={**task,'image_inputs':['https://example.org/original.png']}).status_code==400
+    assert calls==[]
+    response=client.post('/v1/models/writer',json=task)
+    assert response.status_code==200,response.text
+    assert calls[0][0]['request_timeout_seconds']==300
+    assert calls[0][1]['messages'][0]['content']=='Bound text only'
+    import httpx
+    async def timeout(model,payload):
+        raise httpx.ReadTimeout('synthetic timeout')
+    monkeypatch.setattr('serein.api.chat.complete',timeout)
+    assert client.post('/v1/models/writer',json=task).status_code==504
+    async def total_timeout(model,payload):
+        raise TimeoutError('synthetic total deadline')
+    monkeypatch.setattr('serein.api.chat.complete',total_timeout)
+    assert client.post('/v1/models/writer',json=task).status_code==504
+    cancelled=[]
+    original_wait_for=asyncio.wait_for
+    async def bounded_wait_for(awaitable,timeout):
+        assert timeout==300
+        return await original_wait_for(awaitable,timeout=0.01)
+    async def hung(model,payload):
+        try:await asyncio.Event().wait()
+        finally:cancelled.append(True)
+    monkeypatch.setattr('serein.api.chat.asyncio.wait_for',bounded_wait_for)
+    monkeypatch.setattr('serein.api.chat.complete',hung)
+    assert client.post('/v1/models/writer',json=task).status_code==504
+    assert cancelled==[True]
+
+
 def test_background_task_claim_progress_failure_resume_and_single_execution(settings):
     async def check():
         started=asyncio.Event();release=asyncio.Event();calls=[]

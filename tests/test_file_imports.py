@@ -46,6 +46,112 @@ def test_generic_jsonl_markdown_and_invalid_json():
     with pytest.raises(ValueError,match='无法识别'):
         parse_file('{"secret":"not a transcript"}','chat.json',NAMES)
 
+
+def sillytavern(count=6,integrity='synthetic-chat'):
+    header={'user_name':'Sample User','character_name':'Sample Assistant',
+            'chat_metadata':{'integrity':integrity,'variables':{'synthetic':'value'}}}
+    rows=[{'name':'Sample User' if i%2==0 else 'Sample Assistant','is_user':i%2==0,
+           'is_system':i<4,'mes':f'  Synthetic message {i}\n',
+           'send_date':f'2025-01-01T12:{i:02d}:00.000Z','extra':{'reasoning':'Not dialogue'}} for i in range(count)]
+    rows[3].update(swipes=[rows[3]['mes'],'Unselected reply'],swipe_id=0,
+                   continueHistory=[{'mes':'Old continuation'}],continueSwipe={'mes':'Continuation state'})
+    return header,rows
+
+
+def jsonl(header,rows):
+    return '\n'.join(json.dumps(row,ensure_ascii=False) for row in [header,*rows])
+
+
+def test_sillytavern_hidden_dialogue_current_text_and_original_metadata():
+    header,rows=sillytavern()
+    parsed=parse_file('\ufeff'+jsonl(header,rows),'chat.jsonl',NAMES)
+    assert parsed['format']=='sillytavern' and len(parsed['entries'])==6
+    assert [row['text'] for row in parsed['entries']]==[row['mes'] for row in rows]
+    assert [row['role'] for row in parsed['entries']]==['user','assistant']*3
+    assert parsed['sillytavern_header']==header
+    assert len({row['session_id'] for row in parsed['entries']})==1
+    for entry,original in zip(parsed['entries'],rows):
+        assert entry['source']=='import-sillytavern'
+        assert entry['metadata']['original_message']==original
+        assert entry['metadata']['original_timestamp']==original['send_date']
+        assert entry['metadata']['timestamp_source']=='export'
+    assert parsed['entries'][3]['created_at']=='2025-01-01T12:03:00+00:00'
+    assert any('4 条 SillyTavern 隐藏消息' in warning for warning in parsed['warnings'])
+
+
+def test_sillytavern_segment_overlap_append_conflict_and_session_boundaries(settings):
+    header,rows=sillytavern(8)
+    def imported(header,rows,name):
+        preview=stage(settings.database,jsonl(header,rows),name,'conversation',False)
+        return advance_import(settings,preview['id'])
+    first=imported(header,rows[:4],'first.jsonl')
+    assert first['inserted']==4
+    second=imported(header,rows[2:],'second.jsonl')
+    assert second['inserted']==4 and second['duplicate']==2
+    changed_header={**header,'chat_metadata':{**header['chat_metadata'],'variables':{'changed':'metadata'}}}
+    repeated=imported(changed_header,rows,'renamed.jsonl')
+    assert repeated['duplicate']==8 and repeated['inserted']==0
+    changed=[*rows];changed[3]={**rows[3],'mes':'Edited chosen reply'}
+    conflict=imported(header,changed,'edited.jsonl')
+    assert conflict['failed']==1 and conflict['duplicate']==7 and conflict['inserted']==0
+    other_header={**header,'chat_metadata':{'integrity':'other-chat'}}
+    assert imported(other_header,rows[:4],'other.jsonl')['inserted']==4
+    with Store(settings.database) as store:
+        originals=store.conn.execute("SELECT * FROM raw_events WHERE source='import-sillytavern' ORDER BY id").fetchall()
+        assert [row['text'] for row in originals[:8]]==[row['mes'] for row in rows]
+        assert len({row['session_id'] for row in originals})==2
+        assert json.loads(originals[3]['metadata_json'])['original_message']==rows[3]
+        assert json.loads(store.conn.execute('SELECT payload_json FROM file_imports WHERE id=?',(first['id'],)).fetchone()[0])['sillytavern_header']==header
+        assert store.conn.execute('SELECT count(*) FROM documents').fetchone()[0]==0
+    assert asyncio.run(advance(settings.database,include_recent=True))['status']=='current'
+
+
+def test_sillytavern_preview_batch_resume_and_explicit_summary(settings):
+    from serein.imports import release_imported_originals
+    header,rows=sillytavern(28)
+    client=TestClient(create_app(settings,token='test',live=True),headers={'Authorization':'Bearer test'})
+    response=client.post('/v1/imports/preview',json={'filename':'tavern.jsonl','content':jsonl(header,rows)})
+    assert response.status_code==200,response.text
+    preview=response.json();assert preview['format']=='sillytavern' and preview['sessions']==1 and preview['total']==28
+    with Store(settings.database) as store:
+        assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==0
+    assert advance_import(settings,preview['id'])['processed']==25
+    assert asyncio.run(advance(settings.database,include_recent=True))['status']=='current'
+    result=advance_import(settings,preview['id'])
+    assert result['processed']==28 and result['inserted']==28 and result['failed']==0
+    assert asyncio.run(advance(settings.database,include_recent=True))['status']=='current'
+    release_imported_originals(settings.database,preview['id'])
+    task=asyncio.run(advance(settings.database,include_recent=True))
+    assert task['role']=='track_router'
+    assert [row['content'] for row in task['request']['messages']]==[row['mes'] for row in rows]
+
+
+def test_sillytavern_legacy_header_missing_dates_and_timestamp_collisions():
+    header,rows=sillytavern()
+    header['chat_metadata'].pop('integrity');header['create_date']='synthetic-create-date'
+    parsed=parse_file(jsonl(header,rows),'legacy.jsonl',NAMES)
+    cropped=parse_file(jsonl(header,rows[2:]),'cropped.jsonl',NAMES)
+    assert parsed['entries'][2]['source_event_id']==cropped['entries'][0]['source_event_id']
+    header.pop('create_date')
+    unknown=parse_file(jsonl(header,rows),'unknown.jsonl',NAMES)
+    assert any('缺少 integrity / create_date' in warning for warning in unknown['warnings'])
+    rows[0].pop('send_date');rows[2]['send_date']=rows[4]['send_date']
+    parsed=parse_file(jsonl(header,rows),'missing.jsonl',NAMES,stamp='2026-10-02T00:00:00+00:00')
+    assert parsed['entries'][0]['metadata']['timestamp_source']=='import_time'
+    assert parsed['entries'][0]['created_at']=='2026-10-02T00:00:00+00:00'
+    assert len({row['source_event_id'] for row in parsed['entries']})==6
+    assert any('同一段' in warning for warning in parsed['warnings'])
+    assert any('按会话内位置识别' in warning for warning in parsed['warnings'])
+
+
+@pytest.mark.parametrize('invalid',[{'is_user':'false'},{'mes':[]},{'send_date':'not-a-date'}])
+def test_sillytavern_invalid_message_rejected_before_import(settings,invalid):
+    header,rows=sillytavern();rows[1].update(invalid)
+    with pytest.raises(ValueError):stage(settings.database,jsonl(header,rows),'invalid.jsonl','auto',False)
+    with Store(settings.database) as store:
+        assert store.conn.execute('SELECT count(*) FROM file_imports').fetchone()[0]==0
+        assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==0
+
 def test_upload_preview_resume_and_no_processing_partial_file(settings):
     client=TestClient(create_app(settings,token='test',live=True),headers={'Authorization':'Bearer test'})
     body=json.dumps(messages(28))
@@ -182,11 +288,14 @@ def test_domain_editor_updates_next_tagging_request_without_restart(settings, mo
             'expected_dataset_version':version,'domains':domains})
 
     catalog=[*baseline['policies'],custom]
+    def semantic_catalog():
+        # The tagger sees domain meanings; surfacing policies belong to the host.
+        return [{key:item[key] for key in ('key','label','description')} for item in catalog]
     added=publish(catalog,baseline['dataset_version'])
     assert added.status_code==200,added.text
     assert client.get(endpoint).json()['policies']==catalog
     asyncio.run(process(settings.database))
-    assert calls[-1]['domains']==catalog
+    assert calls[-1]['domains']==semantic_catalog()
     updated={**custom,'label':'阅读与书评','description':'阅读体验、书评与借阅；排除工作文档'}
     catalog[-1]=updated
     changed=publish(catalog,added.json()['dataset_version'])
@@ -196,7 +305,7 @@ def test_domain_editor_updates_next_tagging_request_without_restart(settings, mo
     scenes.write('Another reading experience.',['another book'],title='After description update')
     asyncio.run(process(settings.database))
     assert len(calls)==2  # Existing tagged memories are not tagged again.
-    assert calls[-1]['domains']==catalog
+    assert calls[-1]['domains']==semantic_catalog()
     assert read_settings(settings.database)['tagging']['domains']==catalog
     assert publish(baseline['policies'],changed.json()['dataset_version']).status_code==200
     assert client.get(endpoint).json()['policies']==baseline['policies']

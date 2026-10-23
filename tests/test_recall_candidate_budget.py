@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 from serein.recall import typed_surface
-from serein.recall.germany.candidates import CandidateGateway
 
 
 def candidate(kind, owner_id, score):
@@ -86,8 +85,3 @@ def test_vector_cache_is_keyed_by_exact_content():
     changed=typed_surface._decode_vector('[0.0,1.0]')
     assert repeated is first
     assert changed is not first and list(changed)==[0.0,1.0]
-
-
-def test_reranker_document_joins_passages_without_fstring_syntax_tricks():
-    row = {'title':'雨夜', 'passages':[{'text':'第一段'}, {'text':'第二段'}, {'text':'第三段'}]}
-    assert CandidateGateway._typed_reranker_document(row) == 'title: 雨夜\nbody: 第一段\n第二段'

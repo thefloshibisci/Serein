@@ -91,7 +91,7 @@ def birthday_recall(tmp_path, monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
-        def query(self, text):
+        def query(self, text, *, client=None):
             embedded.append(text)
             return {'query': text, 'profile': profile, 'embedding': [1, 0]}
 
@@ -201,6 +201,63 @@ def test_hook_marks_its_input_as_the_users_original_utterance():
     assert response.status_code == 200
     assert captured['query'] == '你的生日是什么时候？'
     assert captured['user_utterance'] is True
+
+
+@pytest.mark.parametrize('query,target,rank_query,fact', [
+    ('我的生日是哪天？', 'user_birthday', '米拉的生日是哪天？', '9月17日'),
+    ('你的生日是什么时候？', 'assistant_birthday', 'Orion的生日是什么时候？', '4月8日'),
+])
+def test_gateway_and_hook_resolve_the_same_speaker_and_deliver_body(
+        birthday_recall, monkeypatch, query, target, rank_query, fact):
+    from fastapi.testclient import TestClient
+    from serein.api.http import create_app
+    from serein.bootstrap import initialize
+    from dataclasses import replace
+    from examples.hook_host import SereinHook
+    from test_public_settings import configure
+
+    engine, embedded, ranked = birthday_recall
+    initialize(engine.settings)
+    client = TestClient(create_app(replace(engine.settings, writable=True), token='synthetic', live=True),
+                        headers={'Authorization': 'Bearer synthetic'})
+    configure(client).raise_for_status()
+    monkeypatch.setattr('serein.configured_models.memory_ready', lambda _: True)
+    monkeypatch.setattr('serein.application.Services.recall', lambda self, text, **options: engine.run(text, **options))
+    model_inputs = []
+
+    def host_model(messages):
+        assert fact in json.dumps(messages, ensure_ascii=False)
+        assert query in messages[-1]['content']
+        model_inputs.append(messages)
+        return {'choices': [{'message': {'role': 'assistant', 'content': fact}}]}
+
+    async def complete(model, body, **options):
+        return host_model(body['messages'])
+
+    monkeypatch.setattr('serein.api.chat.complete', complete)
+    messages = [{'role': 'user', 'content': query}]
+    response = client.post('/v1/chat/completions', json={
+        'messages': messages, 'serein': {'window_id': 'gateway-window', 'memory': True}})
+    response.raise_for_status()
+    assert response.json()['choices'][0]['message']['content'] == fact
+
+    hook = SereinHook('https://serein.example', 'synthetic')
+
+    def request(method, path, body=None):
+        result = client.request(method, path, json=body)
+        result.raise_for_status()
+        return result.json()
+
+    monkeypatch.setattr(hook, '_json', request)
+    turn = hook.prepare('hook-window', messages)
+    assert host_model(turn.messages)['choices'][0]['message']['content'] == fact
+    hook.record_success(turn)
+    assert len(model_inputs) == 2 and embedded == [query, query]
+    assert [row[0] for row in ranked] == [rank_query, rank_query]
+    receipts = client.get('/v1/host/deliveries').json()['items']
+    assert {(row['window_id'], row['reported_by']) for row in receipts} == {
+        ('gateway-window', 'serein_chat_proxy'), ('hook-window', 'host')}
+    assert all(row['delivered_ids'] == ['scene:' + target] for row in receipts)
 
 
 def test_instance_rename_changes_next_rerank_query_without_rewriting_memories(birthday_recall):

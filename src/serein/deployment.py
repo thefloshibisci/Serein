@@ -13,8 +13,9 @@ DEFAULT_IDENTITY = {'user_name': 'User', 'ai_name': 'AI'}
 DEFAULT_UPSTREAM = {'base_url': '', 'model': '', 'writer_model': '', 'api_key': '',
                     'writer_enabled': False, 'memory_enabled': False, 'operit_enabled': True}
 DEFAULT_FEATURES = {'memos':False, 'persona':False, 'anti_retreat':False, 'window_shadows':False, 'association':False, 'write_context':False, 'relations_auto_accept':False, 'resume':False, 'originals':False, 'favorites':False, 'narrative_tools':False, 'narrative_nightly_organize':False, 'event_to_scene':False, 'current_time':False, 'image_transcription_async':False, 'image_eyes':False}
+DEFAULT_FEATURES.update(dream_read=False, dream_morning=False, memory_candidates=False, pipeline_agent=False)
 DEFAULT_CLOCK = {'timezone':'Asia/Shanghai'}
-DEFAULT_RESUME = {'latest_shadow':True, 'recent_events':True, 'favorite_scenes':True, 'selected_memories':False, 'selected_ids':[],
+DEFAULT_RESUME = {'mode':'command', 'command_enabled':True, 'mcp_enabled':False, 'latest_shadow':True, 'recent_events':True, 'favorite_scenes':True, 'selected_memories':False, 'selected_ids':[],
                   'recent_originals':False, 'recent_original_limit':20, 'pending_originals':True}
 DEFAULT_DOMAINS = [
     {'key':'relationship','label':'关系','description':'身份、称呼、承诺、边界与沟通方式','policy':'normal'},
@@ -39,6 +40,11 @@ def read_from_store(store):
     if ('image_transcription_async' not in saved_features and 'image_eyes' not in saved_features
             and saved_features.get('image_transcription')):
         features['image_eyes'] = True
+    # Old instances keep their selected entry point; explicit switches take precedence.
+    saved_resume = saved.get('resume', {})
+    resume = {key:saved_resume.get(key, value) for key,value in DEFAULT_RESUME.items()}
+    for entry in ('command', 'mcp'):
+        resume[entry + '_enabled'] = saved_resume.get(entry + '_enabled', saved_resume.get('mode', 'command') == entry)
     legacy_mode = 'legacy' if any(saved.get('assignments', {}).get(role) for role in ('track_router','event_curator','event_writer')) else 'agent'
     return {'settings_version':saved.get('settings_version',0), 'identity': {**DEFAULT_IDENTITY, **saved.get('identity', {})},
             'upstream': {**DEFAULT_UPSTREAM, **saved.get('upstream', {})},
@@ -46,12 +52,13 @@ def read_from_store(store):
             'features': features,
             'clock': {**DEFAULT_CLOCK, **saved.get('clock', {})},
             'recall': saved.get('recall', {}),
-            'resume': {key:saved.get('resume', {}).get(key, value) for key,value in DEFAULT_RESUME.items()},
+            'resume': resume,
             'models': saved.get('models', []), 'upstreams': saved.get('upstreams', []),
             'tagging': saved.get('tagging', {'domains': DEFAULT_DOMAINS}),
             'tagging_version': saved.get('tagging_version', 1),
             'dream': {'main_prompt':'', 'daily_probability':0.4, **saved.get('dream', {})},
-            'pipeline': {'auto_enabled':True,'execution_mode':legacy_mode,'max_input_chars':12000,'max_prompt_chars':40000,'timeout_seconds':600,'event_writer_concurrency':1,'track_lookback_days':3,
+            'pipeline': {'auto_enabled':True,'execution_mode':legacy_mode,'max_input_chars':40000,'max_prompt_chars':200000,'timeout_seconds':600,'event_writer_concurrency':1,'track_lookback_days':3,
+                         'track_candidates_enabled':False,'track_direct_hours':12,'track_candidate_limit':8,'router_compact_cards':False,
                          'joint_review_enabled':False,'material_review_enabled':False,'round_gate_enabled':False,
                          'append_protected_enabled':False,
                          **saved.get('pipeline',{})},
@@ -65,7 +72,7 @@ def feature_enabled(database, name):
 def grouped_upstreams(state):
     """Present legacy connections in the same editor without losing credentials."""
     groups = deepcopy(state['upstreams'])
-    route_keys = ('id','label','dimension','query_instruction','document_instruction')
+    route_keys = ('id','label','dimension','query_instruction','document_instruction','tokenizer','reasoning_content_compat')
     for model in state['models']:
         connection = {key:value for key,value in model.items() if key not in (*route_keys,'model')}
         group = next((item for item in groups if all(item.get(key, '') == connection.get(key, '')
@@ -130,6 +137,15 @@ def read_settings(database, *, public=False):
 def save_settings(database, changes):
     changes=deepcopy(changes)
     resume_changes=changes.get('resume') or {}
+    if 'mode' in resume_changes and resume_changes['mode'] not in ('command','mcp'):
+        raise ValueError('Resume mode must be command or mcp')
+    for entry in ('command', 'mcp'):
+        key = entry + '_enabled'
+        if key in resume_changes and type(resume_changes[key]) is not bool:
+            raise ValueError('Resume entry switches must be booleans')
+        # Legacy clients still select one entry point. Explicit new flags win.
+        if 'mode' in resume_changes:
+            resume_changes.setdefault(key, resume_changes['mode'] == entry)
     if resume_changes.get('recent_originals') is True:
         resume_changes['pending_originals']=False
     elif resume_changes.get('pending_originals') is True:
@@ -141,12 +157,28 @@ def save_settings(database, changes):
         explicit_mode='execution_mode' in (json.loads(stored[0]).get('pipeline',{}) if stored else {}) or 'execution_mode' in changes.get('pipeline',{})
         if changes.get('expected_version') is not None and changes['expected_version'] != current['settings_version']:
             raise Conflict('设置已在其他页面更新，请刷新后重试')
+        if changes.get('expected_tagging_version') is not None and changes['expected_tagging_version'] != current['tagging_version']:
+            raise Conflict('domain_policy_publish_version_conflict')
         for section, values in changes.items():
-            if section == 'expected_version':continue
+            if section in ('expected_version', 'expected_tagging_version'):continue
             if section == 'tagging':
-                if current['tagging'] != values:
+                tagging = deepcopy(current['tagging'])
+                if 'domains' in values:
+                    tagging['domains'] = values['domains']
+                if 'policies' in values:
+                    tagging['policies'] = {**tagging.get('policies', {}), **values['policies']}
+                keys = {item['key'] for item in tagging['domains']}
+                for kind, rules in (values.get('policies') or {}).items():
+                    if kind not in ('event', 'scene') or not isinstance(rules, dict) or rules.keys() - keys:
+                        raise ValueError('Invalid domain policy catalog')
+                    if any(rule not in ('normal', 'explicit_only', 'excluded') for rule in rules.values()):
+                        raise ValueError('Invalid domain policy')
+                if 'policies' in tagging:
+                    tagging['policies'] = {kind:{key:rule for key,rule in rules.items() if key in keys}
+                                           for kind,rules in tagging['policies'].items()}
+                if current['tagging'] != tagging:
                     current['tagging_version'] += 1
-                current['tagging'] = values
+                current['tagging'] = tagging
             elif section == 'models':
                 previous = {item['id']: item for item in current['models']}
                 current['models'] = [{**previous.get(item['id'], {}), **item} for item in values]
@@ -174,6 +206,8 @@ def save_settings(database, changes):
         if changes.get('features',{}).get('anti_retreat') is False:
             store.conn.execute("UPDATE background_state SET value_json=json_set(value_json,'$.pending',json('{}'),'$.token','','$.running_until',0) WHERE name LIKE 'anti_retreat:%'")
         catalog = configured_models(current)
+        if any(item.get('reasoning_content_compat', 'auto') not in ('auto', 'on', 'off') for item in catalog):
+            raise ValueError('Unknown reasoning content compatibility policy')
         known = {item['id'] for item in catalog}
         if len(known) != len(catalog):
             raise ValueError('Client model IDs must be unique; use aliases for models offered by multiple upstreams')
@@ -193,7 +227,13 @@ def save_settings(database, changes):
         lookback_days=current['pipeline'].get('track_lookback_days',3)
         if type(lookback_days) is not int or not 1<=lookback_days<=365:
             raise ValueError('Track lookback must be an integer between 1 and 365 days')
-        for key in ('joint_review_enabled','material_review_enabled','round_gate_enabled','append_protected_enabled'):
+        direct_hours=current['pipeline'].get('track_direct_hours',12)
+        if type(direct_hours) is not int or direct_hours not in (12,24,48,72):
+            raise ValueError('Track direct window must be 12, 24, 48 or 72 hours')
+        candidate_limit=current['pipeline'].get('track_candidate_limit',8)
+        if type(candidate_limit) is not int or not 1<=candidate_limit<=50:
+            raise ValueError('Track candidate limit must be an integer between 1 and 50')
+        for key in ('track_candidates_enabled','router_compact_cards','joint_review_enabled','material_review_enabled','round_gate_enabled','append_protected_enabled'):
             if type(current['pipeline'].get(key,False)) is not bool:
                 raise ValueError(f'{key} must be a boolean')
         mode=current['pipeline']['execution_mode']

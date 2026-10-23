@@ -257,6 +257,78 @@ def test_confirmed_rebuild_exits_hold_preserves_records_and_avoids_bad_cache(set
         asyncio.run(recovery.rebuild(settings.database, batch['id'], 'REBUILD_PIPELINE_BATCH'))
 
 
+@pytest.mark.parametrize('route_only', [False, True])
+def test_confirmed_history_reset_survives_next_windows_in_both_scopes(settings, route_only):
+    from serein.compat.raw_archive import raw_archive
+    tracks=p.track_state
+    archive=raw_archive(settings)
+    def add(session, day, workspace):
+        return archive.ingest([{'source_event_id':f'{session}-{day}-{role}',
+            'session_id':session,'role':role,'text':f'Synthetic book plan {day} {role}',
+            'created_at':f'2025-01-{day:02}T00:0{index}:00Z',
+            'metadata':{'workspace_root':workspace}}
+            for index,role in enumerate(('user','assistant'))],source='test')
+    # Legacy cross-window cards have routes but no bounded accepted frames.
+    add('b',1,'one');add('a',1,'two')
+    p.initialize(settings.database)
+    scopes={session:tracks.scope_for('test',session) for session in ('a','b')}
+    with Store(settings.database) as store:
+        for session,ids in [('b',[1,2]),('a',[3,4])]:
+            key='session_'+scopes[session]+'_track_0042'
+            tracks.persist(store.conn,[{'track_id':key,'subject':'Legacy book plan',
+                'throughline':'FUTURE LEGACY TEXT MUST NOT ENTER ROUTER',
+                'status':'active','event_policy':'rolling_engineering',
+                'recent_source_message_ids':[999]}],scopes[session])
+            for raw_id in ids:
+                store.conn.execute('INSERT INTO pipeline_routes VALUES (?,?)',(raw_id,encode({
+                    'source_message_id':raw_id,'primary_track_id':key,
+                    'context_track_ids':[],'routing_role':'primary_activity'})))
+                store.conn.execute("INSERT INTO raw_processing VALUES (?,'old','settled')",(raw_id,))
+    add('a',2,'one');add('b',2,'two')
+    for _ in range(2):
+        result=asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
+        assert result['status']=='needs_repair' and 'No bounded historical' in result['reason']
+    with Store(settings.database,read_only=True) as store:
+        held=[dict(row) for row in store.conn.execute("SELECT * FROM pipeline_batches WHERE status='needs_repair'")]
+    if route_only:
+        with Store(settings.database) as store:
+            for batch in held:
+                new_id='route:'+batch['id']
+                store.conn.execute('UPDATE pipeline_batches SET id=? WHERE id=?',(new_id,batch['id']))
+                batch['id']=new_id
+    for batch in held:
+        rebuilt=asyncio.run(recovery.rebuild(settings.database,batch['id'],'REBUILD_PIPELINE_BATCH'))
+        async def cold(role,request):
+            if role=='track_router':assert request['active_tracks']==[]
+            assert 'FUTURE LEGACY TEXT' not in request['prompt']
+            return output_for(role,request)
+        result=asyncio.run(p.advance(settings.database,include_recent=True,runner=cold))
+        assert result['status']=='routed' if route_only else result['events']==1
+        with Store(settings.database,read_only=True) as store:
+            data=json.loads(store.conn.execute('SELECT input_json FROM pipeline_batches WHERE id=?',
+                                               (rebuilt['batch_id'],)).fetchone()[0])
+            if not route_only:assert data['task_snapshot_compacted']
+            assert data['recovery_downgrade']['history_before_id'] in (5,7)
+            assert data['routing_result']['tracks'][0]['track_id'].endswith('_0043')
+    if route_only:
+        # Settlement reuses the new daytime proof, without needing legacy cards.
+        for _ in range(2):
+            result=asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
+            assert result['events']==1 and result['processed_originals']==2
+    # The next window used to rediscover the unchanged missing historical card.
+    add('a',3,'one');add('b',3,'two')
+    for _ in range(2):
+        result=asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
+        assert result['events']==1 and result['processed_originals']==2
+    with Store(settings.database,read_only=True) as store:
+        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==12
+        assert store.conn.execute("SELECT count(*) FROM pipeline_tracks WHERE id LIKE '%_0042'").fetchone()[0]==2
+    # A scope with no explicit reset still fails closed on the old history.
+    add('unconfirmed',3,'one')
+    result=asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
+    assert result['status']=='needs_repair' and 'No bounded historical' in result['reason']
+
+
 def test_rebuild_http_auth_confirm_target_and_busy_lease(settings):
     ingest(settings)
     batch, _ = hold_bad_cache(settings)
@@ -310,8 +382,9 @@ def test_future_producer_job_is_not_shortened_into_a_fake_old_card(settings):
     ingest(settings, 2)
     with Store(settings.database, read_only=True) as store:
         messages = [p.message(r) for r in store.conn.execute('SELECT * FROM raw_events ORDER BY id')]
-    # Unknown timestamps put both pairs in one real Router job.
+    # An existing producer frame inside one settlement window still cannot be trimmed.
     messages = [{**m, 'metadata': {**m['metadata'], 'timestamp_source': 'import_time'}} for m in messages]
+    messages=[{**m,'created_at':'2025-01-01T00:02:00Z' if m['id']==3 else '2025-01-01T00:03:00Z'} if m['id']>2 else m for m in messages]
     source = {**early, 'routing_messages': messages, 'input_policy': {'max_input_chars': 5000}}
     routed = history(settings, source)
     move_card(settings, routed)
@@ -437,3 +510,103 @@ def test_rebuild_audits_orphan_provenance_before_invalidating_it(settings):
         assert archived['route_json'] is None
         assert archived['provenance']['batch_id'] == 'route:missing'
         assert store.conn.execute('SELECT count(*) FROM pipeline_route_provenance').fetchone()[0] == 0
+
+
+def test_upgrade_rebuild_freezes_current_revision_and_preserves_old_producer(settings):
+    ingest(settings)
+    batch, data = freeze(settings)
+    history(settings, data)
+    old_revision = 'synthetic-before-upgrade'
+    with Store(settings.database) as store:
+        for key in (batch['id'], 'route:synthetic'):
+            row = store.conn.execute('SELECT input_json FROM pipeline_batches WHERE id=?', (key,)).fetchone()
+            old = json.loads(row[0]);old['runtime_revision'] = old_revision
+            store.conn.execute('UPDATE pipeline_batches SET input_json=? WHERE id=?', (encode(old), key))
+        producer = store.conn.execute("SELECT input_json FROM pipeline_batches WHERE id='route:synthetic'").fetchone()[0]
+    held = asyncio.run(p.advance(settings.database, include_recent=True, runner=synthetic_runner))
+    assert held['status'] == 'needs_repair' and 'Frozen runtime contract changed' in held['reason']
+    rebuilt = asyncio.run(recovery.rebuild(settings.database, batch['id'], 'REBUILD_PIPELINE_BATCH'))
+    with Store(settings.database, read_only=True) as store:
+        fresh = json.loads(store.conn.execute('SELECT input_json FROM pipeline_batches WHERE id=?',
+                                             (rebuilt['batch_id'],)).fetchone()[0])
+        assert fresh['contract'] == p.CONTRACT
+        assert fresh['runtime_revision'] == p.runtime_revision() != old_revision
+        assert store.conn.execute("SELECT input_json FROM pipeline_batches WHERE id='route:synthetic'").fetchone()[0] == producer
+
+
+@pytest.mark.parametrize('status', ['routed', 'done', 'superseded_input_budget'])
+def test_published_router_history_survives_runtime_upgrade(settings, status):
+    from serein.extensions.pipeline_images import compact_batch_snapshot
+    ingest(settings)
+    _, data = freeze(settings)
+    routed = history(settings, data)
+    move_card(settings, routed)
+    with Store(settings.database) as store:
+        original = json.loads(store.conn.execute(
+            "SELECT input_json FROM pipeline_batches WHERE id='route:synthetic'").fetchone()[0])
+        original['runtime_revision'] = 'synthetic-before-upgrade'
+        if status == 'done':original = compact_batch_snapshot(original)
+        store.conn.execute("UPDATE pipeline_batches SET input_json=?,status=? WHERE id='route:synthetic'",
+                           (encode(original), status))
+        before = [tuple(r) for r in store.conn.execute('SELECT * FROM pipeline_jobs ORDER BY rowid')]
+    recovered = p.cached_route_result(settings.database, data)
+    assert recovered['assignments'] == routed['assignments']
+    assert recovered['recovered_route_sources'][0]['batch_id'] == 'route:synthetic'
+    with Store(settings.database, read_only=True) as store:
+        assert [tuple(r) for r in store.conn.execute('SELECT * FROM pipeline_jobs ORDER BY rowid')] == before
+        assert store.conn.execute("SELECT input_json FROM pipeline_batches WHERE id='route:synthetic'").fetchone()[0] == encode(original)
+    async def continue_saved_routes(role, request):
+        assert role != 'track_router'
+        return output_for(role, request)
+    result = asyncio.run(p.advance(settings.database, include_recent=True, runner=continue_saved_routes))
+    assert result['status'] == 'processed' and result['events'] == 1
+    assert result['processed_originals'] == 2 and result['pending'] == 0
+
+
+def test_historical_track_loader_uses_accepted_early_frame_after_upgrade(settings):
+    ingest(settings)
+    _, early = freeze(settings)
+    ingest(settings, 2)
+    with Store(settings.database, read_only=True) as store:
+        messages = [p.task_message(r) for r in store.conn.execute('SELECT * FROM raw_events ORDER BY id')]
+    source = {**early, 'routing_messages': messages, 'input_policy': {'max_input_chars': 40}}
+    async def router(role, request):
+        output = output_for(role, request)
+        output['track_updates'][0]['throughline'] = 'EARLY' if max(m['id'] for m in request['messages']) == 2 else 'FUTURE'
+        return output
+    routed = history(settings, source, runner=router)
+    move_card(settings, routed)
+    with Store(settings.database) as store:
+        original = json.loads(store.conn.execute("SELECT input_json FROM pipeline_batches WHERE id='route:synthetic'").fetchone()[0])
+        original['runtime_revision'] = 'synthetic-before-upgrade'
+        store.conn.execute("UPDATE pipeline_batches SET input_json=? WHERE id='route:synthetic'", (encode(original),))
+    with Store(settings.database, read_only=True) as store:
+        cards, _ = p.track_state.load_tracks(store, 'test', 'books', 3, p.task_message)
+    assert len(cards) == 1 and cards[0]['throughline'] == 'EARLY'
+    assert cards[0]['recent_source_message_ids'] == [2]
+
+
+@pytest.mark.parametrize('damage', ['contract', 'scope', 'unfinished', 'missing_seed', 'missing_proof', 'missing_jobs'])
+def test_upgrade_does_not_accept_incomplete_or_incompatible_producer(settings, damage):
+    ingest(settings)
+    _, data = freeze(settings)
+    history(settings, data)
+    with Store(settings.database) as store:
+        batch = dict(store.conn.execute("SELECT * FROM pipeline_batches WHERE id='route:synthetic'").fetchone())
+        original = json.loads(batch['input_json'])
+        original['runtime_revision'] = 'synthetic-before-upgrade'
+        if damage == 'contract':original['contract'] = 'unsupported-contract'
+        elif damage == 'scope':original['scope'] = 'another-scope'
+        elif damage == 'unfinished':batch['status'] = 'routing_only'
+        elif damage == 'missing_seed':original.pop('tracks')
+        elif damage == 'missing_jobs':store.conn.execute('DELETE FROM pipeline_jobs WHERE batch_id=?', (batch['id'],))
+        else:
+            row = store.conn.execute('SELECT * FROM pipeline_jobs WHERE batch_id=?', (batch['id'],)).fetchone()
+            request = json.loads(row['request_json']);request.pop('routing_frame')
+            store.conn.execute('UPDATE pipeline_jobs SET request_json=? WHERE id=?', (encode(request), row['id']))
+        batch['input_json'] = encode(original)
+    with pytest.raises(p.RoutingRecoveryError, match='incompatible frozen contract') as error:
+        recovery._frames(settings.database, batch)
+    assert 'producer=route:synthetic' in str(error.value)
+    assert "runtime_revision='synthetic-before-upgrade'" in str(error.value)
+    assert 'current_runtime_revision=' in str(error.value)

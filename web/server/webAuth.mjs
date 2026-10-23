@@ -19,7 +19,8 @@ export function requireWebAuth(request, response, filename) {
     response.end('页面鉴权尚未配置，请运行管理脚本的选项 0。');
     return false;
   }
-  response.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Serein", charset="UTF-8"', 'Cache-Control': 'no-store' });
+  response.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Serein", charset="UTF-8"', 'Cache-Control': 'no-store',
+    'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' });
   response.end('Authentication required');
   return false;
 }

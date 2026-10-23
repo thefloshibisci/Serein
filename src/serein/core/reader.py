@@ -125,7 +125,7 @@ class Reader:
         kind = current["kind"]
         if current["lifecycle"] == "deleted":
             return self._result(kind, target, "deleted")
-        document = self.store.read(target, revision=revision)
+        document = current if revision is None else self.store.read(target, revision=revision)
         if document is None:
             return self._result(kind, target, "revision_missing")
         historical = document["body_revision"] != current["revision"]
@@ -145,6 +145,22 @@ class Reader:
                                       "JOIN sources s ON s.id=b.source_id WHERE b.document_id=? AND b.active=1 ORDER BY b.id", (target,))]
         return result
 
+    def _material_references(self, document):
+        """Current or historical references, before resolving/reading targets."""
+        number = document["body_revision"]
+        references = [dict(r) for r in self.store.conn.execute(
+            "SELECT kind,target_id,disposition,locator,metadata_json FROM narrative_materials "
+            "WHERE document_id=? AND revision=? ORDER BY kind,target_id,locator", (document["id"], number))]
+        # New Arc appends apply to current material reading, not retroactively
+        # to an old Narrative version. Explicit exclusions still win below.
+        if number == document["revision"]:
+            arc = document["metadata"].get("legacy_registry", document["metadata"]).get("arc_key")
+            if arc:
+                references.extend({"kind": "event", "target_id": row["event_id"], "disposition": "appended",
+                                   "locator": "event_arc_links", "metadata_json": row["metadata_json"]}
+                                  for row in self.store.conn.execute("SELECT * FROM event_arc_links WHERE arc_key=? ORDER BY event_id", (arc,)))
+        return references
+
     def materials(self, identifier, *, revision=None, include_mentions=False, with_evidence=False,
                   offset=0, limit=20, at=None):
         if offset < 0 or not 1 <= limit <= 100:
@@ -154,17 +170,7 @@ class Reader:
             return {"narrative_id": owner["id"], "status": owner["status"], "items": [], "total": 0, "next_offset": None}
         document = owner["document"]
         number = document["body_revision"]
-        references = [dict(r) for r in self.store.conn.execute(
-            "SELECT kind,target_id,disposition,locator,metadata_json FROM narrative_materials "
-            "WHERE document_id=? AND revision=? ORDER BY kind,target_id,locator", (owner["id"], number))]
-        # New Arc appends apply to current material reading, not retroactively
-        # to an old Narrative version. Explicit exclusions still win below.
-        if number == document["revision"]:
-            arc = document["metadata"].get("legacy_registry", document["metadata"]).get("arc_key")
-            if arc:
-                references.extend({"kind": "event", "target_id": row["event_id"], "disposition": "appended",
-                                   "locator": "event_arc_links", "metadata_json": row["metadata_json"]}
-                                  for row in self.store.conn.execute("SELECT * FROM event_arc_links WHERE arc_key=? ORDER BY event_id", (arc,)))
+        references = self._material_references(document)
         grouped = {}
         for ref in references:
             target = ref["target_id"]

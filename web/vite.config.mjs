@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { eventMailboxBridge } from './server/eventMailboxBridge.mjs';
 import { appearanceBridge } from './server/appearanceBridge.mjs';
+import { backupDownload } from './server/backupDownload.mjs';
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, posix, win32 } from "node:path";
@@ -13,6 +15,7 @@ import {
 } from "./server/sceneEvidenceBridge.mjs";
 import { narrativeBodyDiff, runNarrativeCodexTask } from "./server/narrativeCodexRunner.mjs";
 import { buildNarrativePreviewFingerprint } from "./server/narrativeMaterialPreview.mjs";
+import { createNarrativePreviewJobs } from "./server/narrativePreviewJobs.mjs";
 
 const narrativeWriterRoleDir = fileURLToPath(new URL("./codex_agents/narrative_writer/", import.meta.url));
 
@@ -691,7 +694,9 @@ function sereinMemoryBridge() {
     name: "serein-memory-bridge",
     configurePreviewServer(server) { sereinMemoryBridge().configureServer(server); },
     configureServer(server) {
+      const narrativePreviewJobs = createNarrativePreviewJobs();
       appearanceBridge(server, callSereinBackend, readJsonBody);
+      eventMailboxBridge(server, callSereinBackend, readJsonBody);
       server.middlewares.use("/__serein/export/markdown", async (request,response)=>{
         if(request.method!=="GET"){response.statusCode=405;response.end();return;}
         try {
@@ -706,20 +711,7 @@ function sereinMemoryBridge() {
           response.end(Buffer.from(await result.arrayBuffer()));
         } catch {response.statusCode=502;response.end("Export unavailable");}
       });
-      server.middlewares.use("/__serein/export/backup", async (request,response)=>{
-        if(request.method!=="GET"){response.statusCode=405;response.end();return;}
-        try {
-          const base=process.env.SEREIN_MEMORY_URL;
-          const token=process.env.SEREIN_MEMORY_TOKEN;
-          if(!base || !token)throw new Error("backend_not_configured");
-          const result=await fetch(base.replace(/\/$/,"")+"/v1/export/backup",{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(60_000)});
-          response.statusCode=result.status;
-          response.setHeader("Cache-Control","no-store");
-          response.setHeader("Content-Type",result.ok?"application/octet-stream":"application/json");
-          if(result.ok)response.setHeader("Content-Disposition",'attachment; filename="serein-backup.db"');
-          response.end(Buffer.from(await result.arrayBuffer()));
-        } catch {response.statusCode=502;response.end("Export unavailable");}
-      });
+      server.middlewares.use("/__serein/export/backup", backupDownload);
       server.middlewares.use("/__serein/migration", async (request,response)=>{
         response.setHeader("Cache-Control","no-store");
         const path=new URL(request.url,"http://localhost").pathname;
@@ -761,14 +753,32 @@ function sereinMemoryBridge() {
         }catch{response.statusCode=502;response.end(JSON.stringify({detail:"旧库操作暂未完成，请刷新任务状态后重试。"}));}
       });
 
+      server.middlewares.use("/__serein/resume", async (request,response) => {
+        response.setHeader("Content-Type","application/json; charset=utf-8");
+        response.setHeader("Cache-Control","no-store");
+        if(request.method!=="POST" || !["","/"].includes(request.url?.split("?")[0])) {
+          response.statusCode=405;response.end(JSON.stringify({error:"method_not_allowed"}));return;
+        }
+        try {
+          if(!String(request.headers["content-type"]).startsWith("application/json") ||
+            (request.headers.origin && new URL(request.headers.origin).host!==request.headers.host)) {
+            response.statusCode=403;response.end(JSON.stringify({error:"origin_not_allowed"}));return;
+          }
+          const result=await callSereinBackend("/v1/extensions/resume",{method:"POST",body:await readJsonBody(request,256*1024)});
+          response.statusCode=result.status;response.end(JSON.stringify(result.payload));
+        } catch {response.statusCode=502;response.end(JSON.stringify({detail:"续接资料暂时不可用，请重新读取。"}));}
+      });
+
       server.middlewares.use("/__serein/settings", async (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         response.setHeader("Cache-Control", "no-store");
         const candidates = request.url?.split("?")[0] === "/resume-candidates";
         const prepare = request.url?.split("?")[0] === "/prepare-memory";
+        const indexStatus = request.url?.split("?")[0] === "/index-status";
+        const resumeIndex = request.url?.split("?")[0] === "/resume-index";
         const discovery = request.url?.split("?")[0] === "/models/discover";
         const template = request.url?.split("?")[0] === "/upstreams-template";
-        if (!(candidates ? ["GET"] : prepare || template || discovery ? ["POST"] : ["GET", "PATCH"]).includes(request.method)) {
+        if (!(candidates || indexStatus ? ["GET"] : prepare || resumeIndex || template || discovery ? ["POST"] : ["GET", "PATCH"]).includes(request.method)) {
           response.statusCode = 405; response.end(JSON.stringify({ error: "method_not_allowed" })); return;
         }
         // Mutations are same-origin JSON requests, never cross-site form posts.
@@ -777,9 +787,9 @@ function sereinMemoryBridge() {
           response.statusCode = 403; response.end(JSON.stringify({ error: "origin_not_allowed" })); return;
         }
         try {
-          const result = await callSereinBackend(candidates ? "/v1/settings" + request.url : prepare ? "/v1/settings/prepare-memory" : discovery ? "/v1/settings/models/discover" : template ? "/v1/settings/upstreams-template" : "/v1/settings", {
+          const result = await callSereinBackend(candidates || indexStatus || resumeIndex ? "/v1/settings" + request.url : prepare ? "/v1/settings/prepare-memory" : discovery ? "/v1/settings/models/discover" : template ? "/v1/settings/upstreams-template" : "/v1/settings", {
             method: request.method,
-            ...(request.method === "PATCH" || template || discovery ? { body: await readJsonBody(request, 256_000) } : {}),
+            ...(request.method === "PATCH" || resumeIndex || template || discovery ? { body: await readJsonBody(request, 256_000) } : {}),
           }, {timeout: prepare ? 600_000 : 30_000});
           response.statusCode = result.status; response.end(JSON.stringify(result.payload));
         } catch {
@@ -1143,6 +1153,16 @@ function sereinMemoryBridge() {
 
       server.middlewares.use("/__serein/narrative-preview", async (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.setHeader("Cache-Control", "no-store");
+        if (request.method === "GET") {
+          const jobId = new URL(request.url, "http://localhost").searchParams.get("jobId") || "";
+          const job = narrativePreviewJobs.get(jobId);
+          response.statusCode = job ? (job.state === "pending" ? 202 : job.result.statusCode) : 404;
+          response.end(JSON.stringify(job
+            ? (job.state === "pending" ? { status: "pending" } : job.result.payload)
+            : { status: "error", reason: "preview_job_missing", message: "预览任务已中断，请重新预览。" }));
+          return;
+        }
         if (request.method !== "POST") {
           response.statusCode = 405;
           response.end(JSON.stringify({ error: "method_not_allowed" }));
@@ -1157,45 +1177,66 @@ function sereinMemoryBridge() {
             response.end(JSON.stringify({ status: "invalid", reason: "invalid_preview_request", writes_performed: [] }));
             return;
           }
-          const upstream = await callSereinDashboard("/api/narrative-rolls/preview-input", {
-            method: "POST",
-            body: {
-              narrative_id: narrativeId,
-              mode,
-              expected_revision: Number.parseInt(body.expectedRevision, 10) || undefined,
-              expected_document_sha256: String(body.expectedDocumentSha256 || "").trim(),
-              proposed_material_ids: body.proposedMaterialIds,
-            },
-          });
-          if (!upstream.ok) {
-            response.statusCode = upstream.status;
-            response.end(JSON.stringify(upstream.payload));
-            return;
-          }
-          const input = upstream.payload;
-          const preview = mode === "edit"
-            ? {
-                status: "ok",
-                evidence_sufficient: true,
-                body: String(body.proposedBody || "").trim(),
-                issues: [],
-                diff: narrativeBodyDiff(input.current_body, String(body.proposedBody || "").trim()),
+          const jobId = narrativePreviewJobs.start(async (signal) => {
+            const upstream = await callSereinDashboard("/api/narrative-rolls/preview-input", {
+              method: "POST",
+              signal,
+              body: {
+                narrative_id: narrativeId,
                 mode,
-                provider: "host_validation_only",
-                publication_status: "not_published",
+                expected_revision: Number.parseInt(body.expectedRevision, 10) || undefined,
+                expected_document_sha256: String(body.expectedDocumentSha256 || "").trim(),
+                proposed_material_ids: body.proposedMaterialIds,
+              },
+            });
+            if (!upstream.ok) {
+              return upstream.status === 504
+                ? { statusCode: 504, payload: { status: "error", reason: "narrative_preview_timeout", message: "读取叙事卷材料超时，请重新预览。", writes_performed: [] } }
+                : { statusCode: upstream.status, payload: upstream.payload };
+            }
+            const input = upstream.payload;
+            const preview = mode === "edit"
+              ? {
+                  status: "ok",
+                  evidence_sufficient: true,
+                  body: String(body.proposedBody || "").trim(),
+                  issues: [],
+                  diff: narrativeBodyDiff(input.current_body, String(body.proposedBody || "").trim()),
+                  mode,
+                  provider: "host_validation_only",
+                  publication_status: "not_published",
+                  writes_performed: [],
+                }
+              : await runNarrativeCodexTask({
+                  mode,
+                  title: input.title,
+                  writingFocus: input.writing_focus,
+                  currentBody: input.current_body,
+                  materials: input.materials,
+                  roleDir: narrativeWriterRoleDir,
+                }, {signal});
+            if (!preview.body) {
+              return { statusCode: mode === "edit" ? 400 : 200, payload: {
+                ...preview,
+                narrative_id: narrativeId,
+                base_revision: input.base_revision,
+                base_document_sha256: input.base_document_sha256,
+                material_counts: input.material_counts,
+                current_material_ids: input.current_material_ids,
+                proposed_material_ids: input.proposed_material_ids,
+                material_delta: input.material_delta,
+                material_snapshot_sha256: input.material_snapshot_sha256,
                 writes_performed: [],
-              }
-            : await runNarrativeCodexTask({
-                mode,
-                title: input.title,
-                writingFocus: input.writing_focus,
-                currentBody: input.current_body,
-                materials: input.materials,
-                roleDir: narrativeWriterRoleDir,
-              });
-          if (!preview.body) {
-            response.statusCode = mode === "edit" ? 400 : 200;
-            response.end(JSON.stringify({
+              } };
+            }
+            const fingerprint = buildNarrativePreviewFingerprint({
+              narrativeId,
+              revision: input.base_revision,
+              documentSha256: input.base_document_sha256,
+              body: preview.body,
+              materialSnapshotSha256: input.material_snapshot_sha256,
+            });
+            return { statusCode: 200, payload: {
               ...preview,
               narrative_id: narrativeId,
               base_revision: input.base_revision,
@@ -1205,30 +1246,13 @@ function sereinMemoryBridge() {
               proposed_material_ids: input.proposed_material_ids,
               material_delta: input.material_delta,
               material_snapshot_sha256: input.material_snapshot_sha256,
-              writes_performed: [],
-            }));
-            return;
-          }
-          const fingerprint = buildNarrativePreviewFingerprint({
-            narrativeId,
-            revision: input.base_revision,
-            documentSha256: input.base_document_sha256,
-            body: preview.body,
-            materialSnapshotSha256: input.material_snapshot_sha256,
+              preview_fingerprint: fingerprint,
+            } };
           });
-          response.statusCode = 200;
-          response.end(JSON.stringify({
-            ...preview,
-            narrative_id: narrativeId,
-            base_revision: input.base_revision,
-            base_document_sha256: input.base_document_sha256,
-            material_counts: input.material_counts,
-            current_material_ids: input.current_material_ids,
-            proposed_material_ids: input.proposed_material_ids,
-            material_delta: input.material_delta,
-            material_snapshot_sha256: input.material_snapshot_sha256,
-            preview_fingerprint: fingerprint,
-          }));
+          response.statusCode = jobId ? 202 : 429;
+          response.end(JSON.stringify(jobId
+            ? { status: "pending", job_id: jobId }
+            : { status: "error", reason: "preview_busy", message: "已有预览正在生成，请稍后再试。" }));
         } catch (error) {
           console.error("[serein-memory-bridge] Narrative preview failed", error);
           response.statusCode = error?.name === "AbortError" ? 504 : 502;
@@ -1668,6 +1692,12 @@ function sereinMemoryBridge() {
           const sceneId = String(body.sceneId || "").trim();
           const expectedUpdatedAt = String(body.expectedUpdatedAt || "").trim();
           const status = body.status === "archived" ? "archived" : "active";
+          if ((body.restoreSurface !== undefined && typeof body.restoreSurface !== "boolean")
+              || (body.restoreSurface === true && body.status !== "active")) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({ error: "invalid_scene_status", message: "恢复可浮现需要 active 状态和布尔开关。" }));
+            return;
+          }
           if (!/^[A-Za-z0-9_.:#-]{1,160}$/.test(sceneId) || !expectedUpdatedAt) {
             response.statusCode = 400;
             response.end(JSON.stringify({ error: "invalid_scene_status", message: "缺少 Scene 或版本信息。" }));
@@ -1677,6 +1707,7 @@ function sereinMemoryBridge() {
             scene_id: sceneId,
             expected_updated_at: expectedUpdatedAt,
             status,
+            ...(body.restoreSurface === undefined ? {} : { restore_surface: body.restoreSurface }),
           });
           response.statusCode = result?.status === "conflict" ? 409 : result?.status === "invalid" ? 400 : 200;
           response.end(JSON.stringify(result));

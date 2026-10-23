@@ -287,7 +287,7 @@ def test_auth_stores_only_salted_hash_and_prepare_preserves_existing_data(tmp_pa
     assert (deploy/'runtime'/'sentinel').read_text()=='preserve'
     assert (deploy/'secrets'/'api-token').read_bytes()==before
     assert 'a-long-test-password' not in capsys.readouterr().out
-    assert '/data/serein.db' in (deploy/'config.toml').read_text()
+    assert '/data/serein.db' in (deploy/'config.toml').read_text(encoding='utf-8')
 
 
 def test_invalid_choice_and_confirmation_retry_without_running_actions(monkeypatch):
@@ -325,7 +325,7 @@ def test_local_prepare_uses_own_paths_preserves_secrets_and_retries_duplicate_po
     module.prepare()
     assert (deploy/'secrets'/'api-token').read_bytes()==before
     assert (deploy/'runtime'/'sentinel').read_text()=='preserve'
-    assert '"./runtime/serein.db"' in (deploy/'config.toml').read_text()
+    assert '"./runtime/serein.db"' in (deploy/'config.toml').read_text(encoding='utf-8')
     assert module.url()=='http://127.0.0.1:19200'
     record=module.installation()
     assert (record['memory_port'],record['preview_port'])==(19201,19202)

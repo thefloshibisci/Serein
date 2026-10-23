@@ -13,7 +13,7 @@ from serein.core.store import Store
 from serein.deployment import save_settings
 from serein.recall.index import Search, build_index
 from serein.tagging_entities import snapshot, validate
-from test_live_clients import live
+from test_public_features import settings as idle_settings
 
 
 def material(key, text='', *, kind='scene', names=(), bound=False):
@@ -144,8 +144,8 @@ def test_semantic_results_are_filtered_before_limit_and_reject_stale_index(tmp_p
     assert [row['source_id'] for row in result['scene:seed']] == ['target']
 
 
-def test_daily_scan_supplies_entity_only_pair_and_notices_new_tags(live, tmp_path, monkeypatch):
-    settings, _ = live
+def test_daily_scan_supplies_entity_only_pair_and_notices_new_tags(idle_settings, tmp_path, monkeypatch):
+    settings = idle_settings
     with Store(settings.database) as store:
         for key, body in [('first', '春天到了'), ('second', '修好了水管')]:
             store.create(key, 'scene', key, body, metadata={'object_kind': 'scene'})
@@ -180,8 +180,8 @@ def test_daily_scan_supplies_entity_only_pair_and_notices_new_tags(live, tmp_pat
     assert all(not row['candidates'] for row in captured[-1])
 
 
-def test_failed_semantic_lane_retries_after_recovery_without_losing_lexical(live, tmp_path, monkeypatch):
-    settings, _ = live
+def test_failed_semantic_lane_retries_after_recovery_without_losing_lexical(idle_settings, tmp_path, monkeypatch):
+    settings = idle_settings
     with Store(settings.database) as store:
         for key in ('first', 'second'):
             store.create(key, 'scene', key, 'Orion 发布新版本。', metadata={'object_kind': 'scene'})

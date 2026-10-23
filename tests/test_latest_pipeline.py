@@ -20,7 +20,7 @@ def curator_task(settings):
     return task
 
 
-def test_router_ignores_extra_fields_but_identifies_missing_track_updates():
+def test_router_ignores_extra_fields_and_inherits_unchanged_tracks():
     messages = [{'id': 11}]
     output = {
         'message_assignments': [{'source_message_id': 11, 'primary_track_ref': 'existing',
@@ -31,8 +31,7 @@ def test_router_ignores_extra_fields_but_identifies_missing_track_updates():
         return normalize_event_track_message_output(output, messages, tracks,
                                                     session_id=1, next_track_ordinal=1)
     output['comment'] = 'extra top-level field'
-    with pytest.raises(ValueError, match=r"missing=\['existing'\], unused=\[\]"):
-        normalize()
+    assert normalize()[1] == [{**tracks[0], 'event_policy': 'default'}]
     output['track_updates'].append({'track_ref': 'existing', 'subject': 'Plan',
                                     'throughline': 'Keep planning', 'status': 'active', 'note': 'extra'})
     assert normalize()[0][0]['primary_track_id'] == 'existing'
@@ -57,6 +56,201 @@ def test_router_extra_fields_are_removed_from_saved_job(settings):
     assert 'note' not in saved['track_updates'][0]
 
 
+def test_router_inherits_context_tracks_without_updating_unused_cards():
+    messages = [{'id': 20283}, {'id': 20322}]
+    tracks = [{'track_id': f'existing:{index}', 'subject': 'Plan',
+               'throughline': 'Continue the plan', 'status': 'parked'} for index in range(127)]
+    output = {'message_assignments': [
+        {'source_message_id': source['id'], 'primary_track_ref': 'new:1',
+         'context_track_refs': ['existing:4'], 'routing_role': 'bridge'} for source in messages],
+        'track_updates': [{'track_ref': 'new:1', 'subject': 'New plan',
+                           'throughline': 'Start planning', 'status': 'active'}]}
+    def normalize():
+        return normalize_event_track_message_output(output, messages, tracks,
+                                                    session_id='current', next_track_ordinal=25)
+    assignments, updates, ordinal = normalize()
+    assert assignments[0]['context_track_ids'] == ['existing:4']
+    assert len(updates) == 2 and ordinal == 26
+    assert updates[1]['subject'] == tracks[4]['subject']
+    output['message_assignments'][0]['source_message_id'] = 1
+    with pytest.raises(ValueError, match='source_message_id=1; expected=20283'):
+        normalize()
+
+
+@pytest.mark.parametrize('patch,expected', [
+    ([], 'in_progress'), ([{'track_ref': 'existing', 'task_status': 'blocked'}], 'blocked'),
+    ([{'track_ref': 'existing', 'task_status': 'completed'}], 'completed'),
+    ([{'track_ref': 'existing', 'task_status': None}], None),
+])
+def test_router_sparse_task_status_preserves_card_and_policy(patch, expected):
+    old = {'track_id': 'existing', 'subject': 'Repair mobile download',
+           'throughline': 'The download request lacks authentication', 'status': 'parked',
+           'event_policy': 'rolling_engineering', 'task_status': 'in_progress'}
+    output = {'message_assignments': [{'source_message_id': 20283, 'primary_track_ref': 'existing',
+                                      'context_track_refs': [], 'routing_role': 'primary_activity'}],
+              'track_updates': patch}
+    _, cards, ordinal = normalize_event_track_message_output(output, [{'id': 20283}], [old],
+                                                             session_id='one', next_track_ordinal=8)
+    assert cards == [{**old, 'task_status': expected}]
+    assert ordinal == 8
+
+
+@pytest.mark.parametrize('patch,error', [
+    ([], 'missing new Tracks'),
+    ([{'track_ref': 'new:1', 'task_status': 'completed'}], 'new Track fields missing'),
+    ([{'track_ref': 'existing', 'subject': ''}], 'bounded subject'),
+    ([{'track_ref': 'existing', 'task_status': 'unknown'}], 'invalid task_status'),
+    ([{'track_ref': 'existing', 'task_status': []}], 'invalid task_status'),
+    ([{'track_ref': 'existing'}, {'track_ref': 'existing'}], 'repeated Track'),
+    ([{'track_ref': 'unused'}], 'unused='),
+])
+def test_sparse_updates_still_reject_incomplete_new_or_invalid_existing_cards(patch, error):
+    cards = [{'track_id': key, 'subject': 'Plan', 'throughline': 'Specific goal', 'status': 'active'}
+             for key in ('existing', 'unused')]
+    ref = 'new:1' if error in ('missing new Tracks', 'new Track fields missing') else 'existing'
+    output = {'message_assignments': [{'source_message_id': 20283, 'primary_track_ref': ref,
+                                      'context_track_refs': [], 'routing_role': 'primary_activity'}],
+              'track_updates': patch}
+    with pytest.raises(ValueError, match=error):
+        normalize_event_track_message_output(output, [{'id': 20283}], cards,
+                                              session_id='one', next_track_ordinal=8)
+
+
+def test_sparse_task_progress_survives_save_next_batch_and_writer_input(settings):
+    writer_statuses = []
+    step = 0
+    async def runner(role, request):
+        output = output_for(role, request)
+        if role == 'track_router':
+            if step == 0:
+                output['track_updates'][0]['task_status'] = 'in_progress'
+            elif step == 1:
+                ref = request['active_tracks'][0]['track_id']
+                assert request['active_tracks'][0]['task_status'] == 'in_progress'
+                output['track_updates'] = [{'track_ref': ref, 'task_status': 'completed'}]
+            else:
+                assert request['active_tracks'][0]['task_status'] == 'completed'
+                output['track_updates'] = []
+        if role == 'event_curator':
+            model_input = latest.event_curator_model_input(request['component'])
+            assert model_input['tracks'][0]['task_status'] == ('in_progress' if step == 0 else 'completed')
+        if role == 'event_writer':
+            cards = latest.materialized_track_cards_payload(request['component']['track_cards'])
+            writer_statuses.append(cards[0]['task_status'])
+        return output
+    for step in range(3):
+        ingest(settings, step + 1)
+        assert asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))['events'] == 1
+        with Store(settings.database, read_only=True) as store:
+            card = json.loads(store.conn.execute('SELECT card_json FROM pipeline_tracks').fetchone()[0])
+            assert card['subject'] == 'Book club' and card['throughline'] == 'Plan book club'
+            assert card['recent_source_message_ids'] == [2 * (step + 1)]
+            assert card['task_status'] == ('in_progress' if step == 0 else 'completed')
+    assert writer_statuses == ['in_progress', 'completed', 'completed']
+
+
+def test_router_api_repair_receives_missing_field_and_preserves_sources(settings, monkeypatch):
+    ingest(settings)
+    save_settings(settings.database, {
+        'models': [{'id': 'local', 'model': 'synthetic', 'base_url': 'http://127.0.0.1:9/v1'}],
+        'assignments': {'track_router': 'local'}})
+    calls = []
+    async def complete(model, payload):
+        with Store(settings.database, read_only=True) as store:
+            request = json.loads(store.conn.execute(
+                "SELECT request_json FROM pipeline_jobs WHERE role LIKE 'track_router%' "
+                "AND output_json IS NULL ORDER BY rowid DESC LIMIT 1").fetchone()[0])
+        calls.append(payload)
+        output = output_for('track_router', request)
+        if len(calls) == 1:
+            del output['message_assignments'][0]['context_track_refs']
+        return {'choices': [{'message': {'content': json.dumps(output)}}]}
+    monkeypatch.setattr('serein.model_runtime.complete', complete)
+    task = asyncio.run(p.advance(settings.database, include_recent=True))
+    assert task['role'] == 'event_curator'
+    assert len(calls) == 2
+    correction = calls[1]['messages'][1]['content']
+    assert 'validation_error' in correction and "fields missing: ['context_track_refs']" in correction
+    with Store(settings.database, read_only=True) as store:
+        accepted = json.loads(store.conn.execute(
+            "SELECT output_json FROM pipeline_jobs WHERE role LIKE 'track_router%'").fetchone()[0])
+        assert [row['source_message_id'] for row in accepted['message_assignments']] == [1, 2]
+        assert [row[0] for row in store.conn.execute('SELECT id FROM raw_events ORDER BY id')] == [1, 2]
+        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0] == 0
+
+
+def test_curator_api_repair_removes_unneeded_bridge_exclusion_without_adding_an_event(settings, monkeypatch):
+    ingest(settings)
+    save_settings(settings.database, {
+        'models': [{'id': 'local', 'model': 'synthetic', 'base_url': 'http://127.0.0.1:9/v1'}],
+        'assignments': {role: 'local' for role in p.ROLES},
+        'pipeline': {'execution_mode': 'api', 'joint_review_enabled': True}})
+    curator_calls = []
+    proposals = []
+    async def complete(model, payload):
+        with Store(settings.database, read_only=True) as store:
+            request = json.loads(store.conn.execute(
+                'SELECT request_json FROM pipeline_jobs WHERE output_json IS NULL ORDER BY rowid DESC LIMIT 1'
+            ).fetchone()[0])
+        output = output_for(request['role'], request)
+        if request['role'] == 'track_router':
+            output['message_assignments'][0].update(context_track_refs=['new:2'], routing_role='bridge')
+            output['track_updates'].append({'track_ref': 'new:2', 'subject': 'Earlier reading list',
+                'throughline': 'Earlier background only', 'event_policy': 'default', 'status': 'parked'})
+        elif request['role'] == 'event_curator':
+            curator_calls.append(payload)
+            unit = next(unit for unit in request['component']['memberships'] if unit['routing_role'] == 'bridge')
+            output['events'][0]['primary_track_id'] = unit['track_id']
+            proposals.append(copy.deepcopy(output['events']))
+            other = next(edge['track_id'] for edge in request['component']['context_edges']
+                         if edge['unit_root_message_id'] == unit['unit_root_message_id'])
+            assert all(event['primary_track_id'] != other for event in output['events'])
+            if len(curator_calls) == 1:
+                source = next(m for m in request['component']['messages'] if m['id'] == unit['unit_root_message_id'])
+                output['decision_review']['bridge_exclusions'] = [{
+                    'unit_root_message_id': unit['unit_root_message_id'], 'excluded_track_id': other,
+                    'reason': 'Only background',
+                    'evidence': [{'source_message_id': source['id'], 'quote': source['content']}]}]
+            else:
+                correction = payload['messages'][1]['content']
+                assert 'No missing side' in correction and 'bridge_exclusions: []' in correction
+                assert 'Do not create an Event or change ownership' in correction
+                output['decision_review']['bridge_exclusions'] = []
+        return {'choices': [{'message': {'content': json.dumps(output)}}]}
+    monkeypatch.setattr('serein.model_runtime.complete', complete)
+    result = asyncio.run(p.advance(settings.database, include_recent=True))
+    assert result['events'] == 1 and len(curator_calls) == 2
+    assert proposals[0] == proposals[1]
+    with Store(settings.database, read_only=True) as store:
+        saved = json.loads(store.conn.execute(
+            "SELECT output_json FROM pipeline_jobs WHERE role LIKE 'event_curator:%'").fetchone()[0])
+        assert saved['decision_review']['bridge_exclusions'] == []
+        assert len(saved['events']) == 1
+        assert [row[0] for row in store.conn.execute('SELECT id FROM raw_events ORDER BY id')] == [1, 2]
+        assert [tuple(row) for row in store.conn.execute(
+            'SELECT raw_id,outcome FROM raw_processing ORDER BY raw_id')] == [(1, 'settled'), (2, 'settled')]
+        assert store.conn.execute("SELECT count(*) FROM pipeline_attempts WHERE COALESCE(error,'')<>''").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize('action,base_count,expected', [
+    ('create', 1, '0'), ('extend', 0, '1'), ('rewrite', 0, '1'),
+    ('merge', 0, 'at least 2'), ('merge', 1, 'at least 2'),
+])
+def test_curator_cardinality_error_identifies_action_and_counts(settings, action, base_count, expected):
+    ingest(settings)
+    asyncio.run(p.advance(settings.database, include_recent=True, runner=synthetic_runner))
+    ingest(settings, 2)
+    task = curator_task(settings)
+    output = output_for('event_curator', task['request'])
+    p.validate(task['request'], output)
+    output['events'][0]['action'] = action
+    output['events'][0]['base_event_ids'] = output['events'][0]['base_event_ids'][:base_count]
+    with pytest.raises(ValueError, match='action/base cardinality is invalid') as error:
+        p.validate(task['request'], output)
+    assert f'action={action!r}, base_count={base_count}, expected={expected}' in str(error.value)
+    assert 'Book club' not in str(error.value)
+
+
 def test_curator_error_identifies_unaccounted_source(settings):
     ingest(settings)
     task = curator_task(settings)
@@ -66,7 +260,22 @@ def test_curator_error_identifies_unaccounted_source(settings):
         p.validate(task['request'], output)
 
 
-def test_curator_repeated_omission_pauses_without_skipping(settings):
+def test_curator_continuing_track_without_saved_event_uses_one_create(settings):
+    ingest(settings)
+    task = curator_task(settings)
+    component = task['request']['component']
+    assert component['base_event_candidates'] == []
+    output = output_for('event_curator', task['request'])
+    normalized = latest.normalize_event_curator_output(output, component)
+    assert len(normalized['events']) == 1
+    assert normalized['events'][0]['action'] == 'create'
+    assert set(normalized['events'][0]['source_message_ids']) == {message['id'] for message in component['messages']}
+    output['events'][0]['action'] = 'extend'
+    with pytest.raises(ValueError, match="action='extend', base_count=0, expected=1"):
+        p.validate(task['request'], output)
+
+
+def test_curator_repeated_omission_retains_scope_without_skipping(settings):
     ingest(settings)
     calls = []
     async def runner(role, request):
@@ -77,25 +286,36 @@ def test_curator_repeated_omission_pauses_without_skipping(settings):
         return output
     result = asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))
     assert len(calls) == 2 and 'missing_messages' in calls[1] and 'previous_output' in calls[1]
-    assert result['status'] == 'paused'
+    assert result['status'] == 'processed' and result['events'] == 0
+    assert result['curator_omission_deferrals'][0]['missing_source_message_ids']
+    assert asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))['status'] == 'current'
+    ingest(settings, 2)
+    with Store(settings.database) as store:
+        store.conn.execute("UPDATE raw_events SET created_at='2025-01-01T00:02:00Z' WHERE id=3")
+        store.conn.execute("UPDATE raw_events SET created_at='2025-01-01T00:03:00Z' WHERE id=4")
+    assert asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))['status'] == 'current'
+    assert len(calls) == 2  # New messages must not cause a same-day retry of the held range.
     with Store(settings.database, read_only=True) as store:
         assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0] == 0
 
 
-def test_agent_curator_second_omission_pauses(settings):
+def test_agent_curator_second_omission_retains_scope(settings):
     ingest(settings)
     task = curator_task(settings)
     output = output_for('event_curator', task['request'])
     output['events'][0]['owned_unit_roots'].pop()
     with pytest.raises(latest.CuratorCoverageError):
         p.submit(settings.database, task['job_id'], output)
-    with pytest.raises(p.PausedBatch):
-        p.submit(settings.database, task['job_id'], output)
+    receipt = p.submit(settings.database, task['job_id'], output)
+    assert receipt['status'] == 'host_deferred'
+    result = asyncio.run(p.advance(settings.database, include_recent=True))
+    assert result['status'] == 'processed' and result['events'] == 0
     with Store(settings.database, read_only=True) as store:
-        assert store.conn.execute('SELECT status FROM pipeline_batches WHERE id=?', (task['job_id'].split(':event_curator:')[0],)).fetchone()[0] == 'paused_failure'
+        assert store.conn.execute('SELECT status FROM pipeline_batches WHERE id=?', (result['batch_id'],)).fetchone()[0] == 'done'
+        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0] == 0
 
 
-def test_repeated_curator_omission_pauses_and_retry_can_correct(settings):
+def test_repeated_curator_omission_pauses_on_third_round_and_retry_can_correct(settings, monkeypatch):
     ingest(settings)
     fail = True
     async def runner(role, request):
@@ -103,8 +323,18 @@ def test_repeated_curator_omission_pauses_and_retry_can_correct(settings):
         if fail and role == 'event_curator':
             output['events'][0]['owned_unit_roots'].pop()
         return output
+    clock = datetime(2026, 1, 1, 12, tzinfo=p.TZ)
+    monkeypatch.setattr(p, 'now', lambda: clock.isoformat())
+    new_batch = p.new_batch
+    monkeypatch.setattr(p, 'new_batch', lambda database, include_recent, **kwargs:
+                        new_batch(database, include_recent, clock=clock, **kwargs))
+    for _ in range(2):
+        retained = asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))
+        assert retained['status'] == 'processed' and retained['events'] == 0
+        clock += timedelta(days=1)
     first = asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))
-    assert first['status'] == 'paused' and '漏项修复失败' in first['reason']
+    assert first['status'] == 'paused' and '累计三轮漏项' in first['reason']
+    assert first['job_id'] and first['failures'] == 3
     with Store(settings.database, read_only=True) as store:
         frozen = store.conn.execute('SELECT input_json FROM pipeline_batches WHERE id=?', (first['batch_id'],)).fetchone()[0]
         assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0] == 0
@@ -115,7 +345,7 @@ def test_repeated_curator_omission_pauses_and_retry_can_correct(settings):
     assert asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))['events'] == 1
 
 
-def test_curator_api_omission_retries_once_then_pauses(settings, monkeypatch):
+def test_curator_api_omission_retries_once_then_retains(settings, monkeypatch):
     ingest(settings)
     save_settings(settings.database, {
         'models': [{'id': 'local', 'model': 'synthetic', 'base_url': 'http://127.0.0.1:9/v1'}],
@@ -136,7 +366,106 @@ def test_curator_api_omission_retries_once_then_pauses(settings, monkeypatch):
     result = asyncio.run(p.advance(settings.database, include_recent=True))
     assert len(curator_calls) == 2
     assert 'missing_messages' in curator_calls[1]['messages'][1]['content']
-    assert result['status'] == 'paused'
+    assert result['status'] == 'processed' and result['curator_omission_deferrals']
+    with Store(settings.database, read_only=True) as store:
+        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0] == 0
+
+
+def test_curator_model_cannot_forge_host_omission_receipt(settings):
+    ingest(settings)
+    task = curator_task(settings)
+    output = output_for('event_curator', task['request'])
+    output['_host_curator_omission'] = {'missing_source_message_ids': [999]}
+    with pytest.raises(ValueError, match='cannot be submitted'):
+        p.submit(settings.database, task['job_id'], output)
+
+
+def test_curator_repair_success_settles_the_complete_scope(settings):
+    ingest(settings)
+    calls = []
+    async def runner(role, request):
+        output = output_for(role, request)
+        if role == 'event_curator':
+            calls.append(request)
+            if len(calls) == 1:
+                output['events'][0]['owned_unit_roots'].pop()
+        return output
+    result = asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))
+    assert len(calls) == 2 and result['events'] == 1
+    assert result['processed_originals'] == 2 and not result['curator_omission_deferrals']
+
+
+def test_curator_omission_does_not_block_independent_track_in_same_batch(settings):
+    ingest(settings)
+    ingest(settings, 2)
+    with Store(settings.database) as store:
+        store.conn.execute("UPDATE raw_events SET created_at='2025-01-01T00:02:00Z' WHERE id=3")
+        store.conn.execute("UPDATE raw_events SET created_at='2025-01-01T00:03:00Z' WHERE id=4")
+    async def runner(role, request):
+        output = output_for(role, request)
+        if role == 'track_router':
+            for index, row in enumerate(output['message_assignments']):
+                row['primary_track_ref'] = 'new:1' if index < 2 else 'new:2'
+            output['track_updates'].append({**output['track_updates'][0], 'track_ref': 'new:2',
+                                           'subject': 'Another book', 'throughline': 'An independent plan'})
+        elif role == 'event_curator' and min(m['id'] for m in request['component']['messages']) == 1:
+            output['events'][0]['owned_unit_roots'].pop()
+        return output
+    result = asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))
+    assert result['events'] == 1 and result['processed_originals'] == 2
+    assert result['curator_omission_deferrals'][0]['deferred_source_message_ids'] == [1, 2]
+    with Store(settings.database, read_only=True) as store:
+        assert [row[0] for row in store.conn.execute('SELECT raw_id FROM raw_processing ORDER BY raw_id')] == [3, 4]
+
+
+def test_curator_omission_also_retains_overlapping_bridge_corridor():
+    omitted = {'messages': [{'id': 1}, {'id': 2}]}
+    shared = {'messages': [{'id': 2}, {'id': 3}]}
+    independent = {'messages': [{'id': 4}]}
+    plans = [
+        (omitted, p.curator_omission_plan(omitted, {'_host_curator_omission': {
+            'missing_source_message_ids': [1]}}), []),
+        (shared, {'events': [{'event_ref': 'would-settle'}]}, [('event', 'draft')]),
+        (independent, {'events': [{'event_ref': 'independent'}]}, [('event', 'draft')]),
+    ]
+    propagated = p.propagate_curator_omission(plans)
+    assert propagated[1][1]['events'] == [] and propagated[1][2] == []
+    assert propagated[1][1]['curator_omission_deferrals'][0]['reason'] == 'curator_omission_dependency'
+    assert propagated[2] == plans[2]
+
+
+@pytest.mark.parametrize('prior', [
+    [('2026-01-01', [1]), ('2026-01-02', [2])],
+    [('2026-01-01', [1]), ('2026-01-01', [1])],
+])
+def test_omission_pause_counts_rounds_for_the_same_source_not_unrelated_ranges(settings, prior):
+    p.initialize(settings.database)
+    component = {'messages': [{'id': 1}, {'id': 2}]}
+    output = {'_host_curator_omission': {'job_id': 'current:curator', 'missing_source_message_ids': [1]}}
+    with Store(settings.database) as store:
+        for index, (day, source_ids) in enumerate(prior):
+            store.conn.execute('INSERT INTO pipeline_batches(id,scope,status,input_json,result_json) VALUES (?,?,?,?,?)',
+                (f'prior:{index}', 'scope', 'done', json.dumps({'day': day}), json.dumps({
+                    'curator_omission_deferrals': [{'reason': 'curator_omitted',
+                                                  'deferred_source_message_ids': source_ids}]})))
+    p.pause_repeated_curator_omission(settings.database, {'id': 'current', 'scope': 'scope'}, component, output)
+
+
+def test_curator_repair_over_prompt_limit_retains_scope_without_truncation(settings):
+    ingest(settings)
+    task = curator_task(settings)
+    save_settings(settings.database, {'pipeline': {'max_prompt_chars':
+        len(task['request']['prompt']) + len(task['request']['rules']) + 20}})
+    calls = []
+    async def runner(role, request):
+        output = output_for(role, request)
+        if role == 'event_curator':
+            calls.append(request)
+            output['events'][0]['owned_unit_roots'].pop()
+        return output
+    result = asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))
+    assert len(calls) == 1 and result['status'] == 'processed'
+    assert result['curator_omission_deferrals'] and result['processed_originals'] == 0
 
 
 def test_writer_json_object_wrapper_is_removed_before_saving(settings):
@@ -211,7 +540,7 @@ def test_latest_rolling_policy_does_not_force_unrelated_leaves_and_defers_blocke
     assert normalized['hard_skips'][0]['blocking_flags']==['protected']
 
 
-def test_three_stages_and_writer_sees_exact_predecessor_originals(settings):
+def test_three_stages_and_writer_sees_predecessor_body_without_old_originals(settings):
     ingest(settings);seen=[]
     async def runner(role,request):seen.append(role);return output_for(role,request)
     assert asyncio.run(p.advance(settings.database,include_recent=True,runner=runner))['events']==1
@@ -228,8 +557,11 @@ def test_three_stages_and_writer_sees_exact_predecessor_originals(settings):
     ingest(settings,2)
     task=curator_task(settings);p.submit(settings.database,task['job_id'],output_for(task['role'],task['request']))
     task=asyncio.run(p.advance(settings.database,include_recent=True));prompt=task['request']['prompt']
-    assert len(task['request']['messages'])==4
+    assert len(task['request']['messages'])==2
     assert task['role']=='event_writer' and 'Book club plan 1' in prompt and 'Book club plan 2' in prompt
+    reading=json.loads(prompt.split('<event_reading_block_json>\n',1)[1].split('\n</event_reading_block_json>',1)[0])
+    assert {row['source_message_id'] for row in reading}=={3,4}
+    assert 'Agreed to plan 1' not in prompt
     assert '<previous_events_json>' in prompt and '正文通常控制在 500 字以内' in prompt
     assert task['request']['rules'] and task['request']['rules'] not in prompt
     with Store(settings.database) as store:
@@ -335,10 +667,11 @@ def test_writer_prompt_examples_match_both_evidence_outcomes():
     assert len(samples)==2
     sufficient,insufficient=samples
     for sample in samples:
+        assert 'recallable' not in sample
         assert latest.validate_event_writer_result(sample)==[]
     sufficient['recallable']=False
     assert latest.validate_event_writer_result(sufficient)==[]
-    assert insufficient['evidence_sufficient'] is False and insufficient['recallable'] is False
+    assert insufficient['evidence_sufficient'] is False and 'recallable' not in insufficient
     assert insufficient['title']==insufficient['event_draft']==''
     assert insufficient['kept_details']==insufficient['discarded_details']==[]
 
@@ -450,7 +783,8 @@ def test_configured_names_are_literal_values_not_recursive_templates(settings):
     assert '我是 NewGuide，NewReader是她' in rules
 
 
-def test_images_keep_ownership_and_only_curator_receives_pixels(settings,monkeypatch):
+@pytest.mark.parametrize('echo', ['none', 'receipts', 'indexed'])
+def test_images_keep_ownership_and_only_curator_receives_pixels(settings,monkeypatch,echo):
     uri='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII='
     raw_archive(settings).ingest([
         {'source_event_id':'u','session_id':'image','role':'user','text':'This is the book','created_at':'2025-01-01T00:00:00Z','metadata':{'attachments':[{'kind':'image','url':uri,'mime_type':'image/png'}]}},
@@ -468,9 +802,32 @@ def test_images_keep_ownership_and_only_curator_receives_pixels(settings,monkeyp
             assert request['images']==[]
             assert request['curator_image_transcriptions'][0]['evidence_role']=='owned'
             assert isinstance(payload['messages'][1]['content'],str) and uri not in payload['messages'][1]['content']
-        return {'choices':[{'message':{'content':json.dumps(output_for(request['role'],request))}}]}
+        output=output_for(request['role'],request)
+        if request['role']=='event_curator':
+            assert '本轮没有输入原图' in request['prompt']
+            receipts=request['curator_image_transcriptions']
+            if echo=='receipts':output['image_transcriptions']=copy.deepcopy(receipts)
+            if echo=='indexed':output['image_transcriptions']=[
+                {'input_image':i,'text':row['text'],'unreadable':row['unreadable']}
+                for i,row in enumerate(receipts,1)]
+        return {'choices':[{'message':{'content':json.dumps(output)}}]}
     monkeypatch.setattr('serein.model_runtime.complete',complete)
     assert asyncio.run(p.advance(settings.database,include_recent=True))['events']==1
+
+
+@pytest.mark.parametrize('change', ['text', 'source', 'index', 'extra'])
+def test_pretranscribed_curator_cannot_change_or_add_image_evidence(change):
+    receipt={'source_message_id':1,'position':1,'sha256':'synthetic',
+             'evidence_role':'stable','text':'Visible book title','unreadable':False}
+    request={'role':'event_curator','pretranscribed':True,'images':[],
+             'curator_image_transcriptions':[receipt]}
+    row=copy.deepcopy(receipt)
+    if change=='text':row['text']='Invented title'
+    if change=='source':row['source_message_id']=2
+    if change=='index':row={'input_image':2,'text':receipt['text'],'unreadable':False}
+    output={'image_transcriptions':[row,copy.deepcopy(row)] if change=='extra' else [row]}
+    with pytest.raises(ValueError,match='预转录只读'):
+        p.prepare_stage_output(request,output)
 
 def test_curator_prompt_shows_complete_receipt_schema_and_safe_aliases(settings):
     from serein.extensions.pipeline_audit import canonicalize_curator_review
@@ -501,7 +858,7 @@ def test_image_transcription_defaults_only_deterministic_unreadable_flag():
     assert blank[0]['unreadable'] is True
 
 
-def test_runtime_revision_retires_all_unfinished_frozen_statuses(settings):
+def test_runtime_revision_holds_frozen_work_and_preserves_producer_proof(settings):
     p.initialize(settings.database)
     stale={'contract':p.CONTRACT,'runtime_revision':'stale','routing_messages':[]}
     with Store(settings.database) as store:
@@ -514,9 +871,9 @@ def test_runtime_revision_retires_all_unfinished_frozen_statuses(settings):
     p.initialize(settings.database)
     with Store(settings.database,read_only=True) as store:
         rows=store.conn.execute("SELECT status FROM pipeline_batches WHERE id LIKE 'stale-%' ORDER BY id").fetchall()
-        assert store.conn.execute('SELECT count(*) FROM pipeline_routes WHERE raw_id=999').fetchone()[0]==0
-        assert store.conn.execute('SELECT count(*) FROM pipeline_route_provenance WHERE raw_id=999').fetchone()[0]==0
-    assert [row['status'] for row in rows]==['superseded_protocol']*4
+        assert store.conn.execute('SELECT count(*) FROM pipeline_routes WHERE raw_id=999').fetchone()[0]==1
+        assert store.conn.execute('SELECT count(*) FROM pipeline_route_provenance WHERE raw_id=999').fetchone()[0]==1
+    assert [row['status'] for row in rows]==['needs_repair','needs_repair','needs_repair','routed']
 
 def test_transcribe_component_prefers_frozen_exact_receipt(settings,monkeypatch):
     import hashlib
@@ -534,7 +891,7 @@ def test_transcribe_component_prefers_frozen_exact_receipt(settings,monkeypatch)
     assert component['curator_image_transcriptions']==[transcription]
 
 
-def test_failed_image_budget_survives_new_batches_and_manual_retry(settings):
+def test_failed_image_finishes_summary_and_manual_retry_remains_available(settings):
     from serein.image_transcription import image_failures
     uri='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII='
     raw_archive(settings).ingest([
@@ -547,40 +904,38 @@ def test_failed_image_budget_survives_new_batches_and_manual_retry(settings):
             calls.append(request['images'][0]['sha256'])
             raise ValueError('synthetic image failure')
         return output_for(role,request)
-    for _ in range(2):
-        with pytest.raises(ValueError,match='synthetic image failure'):
-            asyncio.run(p.advance(settings.database,include_recent=True,runner=failing))
     result=asyncio.run(p.advance(settings.database,include_recent=True,runner=failing))
-    assert len(calls)==3 and image_failures(settings.database,calls[0])==3
-    assert result['events']==0 and result['deferred']==2
-    assert result['image_deferrals'][0]['status']=='failed'
+    assert len(calls)==1 and image_failures(settings.database,calls[0])==1
+    assert result['events']==1 and result['deferred']==0
     with Store(settings.database,read_only=True) as store:
-        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==0
-        assert store.conn.execute('SELECT count(*) FROM pipeline_image_holds').fetchone()[0]==2
+        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==2
+        assert store.conn.execute('SELECT count(*) FROM pipeline_image_holds').fetchone()[0]==0
         payload=json.loads(store.conn.execute('SELECT image_transcription_json FROM raw_events WHERE id=1').fetchone()[0])
         assert payload['status']=='failed' and payload['items']==[]
         assert 'unreadable' not in payload['failed_images'][0]
-    ingest(settings)
+    raw_archive(settings).ingest([
+        {'source_event_id':'other-u','session_id':'other','role':'user','text':'Independent synthetic request','created_at':'2025-01-01T00:02:00Z'},
+        {'source_event_id':'other-a','session_id':'other','role':'assistant','text':'Independent synthetic answer','created_at':'2025-01-01T00:03:00Z'}],source='test')
     assert asyncio.run(p.advance(settings.database,include_recent=True,runner=failing))['events']==1
     assert asyncio.run(p.advance(settings.database,include_recent=True,runner=failing))['status']=='current'
-    assert len(calls)==3
+    assert len(calls)==2
     from fastapi.testclient import TestClient
     from serein.api.http import create_app
     client=TestClient(create_app(settings,token='test',live=True),headers={'Authorization':'Bearer test'})
-    assert client.get('/v1/pipeline/status').json()['failed_images'][0]['failures']==3
+    assert client.get('/v1/pipeline/status').json()['failed_images']==[]
     unauthenticated=TestClient(create_app(settings,token='test',live=True))
     assert unauthenticated.post('/v1/pipeline/retry-image',json={'sha256':calls[0]}).status_code==401
     from serein.work_tasks import enqueue, pause
     enqueue(settings.database,'pipeline')
     assert client.post('/v1/pipeline/retry-image',json={'sha256':calls[0]}).json()['status']=='busy'
-    assert image_failures(settings.database,calls[0])==3
+    assert image_failures(settings.database,calls[0])==2
     pause(settings.database,'pipeline')
     assert client.post('/v1/pipeline/retry-image',json={'sha256':calls[0]}).status_code==200
     async def success(role,request):
         if request.get('transcription_only'):
             return {'image_transcriptions':[{'input_image':1,'text':'Actual image text','unreadable':False}]}
         return output_for(role,request)
-    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=success))['events']==1
+    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=success))['status']=='current'
     with Store(settings.database,read_only=True) as store:
         assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==4
         assert store.conn.execute('SELECT count(*) FROM pipeline_image_holds').fetchone()[0]==0
@@ -631,11 +986,8 @@ def test_image_failure_keeps_successful_sibling_receipt(settings):
             if position==1:raise ValueError('bad image')
             return {'image_transcriptions':[{'input_image':1,'text':'Good sibling','unreadable':False}]}
         return output_for(role,request)
-    for _ in range(2):
-        with pytest.raises(ValueError,match='bad image'):
-            asyncio.run(p.advance(settings.database,include_recent=True,runner=runner))
     result=asyncio.run(p.advance(settings.database,include_recent=True,runner=runner))
-    assert calls=={1:3,2:1} and result['events']==0
+    assert calls=={1:1,2:1} and result['events']==1
     with Store(settings.database,read_only=True) as store:
         payload=json.loads(store.conn.execute('SELECT image_transcription_json FROM raw_events WHERE id=1').fetchone()[0])
     assert payload['items'][0]['text']=='Good sibling'
@@ -670,7 +1022,7 @@ def test_image_api_counts_each_failed_request_and_waiting_agent_does_not(setting
     monkeypatch.setattr('serein.model_runtime.complete',complete)
     result=asyncio.run(p.advance(settings.database,include_recent=True))
     assert len(calls)==3 and image_failures(settings.database,sha)==3
-    assert result['events']==0 and result['deferred']==2
+    assert result['events']==1 and result['deferred']==0
 
 
 def test_curator_targeted_repair_can_finish(settings):
@@ -691,3 +1043,48 @@ def test_curator_targeted_repair_can_finish(settings):
         return output
     result=asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))
     assert result['events']==1 and len(calls)==2
+
+
+@pytest.mark.parametrize('api_mode', [False, True], ids=['agent', 'api'])
+def test_router_request_sends_complete_role_rules_once(settings, monkeypatch, api_mode):
+    if api_mode:
+        save_settings(settings.database, {'models': [{'id': 'local', 'model': 'synthetic',
+            'base_url': 'http://127.0.0.1:9/v1'}], 'assignments': {'track_router': 'local'}})
+    ingest(settings)
+    captured = []
+    async def complete(model, payload):
+        with Store(settings.database, read_only=True) as store:
+            request = json.loads(store.conn.execute(
+                "SELECT request_json FROM pipeline_jobs WHERE role LIKE 'track_router%' "
+                "AND output_json IS NULL ORDER BY rowid DESC LIMIT 1").fetchone()[0])
+        captured.append((request, payload))
+        return {'choices': [{'message': {'content': json.dumps(output_for('track_router', request))}}]}
+    monkeypatch.setattr('serein.model_runtime.complete', complete)
+    task = asyncio.run(p.advance(settings.database, include_recent=True))
+    request = captured[0][0] if api_mode else task['request']
+    with latest.identity_scope(request['identity']):
+        rules = latest.materialize_agent_rules('track_router')
+    assert request['rules'] == rules
+    assert rules not in request['prompt']
+    assert (request['rules'] + request['prompt']).count(rules) == 1
+    assert '<raw_messages_json>' in request['prompt']
+    if api_mode:
+        assert captured
+        for _, payload in captured:
+            assert payload['messages'][0] == {'role': 'system', 'content': rules}
+            assert sum(str(message['content']).count(rules) for message in payload['messages']) == 1
+    else:
+        assert task['role'] == 'track_router' and not captured
+
+
+def test_standalone_router_prompt_keeps_rules_and_preserves_data_when_separated():
+    message = {'id': 1, 'session_id': 1, 'role': 'user', 'content': '原文 空格\n第二行'}
+    rules = latest.materialize_agent_rules('track_router')
+    standalone = latest.build_event_track_message_prompt('2026-10-04', [message], [])
+    separated = latest.build_event_track_message_prompt('2026-10-04', [message], [], include_role_rules=False)
+    assert standalone.count(rules) == 1
+    assert rules not in separated
+    assert len(standalone) - len(separated) == len(rules)
+    for tag in ('active_tracks_json', 'raw_messages_json', 'bounded_recent_context_json'):
+        extract = lambda prompt: json.loads(prompt.split(f'<{tag}>\n', 1)[1].split(f'\n</{tag}>', 1)[0])
+        assert extract(standalone) == extract(separated)

@@ -250,7 +250,7 @@ def test_transcription_has_wall_clock_timeout(settings, monkeypatch):
         asyncio.run(transcribe_images({}, images, timeout_seconds=.01))
 
 
-def test_pipeline_partial_success_survives_resume(settings):
+def test_pipeline_partial_success_finishes_with_image_count(settings):
     configure(settings)
     urls = pictures()
     raw_archive(settings).ingest([
@@ -271,13 +271,17 @@ def test_pipeline_partial_success_survives_resume(settings):
             return {'image_transcriptions':[{'input_image':1,'text':f'page {position}','unreadable':False}]}
         if role in ('event_curator', 'event_writer'):
             assert request['images'] == []
-            assert [item['position'] for item in request['curator_image_transcriptions']] == [1, 2, 3]
+            assert [item['position'] for item in request['curator_image_transcriptions']] == [1, 3]
+            assert request['image_fallbacks'][0]['text'] == '发了 1 张图片'
+            assert '不得猜补画面' in request['prompt']
         return output_for(role, request)
-    with pytest.raises(RuntimeError):
-        asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))
-    fail = False
     assert asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))['events'] == 1
-    assert seen == [1, 2, 3, 2]
+    assert asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))['status'] == 'current'
+    assert seen == [1, 2, 3]
+    record = raw_archive(settings).get_event(1)['image_transcription']
+    assert record['status'] == 'failed'
+    assert [row['position'] for row in record['items']] == [1, 3]
+    assert record['failed_images'][0]['position'] == 2
 
 
 def test_waiting_for_transcription_agent_is_pending_not_failed(settings):
@@ -385,3 +389,90 @@ def test_image_freezing_runs_outside_async_request_thread(settings, monkeypatch)
     turn = prepare_turn('thread', [{'role':'user','content':[{'type':'image_url','image_url':{'url':PNG}}]}])
     asyncio.run(prepare_image_transcription(settings, turn, {'features':{'image_eyes':True}}))
     assert threads and all(thread != main_thread for thread in threads)
+
+
+@pytest.mark.parametrize('mutation', ['text', 'attachments', 'legacy', 'sha'])
+def test_archived_remote_cache_survives_expired_url(settings, monkeypatch, mutation):
+    from serein.api.chat import transcribe_archived_images
+    from serein.extensions import pipeline_images
+    configure(settings)
+    archive = raw_archive(settings)
+    archive.ingest([{'source_event_id':'cached-remote','session_id':'cache', 'role':'user',
+        'text':'Synthetic question','created_at':'2025-01-01T00:00:00Z',
+        'metadata':{'attachments':[{'kind':'image','url':'https://example.com/expired.png'}]}}], source='synthetic')
+    with Store(settings.database, read_only=True) as store:
+        message_id = store.conn.execute('SELECT id FROM raw_events').fetchone()[0]
+    downloads = []
+    original_bytes = pipeline_images.image_bytes
+    def image_bytes(url):
+        if url.startswith('data:'):
+            return original_bytes(url)
+        downloads.append(url)
+        if len(downloads) > 1:
+            raise ValueError('Synthetic expired URL')
+        return original_bytes(PNG)
+    calls = []
+    async def complete(*args, **kwargs):
+        calls.append(1)
+        return {'choices':[{'message':{'content':json.dumps({'image_transcriptions':[
+            {'input_image':1,'text':'Cached remote transcription','unreadable':False}]})}}]}
+    monkeypatch.setattr(pipeline_images, 'image_bytes', image_bytes)
+    monkeypatch.setattr('serein.image_transcription.complete', complete)
+    asyncio.run(transcribe_archived_images(settings, message_id))
+    context, receipt = asyncio.run(transcribe_archived_images(settings, message_id))
+    assert receipt['status'] == 'cached' and 'Cached remote transcription' in context
+    assert len(downloads) == len(calls) == 1
+    # Same URL cannot authorize reuse after the canonical source changes.
+    with Store(settings.database) as store:
+        if mutation == 'text':
+            store.conn.execute("UPDATE raw_events SET text='Changed source' WHERE id=?", (message_id,))
+        elif mutation == 'attachments':
+            store.conn.execute("UPDATE raw_events SET metadata_json=? WHERE id=?",
+                (json.dumps({'attachments':[{'kind':'image','url':'https://example.com/changed.png'}]}), message_id))
+        else:
+            record = archive.get_event(message_id)['image_transcription']
+            if mutation == 'legacy':
+                record['items'][0].pop('source_fingerprint')
+            else:
+                record['items'][0]['sha256'] = 'invalid'
+            store.conn.execute('UPDATE raw_events SET image_transcription_json=? WHERE id=?',
+                               (json.dumps(record), message_id))
+    with pytest.raises(ValueError, match='expired URL'):
+        asyncio.run(transcribe_archived_images(settings, message_id))
+    assert len(downloads) == 2 and len(calls) == 1
+
+
+def test_partial_cache_downloads_only_missing_sibling(settings, monkeypatch):
+    from serein.api.chat import transcribe_archived_images
+    from serein.extensions import pipeline_images
+    configure(settings)
+    archive = raw_archive(settings)
+    archive.ingest([{'source_event_id':'partial-cache','session_id':'cache', 'role':'user',
+        'text':'Synthetic question','created_at':'2025-01-01T00:00:00Z',
+        'metadata':{'attachments':[{'kind':'image','url':'https://example.com/one.png'},
+                                 {'kind':'image','url':'https://example.com/two.png'}]}}], source='synthetic')
+    with Store(settings.database, read_only=True) as store:
+        message_id = store.conn.execute('SELECT id FROM raw_events').fetchone()[0]
+    downloads = []
+    original_bytes = pipeline_images.image_bytes
+    def image_bytes(url):
+        if url.startswith('data:'):
+            return original_bytes(url)
+        downloads.append(url)
+        assert downloads.count('https://example.com/one.png') <= 1
+        return original_bytes(PNG)
+    calls = []
+    async def complete(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ValueError('Synthetic sibling failure')
+        return {'choices':[{'message':{'content':json.dumps({'image_transcriptions':[
+            {'input_image':1,'text':'Synthetic image','unreadable':False}]})}}]}
+    monkeypatch.setattr(pipeline_images, 'image_bytes', image_bytes)
+    monkeypatch.setattr('serein.image_transcription.complete', complete)
+    with pytest.raises(ValueError, match='sibling failure'):
+        asyncio.run(transcribe_archived_images(settings, message_id))
+    context, receipt = asyncio.run(transcribe_archived_images(settings, message_id))
+    assert receipt['status'] == 'complete' and receipt['images'] == 2
+    assert downloads == ['https://example.com/one.png', 'https://example.com/two.png', 'https://example.com/two.png']
+    assert len(calls) == 3

@@ -1,13 +1,13 @@
-"""Read-only candidate selection extracted from Germany 9c99c591; see PROVENANCE.md."""
+"""Collect scope and candidate signals; mixed ranking belongs to typed_surface."""
 from __future__ import annotations
 import re
 from typing import Any
 from .gateway import GatewayService
-from .memory_recall.typed_candidate_shadow import build_scene_lane,build_event_lane,balanced_typed_pool,rerank_lane_with_freshness
+from .memory_recall.typed_candidate_shadow import build_scene_lane,build_event_lane
 
 class CandidateGateway(GatewayService):
 
-    def _passage_candidate_shadow_debug(self, query: str, query_embedding: list[float]) -> dict[str, Any]:
+    def collect_signals(self, query: str, query_embedding: list[float]) -> dict[str, Any]:
         if not getattr(self, 'passage_candidate_shadow_enabled', False):
             return {'status': 'disabled', 'decision_applied': False, 'live_injection_enabled': False}
         required = ('passage_shadow_index', 'cue_passage_shadow_index', 'fact_event_lexical_shadow_index', 'fact_event_semantic_index')
@@ -68,42 +68,29 @@ class CandidateGateway(GatewayService):
         scene_lane = build_scene_lane(scene_passage_rows, cue_rows, scene_whole_rows)
         event_lane = build_event_lane(event_passage_rows, body_rows, lexical_rows)
 
-        def decorate_lane(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            for row in rows:
-                item = catalog.get(str(row.get('owner_id') or '')) or {}
-                row['title'] = str(item.get('title') or '')
-                row['memory_date'] = str(item.get('memory_date') or '')
-                row['recallable'] = item.get('recallable')
-            return rerank_lane_with_freshness(rows, query=query)
-        scene_lane = decorate_lane(scene_lane)
-        event_lane = decorate_lane(event_lane)
-        pool = balanced_typed_pool([('scene', scene_lane, 3), ('event', event_lane, 3)], limit=6)
-        owner_query_matcher = getattr(getattr(self, 'observed_entity_shadow_index', None), 'owner_query_matches', None)
-        owner_entity_matches = owner_query_matcher(query, owner_keys={(str(row.get('owner_kind') or ''), str(row.get('owner_id') or '')) for row in pool if self._typed_owner_ref(row)}) if callable(owner_query_matcher) else []
-        member_to_arcs: dict[tuple[str, str], list[str]] = {}
-        for arc_key, members in getattr(self, '_passage_candidate_shadow_arc_members', {}).items():
-            for member in members:
-                member_to_arcs.setdefault(member, []).append(arc_key)
-        for row in pool:
-            item = catalog.get(str(row.get('owner_id') or '')) or {}
-            row['title'] = str(item.get('title') or '')
-            row['recallable'] = item.get('recallable')
-            cards = [dict(card) for arc_key in sorted(member_to_arcs.get((str(row.get('owner_kind') or ''), str(row.get('owner_id') or '')), []))[:3] if (card := getattr(self, '_passage_candidate_shadow_arc_cards', {}).get(arc_key))]
-            if cards:
-                row['arc_cards'] = cards
-            if hasattr(self, 'observed_entity_shadow_index'):
-                row['arc_link_candidates'] = self.observed_entity_shadow_index.link_candidates(str(row.get('owner_kind') or ''), str(row.get('owner_id') or ''))
-        return {'status': 'ok', 'mode': 'simulation_shadow', 'decision_applied': False, 'live_injection_enabled': False, 'sync': getattr(self, '_passage_candidate_shadow_sync', {}), 'policy': {'pool_limit': 6, 'lane_quotas': {'scene': 3, 'event': 3}, 'duplicate_score_boost': False, 'within_owner_embedding_score': 'max', 'embedding_routes': ['whole', 'passage_for_long_owner'], 'cross_lane_score_comparison': False, 'freshness_rerank': 'bounded_within_lane', 'cue_contributes_score': False, 'lexical_contributes_score': False, 'scope_applied_before_candidate_search': bool(scope_arc_key), 'scope_arc_key': scope_arc_key, 'global_specific_terms': specific_global_terms, 'global_named_fallback': global_named_fallback, 'event_eligibility': 'all_active'}, 'lanes': {'scene': {'matches': scene_lane, 'whole_search': {'status': 'ok', 'candidate_count': len(scene_whole_rows), 'matches': scene_whole_rows}, 'passage_search': scene_passage_search, 'cue_search': cue_search}, 'event': {'matches': event_lane, 'passage_search': event_passage_search, 'body_search': fact_search, 'lexical_search': lexical_search}}, 'entity_scope': entity_scope, 'owner_entity_matches': owner_entity_matches, 'candidate_count': len(pool), 'candidates': pool}
+        return {
+            'status': 'ok',
+            'policy': {
+                'duplicate_score_boost': False,
+                'within_owner_embedding_score': 'max',
+                'embedding_routes': ['whole', 'passage_for_long_owner'],
+                'cue_contributes_score': False,
+                'lexical_contributes_score': False,
+                'scope_applied_before_candidate_search': bool(scope_arc_key),
+                'scope_arc_key': scope_arc_key,
+                'global_specific_terms': specific_global_terms,
+                'global_named_fallback': global_named_fallback,
+                'event_eligibility': 'all_active',
+            },
+            'lanes': {
+                'scene': {'matches': scene_lane, 'cue_search': cue_search},
+                'event': {'matches': event_lane, 'lexical_search': lexical_search},
+            },
+            'entity_scope': entity_scope,
+        }
 
     @staticmethod
     def _typed_owner_ref(row: dict[str, Any]) -> str:
         kind = str(row.get('owner_kind') or '').strip().lower()
         owner_id = str(row.get('owner_id') or '').strip()
         return f'{kind}:{owner_id}' if kind and owner_id else ''
-
-    @staticmethod
-    def _typed_reranker_document(row: dict[str, Any]) -> str:
-        title = str(row.get('title') or '').strip()
-        passages = [str(passage.get('text') or '').strip() for passage in row.get('passages') or [] if isinstance(passage, dict) and str(passage.get('text') or '').strip()]
-        body = '\n'.join(passages[:2])
-        return f"title: {title}\nbody: {body}"[:4000]

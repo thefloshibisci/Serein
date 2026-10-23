@@ -73,3 +73,28 @@ def test_referenced_original_cannot_be_deleted(live):
 def test_invalid_upload_is_rejected(live,message):
     _,client=live
     assert upload(client,**message).status_code==400
+
+
+def test_upload_allowlist_tracks_opt_in_and_readonly_state(live):
+    import asyncio
+    from dataclasses import replace
+    from serein.api.mcp import create_server
+    from serein.application import Application
+    from serein.deployment import save_settings
+
+    settings,_=live
+    save_settings(settings.database,{'features':{'originals':False}})
+    server=create_server(Application(replace(settings,mcp_tools=['source_message_upload'])))
+
+    async def exercise():
+        assert await server.list_tools()==[]
+        save_settings(settings.database,{'features':{'originals':True}})
+        assert {tool.name for tool in await server.list_tools()}=={'source_message_upload'}
+        readonly=create_server(Application(replace(settings,writable=False,mcp_tools=['source_message_upload'])))
+        assert await readonly.list_tools()==[]
+        save_settings(settings.database,{'features':{'originals':False}})
+        assert await server.list_tools()==[]
+        with pytest.raises(Exception,match='Unknown tool'):
+            await server.call_tool('source_message_upload',{})
+
+    asyncio.run(exercise())

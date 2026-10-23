@@ -141,12 +141,16 @@ def create_app(settings, *, token: str, live: bool=False):
         app.include_router(model_routes(settings, services, auth))
         from .host import routes as host_routes
         app.include_router(host_routes(settings, auth))
+        from .event_mailbox import routes as mailbox_routes
+        app.include_router(mailbox_routes(settings, services, auth))
         from .personal import routes as personal_routes
         app.include_router(personal_routes(settings, auth))
         from .live import routes
         app.include_router(routes(settings, services, auth))
         from .raw_archive import routes as raw_routes
         app.include_router(raw_routes(settings, auth))
+        from .pipeline_progress import routes as pipeline_progress_routes
+        app.include_router(pipeline_progress_routes(settings, auth))
         from .notebook import routes as notebook_routes
         from .scenes import routes as scene_routes
         from .gateway import routes as gateway_routes

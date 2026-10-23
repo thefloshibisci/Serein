@@ -1,10 +1,9 @@
 """Model-independent exact offsets, prepared on writes/imports, never on recall."""
 import json
 import sqlite3
-from contextlib import closing
+from contextlib import closing, nullcontext
 
-from ..core.reader import Reader
-from ..core.store import digest, encode
+from ..core.store import Store, digest, encode
 
 
 def layout_path(database):
@@ -29,16 +28,16 @@ def layout(conn, document, min_chars):
     return spans
 
 
-def prepare_layouts(settings, document_ids):
+def prepare_layouts(settings, document_ids, *, store=None):
     from ..configured_models import recall_settings
     from .policy import RecallPolicy
     policy = RecallPolicy.from_config(recall_settings(settings))
     if not policy.passages_enabled:
         return {'status': 'disabled', 'updated': 0}
-    with closing(open_layouts(settings.database)) as conn, conn, Reader(settings.database) as reader:
+    with closing(open_layouts(settings.database)) as conn, conn, (nullcontext(store) if store else Store(settings.database,read_only=True)) as canonical:
         count = 0
         for key in set(document_ids):
-            doc = reader.store.read(key)
+            doc = canonical.read(key)
             if not doc or doc['lifecycle'] == 'deleted':
                 conn.execute('DELETE FROM layouts WHERE document_id=?', (key,))
             elif doc['kind'] in ('event', 'scene'):

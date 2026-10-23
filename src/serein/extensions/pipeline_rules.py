@@ -96,6 +96,54 @@ def dialogue_unit_is_complete(unit: list[dict[str, Any]]) -> bool:
         return False
     return any(item.get("role") == "assistant" for item in unit[1:])
 
+def normalize_track_updates(raw_updates, used_refs, existing):
+    """Materialize sparse model updates into complete cards for every used Track."""
+    patches = {}
+    for index, raw in enumerate(raw_updates):
+        if not isinstance(raw, dict) or "track_ref" not in raw:
+            raise ValueError(f"Track Router update #{index + 1} needs track_ref")
+        ref = str(raw.get("track_ref") or "").strip()
+        if ref in patches or (ref not in existing and not re.fullmatch(r"new:[1-9][0-9]*", ref)):
+            raise ValueError("Track Router updated an invalid or repeated Track")
+        if ref not in existing:
+            required = {"subject", "throughline", "status"}
+            if not required.issubset(raw):
+                raise ValueError(f"Track Router new Track fields missing: {sorted(required - set(raw))}")
+        patches[ref] = raw
+    used = set(used_refs)
+    missing = used.difference(existing).difference(patches)
+    unused = set(patches).difference(used)
+    if missing or unused:
+        raise ValueError(f"Track Router updates missing new Tracks={sorted(missing)}, unused={sorted(unused)}")
+    result = {}
+    for ref in dict.fromkeys(used_refs):
+        previous = existing.get(ref) or {}
+        patch = patches.get(ref) or {}
+        card = {**previous, **patch}
+        subject = " ".join(str(card.get("subject") or "").split())
+        throughline = " ".join(str(card.get("throughline") or "").split())
+        status = str(card.get("status") or "").strip()
+        if not subject or len(subject) > 160 or not throughline or len(throughline) > 600:
+            raise ValueError("Track Router update needs bounded subject and throughline")
+        if status not in {"active", "parked"}:
+            raise ValueError("Track Router update has invalid status")
+        previous_policy = str(previous.get("event_policy") or "default")
+        policy = str(card.get("event_policy") or previous_policy).strip()
+        if policy not in TRACK_EVENT_POLICIES:
+            raise ValueError("Track Router update has invalid event_policy")
+        if previous_policy == "rolling_engineering":
+            policy = previous_policy
+        normalized = {"subject": subject, "throughline": throughline,
+                      "event_policy": policy, "status": status}
+        if "task_status" in card:
+            task_status = card["task_status"]
+            if task_status not in (None, "in_progress", "blocked", "completed"):
+                raise ValueError("Track Router update has invalid task_status")
+            normalized["task_status"] = task_status
+        result[ref] = normalized
+    return result
+
+
 def normalize_event_track_message_output(
     output: dict[str, Any],
     messages: list[dict[str, Any]],
@@ -180,48 +228,7 @@ def normalize_event_track_message_output(
     if len(assignments) != len(expected_ids):
         raise ValueError(f"Track Router omitted source_message_ids={expected_ids[len(assignments):]}")
 
-    update_by_ref: dict[str, dict[str, Any]] = {}
-    for index, raw in enumerate(raw_updates):
-        if not isinstance(raw, dict):
-            raise ValueError(f"Track Router update #{index + 1} must be an object")
-        required_update_fields = {"track_ref", "subject", "throughline", "status"}
-        if not required_update_fields.issubset(raw):
-            raise ValueError(
-                f"Track Router update #{index + 1} fields missing: "
-                f"{sorted(required_update_fields - set(raw))}"
-            )
-        track_ref = str(raw.get("track_ref") or "").strip()
-        subject = " ".join(str(raw.get("subject") or "").split())
-        throughline = " ".join(str(raw.get("throughline") or "").split())
-        event_policy = str(raw.get("event_policy") or "").strip()
-        status = str(raw.get("status") or "").strip()
-        if track_ref in update_by_ref or (
-            track_ref not in existing and not re.fullmatch(r"new:[1-9][0-9]*", track_ref)
-        ):
-            raise ValueError("Track Router updated an invalid or repeated Track")
-        if not subject or len(subject) > 160 or not throughline or len(throughline) > 600:
-            raise ValueError("Track Router update needs bounded subject and throughline")
-        if status not in {"active", "parked"}:
-            raise ValueError("Track Router update has invalid status")
-        existing_policy = str((existing.get(track_ref) or {}).get("event_policy") or "default")
-        if not event_policy:
-            event_policy = existing_policy
-        if event_policy not in TRACK_EVENT_POLICIES:
-            raise ValueError("Track Router update has invalid event_policy")
-        if existing_policy == "rolling_engineering":
-            event_policy = existing_policy
-        update_by_ref[track_ref] = {
-            "subject": subject,
-            "throughline": throughline,
-            "event_policy": event_policy,
-            "status": status,
-        }
-    used_ref_set = set(used_refs)
-    if set(update_by_ref) != used_ref_set:
-        raise ValueError(
-            "Track Router updates must exactly cover all used Tracks: "
-            f"missing={sorted(used_ref_set - set(update_by_ref))}, unused={sorted(set(update_by_ref) - used_ref_set)}"
-        )
+    update_by_ref = normalize_track_updates(raw_updates, used_refs, existing)
 
     new_refs = sorted(
         {ref for ref in used_refs if ref not in existing},

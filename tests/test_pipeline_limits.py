@@ -13,6 +13,28 @@ from serein.imports import stage,advance_import
 from serein import work_tasks as work
 
 
+def test_larger_default_budgets_preserve_saved_limits(settings):
+    from serein.deployment import read_settings
+    from serein.extensions.pipeline_limits import DEFAULTS
+    policy = read_settings(settings.database)['pipeline']
+    assert policy['max_input_chars'] == DEFAULTS['max_input_chars'] == 40000
+    assert policy['max_prompt_chars'] == DEFAULTS['max_prompt_chars'] == 200000
+    save_settings(settings.database, {'pipeline': {'max_input_chars': 8000, 'max_prompt_chars': 50000}})
+    save_settings(settings.database, {'pipeline': {'timeout_seconds': 700}})
+    policy = read_settings(settings.database)['pipeline']
+    assert policy['max_input_chars'] == 8000
+    assert policy['max_prompt_chars'] == 50000
+
+
+def test_default_blocks_allow_longer_dialogue_without_truncation():
+    messages = pairs(4)
+    for message in messages:
+        message['content'] = '原' * 6000
+    result = blocks(messages)
+    assert [len(block) for block in result] == [6, 2]
+    assert [message for block in result for message in block] == messages
+
+
 def pairs(number,known=False):
     stamp=datetime(2025,1,1,tzinfo=timezone.utc)
     result=[]
@@ -86,8 +108,7 @@ def test_rebatch_reuses_only_exact_router_frame_with_explicit_provenance(setting
     data['input_policy']['max_input_chars']=1000
     with Store(settings.database) as store:
         store.conn.execute('UPDATE pipeline_batches SET input_json=? WHERE id=?',(encode(data),batch['id']))
-    request=p.request_for(settings.database,batch,'track_router')
-    request['messages']=data['routing_messages'][:2]
+    request=p.request_for(settings.database,{**batch,'input_json':encode({**data,'routing_messages':data['routing_messages'][:2]})},'track_router')
     output=output_for('track_router',request)
     with Store(settings.database) as store:
         store.conn.execute('INSERT INTO pipeline_jobs(id,batch_id,role,request_json,output_json) VALUES (?,?,?,?,?)',
@@ -223,7 +244,8 @@ def test_import_boundary_keeps_concurrent_new_chats_and_retires_mixed_plan(setti
                                     'assignments':{'track_router':'local'}})
     monkeypatch.setattr(p,'route_batch',routing)
     asyncio.run(p.flush_routes(settings.database))
-    assert len(calls)==10 and not set(calls)&set(imported)
+    assert calls==[]  # The frozen settlement reserves this scope before daytime routing.
+    assert all(m['id'] not in imported for m in json.loads(batch['input_json'])['routing_messages'])
     found=Originals(settings.database).source_message_search('historical',limit=50)['items']
     assert len(found)==26
     assert Originals(settings.database).source_message_read([found[-1]['id']])['items'][0]['content'].startswith('historical')
@@ -598,9 +620,15 @@ def test_router_replay_uses_ordinal_in_accepted_request(settings):
     ingest(settings)
     p.initialize(settings.database)
     batch=p.new_batch(settings.database,True);data=json.loads(batch['input_json'])
+    data['next_track_ordinal']=7
+    batch={**batch,'input_json':encode(data)}
+    with Store(settings.database) as store:
+        store.conn.execute('UPDATE pipeline_batches SET input_json=? WHERE id=?',(batch['input_json'],batch['id']))
     request=p.request_for(settings.database,batch,'track_router')
-    request['next_track_ordinal']=7
     asyncio.run(p.job(settings.database,batch,request,'track_router:0',synthetic_runner))
+    with Store(settings.database) as store:
+        key='session_'+data['scope']+'_track_0042'
+        store.conn.execute('INSERT INTO pipeline_tracks VALUES (?,?,?)',(key,data['scope'],encode({'track_id':key})))
     async def forbidden(*args):pytest.fail('Accepted Router was repeated')
     recovered=asyncio.run(p.route_batch(settings.database,batch,data,forbidden))
     assert recovered['assignments'][0]['primary_track_id']=='session_'+data['scope']+'_track_0007'
@@ -651,6 +679,46 @@ def test_manual_pipeline_worker_retries_only_first_held_batch(settings,monkeypat
     monkeypatch.setattr(p,'_advance',advance)
     result=asyncio.run(work.work(settings,'pipeline',{'include_recent':True}))
     assert flags==[True,False] and result['status']=='needs_repair'
+
+
+def test_manual_pipeline_worker_never_spins_on_same_hold(settings,monkeypatch):
+    calls=[]
+    async def advance(database,**kwargs):
+        calls.append(kwargs['retry_repair'])
+        assert len(calls)<=2
+        return {'status':'needs_repair','batch_id':'held','reason':'unchanged frozen proof'}
+    monkeypatch.setattr(p,'_advance',advance)
+    result=asyncio.run(work.work(settings,'pipeline',{}))
+    assert calls==[True,False] and result['batch_id']=='held'
+
+
+def test_manual_pipeline_worker_continues_after_curator_omission(settings,monkeypatch):
+    calls=[]
+    outcomes=[
+        {'status':'processed','events':0,'processed_originals':0,'deferred':2,
+         'curator_omission_deferrals':[{'reason':'curator_omitted','missing_source_message_ids':[2],
+                                      'deferred_source_message_ids':[1,2]}]},
+        {'status':'processed','events':1,'processed_originals':2},
+        {'status':'processed','events':0,'processed_originals':0,'deferred':2},
+    ]
+    async def advance(database,*,include_recent=False,retry_repair=False):
+        calls.append(retry_repair)
+        return outcomes.pop(0)
+    monkeypatch.setattr(p,'_advance',advance)
+    result=asyncio.run(work.work(settings,'pipeline',{'include_recent':True}))
+    assert calls==[True,False,False]
+    assert result['status']=='current' and result['events']==1 and result['deferred']==4
+    assert result['curator_omission_deferrals'][0]['reason']=='curator_omitted'
+
+
+def test_manual_pipeline_worker_continues_after_third_omission_pauses_scope(settings,monkeypatch):
+    outcomes=[{'status':'paused','job_id':'held:curator','batch_id':'held','failures':3},
+              {'status':'processed','events':1,'processed_originals':2},
+              {'status':'current','events':0}]
+    async def advance(database,**kwargs):return outcomes.pop(0)
+    monkeypatch.setattr(p,'_advance',advance)
+    result=asyncio.run(work.work(settings,'pipeline',{}))
+    assert result['status']=='current' and result['events']==1 and not outcomes
 
 
 def test_component_signature_preserves_bridge_endpoints_and_ownership():

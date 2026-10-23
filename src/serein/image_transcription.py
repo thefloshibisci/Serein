@@ -151,6 +151,58 @@ async def _transcribe_one(model, image, timeout_seconds):
     return bind_transcriptions(output, [image])
 
 
+def source_fingerprint(message):
+    import hashlib
+    metadata = message.get('metadata') or {}
+    original = metadata.get('original_message') or {}
+    if original.get('attachments') and not metadata.get('attachments'):
+        metadata = {**metadata, 'attachments': original['attachments']}
+    payload = {'content': message.get('content', message.get('text', '')),
+               'metadata': metadata}
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def transcribed_image_receipts(messages, images, *, require_source_fingerprint=False):
+    """Use canonical raw-row successes before fetching their original attachments.
+
+    New records bind the raw content/attachments as well as each byte hash. Legacy
+    receipts belong to immutable raw rows; inline bytes can also be checked
+    locally. Historical Event copies alone do not authorize this shortcut.
+    """
+    import hashlib
+    from .extensions.pipeline_images import image_bytes
+    records = {int(message['id']): message for message in messages}
+    result = []
+    for image in images:
+        message = records.get(image['source_message_id']) or {}
+        record = message.get('image_transcription')
+        if not isinstance(record, dict):
+            continue
+        for item in record.get('items') or []:
+            if (not isinstance(item, dict) or type(item.get('position')) is not int
+                    or item['position'] != image['position']
+                    or item.get('source_message_id') != image['source_message_id']
+                    or not isinstance(item.get('sha256'), str)
+                    or len(item['sha256']) != 64
+                    or any(char not in '0123456789abcdef' for char in item['sha256'])
+                    or not isinstance(item.get('text'), str)
+                    or type(item.get('unreadable')) is not bool
+                    or (not item['text'].strip() and not item['unreadable'])):
+                continue
+            if require_source_fingerprint and not item.get('source_fingerprint'):
+                continue
+            if item.get('source_fingerprint') is not None and item['source_fingerprint'] != source_fingerprint(message):
+                continue
+            if image['url'].startswith('data:image/'):
+                body, _ = image_bytes(image['url'])
+                if hashlib.sha256(body).hexdigest() != item['sha256']:
+                    continue
+            result.append({**{key: image[key] for key in ('source_message_id', 'position', 'evidence_role')},
+                           'sha256': item['sha256']})
+            break
+    return result
+
+
 def cached_transcriptions(messages, images):
     """Successful individual images survive a pending/failed sibling."""
     actual = {(int(item["source_message_id"]), int(item["position"])): item for item in images}
@@ -164,6 +216,8 @@ def cached_transcriptions(messages, images):
         for item in record.get("items") or []:
             if not isinstance(item, dict):
                 continue
+            if item.get('source_fingerprint') is not None and item['source_fingerprint'] != source_fingerprint(message):
+                continue
             try:
                 key = (message_id, int(item["position"]))
             except (KeyError, TypeError, ValueError):
@@ -173,7 +227,8 @@ def cached_transcriptions(messages, images):
                     or not isinstance(item.get("text"), str) or type(item.get("unreadable")) is not bool):
                 continue
             seen.add(key)
-            result.append({**item, "source_message_id": message_id,
+            result.append({**{key: value for key, value in item.items() if key != 'source_fingerprint'},
+                           "source_message_id": message_id,
                            "evidence_role": image.get("evidence_role", item.get("evidence_role", "owned"))})
     return result
 
@@ -224,8 +279,11 @@ def persist_transcriptions(target, items):
     stamp = now()
     for message_id, rows in grouped.items():
         rows.sort(key=lambda item: int(item["position"]))
+        source = archive.get_event(message_id)
+        fingerprint = source_fingerprint(source or {})
         archive.update_image_transcription(message_id, "complete",
-            {"status": "complete", "updated_at": stamp, "items": rows})
+            {"status": "complete", "updated_at": stamp,
+             "items": [{**row, 'source_fingerprint': fingerprint} for row in rows]})
 
 
 def mark_transcription(target, message_ids, status, *, error="", images=()):

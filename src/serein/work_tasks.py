@@ -37,6 +37,8 @@ def _queue(value,arguments):
     value.update(status='queued',stage='queued',error='',arguments=arguments or {},run_id=uuid4().hex,
                  result=None,updated_at=time.time(),stop_requested=False,completed=0,events=0,
                  job_id='',attempt=0,prompt_chars=0)
+    if value['id'].startswith('import:'):
+        value.update(entries_per_second=None,eta_seconds=None,remaining=None,sampled_batches=0)
 
 
 def enqueue(database,key,arguments=None,*,followup_if_running=False):
@@ -107,7 +109,9 @@ def progress(**fields):
 
 def failure_reason(error):
     import httpx
-    if isinstance(error,(TimeoutError,httpx.TimeoutException)):return '模型或连接超时，请稍后继续。'
+    from .timeout_diagnostics import timeout_reason
+    reason=timeout_reason(error)
+    if reason is not None:return reason
     if isinstance(error,httpx.HTTPStatusError):return f'上游返回 HTTP {error.response.status_code}，请检查模型配置。'
     if isinstance(error,httpx.HTTPError):return '无法连接上游模型，请检查地址和网络。'
     if isinstance(error,json.JSONDecodeError):return '模型返回了无法解析的 JSON，请重试当前阶段。'
@@ -150,7 +154,7 @@ async def execute(database,key,operation,*,queued_id=None):
                 elif followup is None and state in ('current','settled_today','waiting_settlement_window','auto_paused') and previous['status'] not in ('queued','running'):
                     value=previous
                 else:
-                    value.update(result=result,status=state if state in ('awaiting_agent','paused','needs_repair') else 'completed',
+                    value.update(result=result,status=state if state in ('awaiting_agent','paused','needs_repair','blocked','retry_wait') else 'completed',
                                  stage=state or 'completed',lease_until=0,updated_at=time.time(),
                                  error=str(result.get('reason','归线材料需要修复')) if state=='needs_repair' else '')
                 _save(store,key,value)
@@ -201,33 +205,55 @@ async def work(settings,key,arguments):
             raise
     if key=='pipeline':
         from .extensions.pipeline import _advance
-        events=0;deferred=0;skipped=0;protected=[]
+        events=0;deferred=0;skipped=0;protected=[];curator_omissions=[]
         # This worker is explicitly enqueued by Continue; scheduled_advance does
         # not set this flag. Recheck at most the first held batch per request.
-        retry_repair=True
+        retry_repair=True;continued_batches=set()
         while True:
             result=await _advance(settings.database,include_recent=arguments.get('include_recent',True),retry_repair=retry_repair)
             retry_repair=False
             events+=result.get('events',0)
             deferred+=result.get('deferred',0);skipped+=result.get('skipped',0)
             protected.extend(result.get('protected_deferrals',[]))
-            result={**result,'deferred':deferred,'skipped':skipped,'protected_deferrals':protected}
+            batch_curator_omissions=result.get('curator_omission_deferrals',[])
+            curator_omissions.extend(batch_curator_omissions)
+            result={**result,'deferred':deferred,'skipped':skipped,'protected_deferrals':protected,
+                    'curator_omission_deferrals':curator_omissions}
             progress(events=events)
-            if result['status']=='paused' and result.get('job_id'):
-                continue  # The held scope is excluded; try independent chats.
+            if (result['status']=='paused' and result.get('job_id')) or result['status']=='routed' or (result['status']=='needs_repair' and not result.get('blocked_scopes')):
+                batch_id=result.get('batch_id') or result.get('job_id')
+                if batch_id and batch_id not in continued_batches:
+                    continued_batches.add(batch_id)
+                    continue  # Try independent chats once per newly held/routed batch.
+                return {**result,'events':events}  # Never spin on an unchanged hold.
             if result['status']!='processed':return {**result,'events':events}
             if not result.get('processed_originals',0):
+                if batch_curator_omissions:
+                    continue  # Host-retained scope is excluded today; process other ready scopes.
                 return {**result,'status':'current','events':events,'note':'本批需要后续上下文，原话仍待整理；不会反复请求同一批。'}
-    from .imports import advance_import
+    from .imports import advance_import, DEFAULT_BATCH_SIZE, LARGE_BATCH_SIZE
     identifier=key.removeprefix('import:')
+    batch_size=LARGE_BATCH_SIZE if arguments.get('large_batch') is True else DEFAULT_BATCH_SIZE
+    seconds_per_entry=None;samples=0
     while True:
-        batch=asyncio.create_task(asyncio.to_thread(advance_import,settings,identifier))
+        started=time.monotonic()
+        batch=asyncio.create_task(asyncio.to_thread(advance_import,settings,identifier,batch_size=batch_size))
         try:result=await asyncio.shield(batch)
         except asyncio.CancelledError:
             await batch  # finish the bounded disk batch before releasing its lease
             raise
+        duration=time.monotonic()-started
+        processed=result['batch_processed']
+        if processed:
+            current=duration/processed
+            seconds_per_entry=current if seconds_per_entry is None else .3*current+.7*seconds_per_entry
+            samples+=1
+        remaining=result['total']-result['processed']
+        eta=remaining*seconds_per_entry if samples>=3 else None
         progress(stage='importing',completed=result['processed'],total=result['total'],
-                 failed=result['failed'],result=result)
+                 failed=result['failed'],result=result,remaining=remaining,sampled_batches=samples,
+                 entries_per_second=1/seconds_per_entry if seconds_per_entry else None,
+                 eta_seconds=0 if not remaining else eta)
         if result['status']=='completed':return result
         if status(settings.database,key).get('stop_requested'):return {**result,'status':'paused'}
 

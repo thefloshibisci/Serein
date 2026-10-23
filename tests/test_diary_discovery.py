@@ -43,6 +43,15 @@ def ids(text):
     return [int(value) for value in re.findall(r'^diary_id: (\d+)$', text, re.M)]
 
 
+def test_mcp_author_is_fixed(notebook):
+    _, server, call, _ = notebook
+    schema = next(tool for tool in asyncio.run(server.list_tools()) if tool.name == 'write_diary')
+    assert 'author' not in schema.inputSchema['properties']
+    assert call('write_diary', content='AI diary')['author'] == 'ai'
+    with pytest.raises(Exception):
+        call('write_diary', content='Invalid author', author='Haven')
+
+
 def test_default_directory_is_bounded_and_paginated(notebook):
     _, server, call, create = notebook
     keys = [create(body=f'Opening {i}. ' + 'long prose ' * 600 + ' END_SENTINEL') for i in range(7)]

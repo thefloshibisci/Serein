@@ -22,7 +22,9 @@ def test_hook_keeps_memory_id_and_reads_all_evidence_on_demand(tmp_path, kind):
             store.bind('memory', source)
         no_id = store.add_source('legacy-opaque-key', '也不应注入的匿名原文')
         store.bind('memory', no_id)
-        removed = store.add_source('removed', '已经解绑的原文', metadata={'message_id': '999'})
+        # A numeric ID can coincidentally appear in a rendered timestamp.
+        removed_message_id = 'removed-message-id-must-not-be-injected'
+        removed = store.add_source('removed', '已经解绑的原文', metadata={'message_id': removed_message_id})
         store.bind('memory', removed)
         store.conn.execute('UPDATE evidence_bindings SET active=0 WHERE source_id=?', (removed,))
     with Reader(database) as reader:
@@ -45,4 +47,4 @@ def test_hook_keeps_memory_id_and_reads_all_evidence_on_demand(tmp_path, kind):
         assert f'{kind}:memory' in context
         assert 'read_memory(' in context and 'with_evidence=True' in context
         assert 'source_refs' not in context
-        assert '不应注入的绑定原文' not in context and '999' not in context and 'legacy-opaque-key' not in context
+        assert '不应注入的绑定原文' not in context and removed_message_id not in context and 'legacy-opaque-key' not in context

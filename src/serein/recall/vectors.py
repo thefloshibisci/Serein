@@ -1,6 +1,8 @@
 """Resumable whole-body vector coverage in the disposable index only."""
 
 from collections import Counter
+from contextlib import closing
+from .index_safety import guarded_index
 import json
 from pathlib import Path
 import sqlite3
@@ -8,7 +10,7 @@ import sqlite3
 from ..adapters.embedding import EmbeddingClient
 from ..core.reader import Reader
 from ..core.store import encode
-from .index import Search, content_stamp, refresh_index, unit_vector
+from .index import Search, content_stamp, refresh_index
 from .scene import evidence_text
 
 
@@ -30,13 +32,20 @@ def coverage(database, index):
     return {kind: dict(count) for kind, count in counts.items()}
 
 
-def fill_vectors(settings, *, batch_size=16, limit=None, client=None, progress=None, document_ids=None):
+@guarded_index
+def fill_vectors(settings, *, batch_size=None, concurrency=None, limit=None, client=None, progress=None, document_ids=None, with_coverage=True):
     """Reuse current vectors, commit completed batches, and reject changed bodies.
 
     Canonical access is read-only. A failed provider request leaves earlier
     batches available; rerunning requests only the remaining missing vectors.
     """
-    if not 1 <= batch_size <= 64 or (limit is not None and limit < 1):
+    from ..configured_models import recall_settings
+    from .policy import RecallPolicy
+    from .embedding_batches import request_batches
+    policy=RecallPolicy.from_config(recall_settings(settings))
+    batch_size=policy.embedding_batch_size if batch_size is None else batch_size
+    concurrency=policy.embedding_concurrency if concurrency is None else concurrency
+    if type(batch_size) is not int or not 1 <= batch_size <= 64 or (limit is not None and limit < 1):
         raise ValueError("batch_size must be 1..64 and limit must be positive")
     client = client or EmbeddingClient(settings.database, settings.index, **settings.embedding)
     if document_ids is None:
@@ -67,37 +76,36 @@ def fill_vectors(settings, *, batch_size=16, limit=None, client=None, progress=N
             if len(prefix) + len(body) > profile["max_chars"]:
                 skipped["requires_passage_index"] += 1
                 continue
-            pending.append({"id": row["id"], "kind": row["kind"], "stamp": content_stamp(document), "body": body})
+            if getattr(client, 'window', None) and not client.window.fits(prefix + body):
+                skipped['requires_token_passages'] += 1
+                continue
+            pending.append({"id": row["id"], "kind": row["kind"], "stamp": content_stamp(document), "input": body})
     if limit is not None:
         pending = pending[:limit]
     result = {"planned": len(pending), "embedded": 0, "requests": 0, "skipped": dict(skipped), "canonical_writes": 0}
     if progress:
         progress(dict(result))
-    for start in range(0, len(pending), batch_size):
-        batch = pending[start:start + batch_size]
-        vectors = client.documents([item["body"] for item in batch])
-        if len(vectors) != len(batch):
-            raise ValueError("Provider returned an unexpected number of document vectors")
-        vectors = [unit_vector(vector, dimension) for vector in vectors]
-        result["requests"] += 1
-        conn = sqlite3.connect(Path(settings.index).resolve().as_uri() + "?mode=rw", uri=True)
-        try:
-            with conn, Reader(settings.database) as reader:
-                conn.execute("BEGIN IMMEDIATE")
-                current_profile = dict(conn.execute("SELECT key,value FROM settings WHERE key LIKE 'embedding_%'"))
-                if current_profile != stored:
-                    raise ValueError("Index embedding configuration changed during backfill")
-                for item, vector in zip(batch, vectors):
-                    obj = reader.read(item["id"], with_evidence=False)
-                    indexed = conn.execute("SELECT stamp FROM documents WHERE id=?", (item["id"],)).fetchone()
-                    if not obj["readable"] or content_stamp(obj["document"]) != item["stamp"] or not indexed or indexed[0] != item["stamp"]:
-                        skipped["changed_during_embedding"] += 1
-                        continue
-                    cursor = conn.execute("INSERT OR IGNORE INTO vectors VALUES (?,?,?)", (item["id"], encode(vector), dimension))
-                    result["embedded"] += cursor.rowcount
-        finally:
-            conn.close()
-        result["skipped"] = dict(skipped)
-        if progress:
-            progress(dict(result))
-    return {**result, "coverage": coverage(settings.database, settings.index)}
+    with closing(request_batches(client,pending,batch_size=batch_size,concurrency=concurrency)) as batches:
+        for batch,vectors in batches:
+            result["requests"] += 1
+            conn = sqlite3.connect(Path(settings.index).resolve().as_uri() + "?mode=rw", uri=True)
+            try:
+                with conn, Reader(settings.database) as reader:
+                    conn.execute("BEGIN IMMEDIATE")
+                    current_profile = dict(conn.execute("SELECT key,value FROM settings WHERE key LIKE 'embedding_%'"))
+                    if current_profile != stored:
+                        raise ValueError("Index embedding configuration changed during backfill")
+                    for item, vector in zip(batch, vectors):
+                        obj = reader.read(item["id"], with_evidence=False)
+                        indexed = conn.execute("SELECT stamp FROM documents WHERE id=?", (item["id"],)).fetchone()
+                        if not obj["readable"] or content_stamp(obj["document"]) != item["stamp"] or not indexed or indexed[0] != item["stamp"]:
+                            skipped["changed_during_embedding"] += 1
+                            continue
+                        cursor = conn.execute("INSERT OR IGNORE INTO vectors VALUES (?,?,?)", (item["id"], encode(vector), dimension))
+                        result["embedded"] += cursor.rowcount
+            finally:
+                conn.close()
+            result["skipped"] = dict(skipped)
+            if progress:
+                progress(dict(result))
+    return {**result, **({"coverage": coverage(settings.database, settings.index)} if with_coverage else {})}

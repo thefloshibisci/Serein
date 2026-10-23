@@ -62,6 +62,27 @@ class Narratives(NarrativeRollStore):
             items.append(item)
         return items
 
+    def body_material_ids(self, narrative):
+        """Recover the source baseline before material-only revisions of this body."""
+        baseline = {f'{kind}_ids': [] for kind in KINDS}
+        body = str(narrative.get('body') or '').strip()
+        if not body:
+            return baseline
+        rows = self.store.conn.execute(
+            'SELECT body_md,metadata_json FROM revisions WHERE document_id=? '
+            'AND number<=? ORDER BY number DESC',
+            (narrative['narrative_id'], narrative['revision']))
+        for row in rows:
+            if _extract_body(row['body_md']) != body:
+                break
+            entry = json.loads(row['metadata_json']).get('legacy_registry', {})
+            for kind in KINDS:
+                excluded = set(entry.get(f'excluded_{kind}_ids') or [])
+                linked = getattr(self, f'source_{kind}_ids')(
+                    row['body_md'], entry.get(f'linked_{kind}_ids'))
+                baseline[f'{kind}_ids'] = [key for key in linked if key not in excluded]
+        return baseline
+
     def _persist(self, entry, document):
         # Caller holds BEGIN IMMEDIATE from the first CAS/source read to commit.
         key = entry['narrative_id']

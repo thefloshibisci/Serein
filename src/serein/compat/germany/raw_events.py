@@ -379,53 +379,57 @@ class RawEventStore:
     def _insert_event(self, event: dict[str, Any]) -> tuple[str, int | None]:
         conn = self._connect()
         try:
-            cursor = conn.execute(
-                """
-                INSERT OR IGNORE INTO raw_events
-                (source, source_event_id, event_hash, role, text, created_at, ingested_at,
-                 conversation_id, session_id, client, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event["source"],
-                    event["source_event_id"],
-                    event["event_hash"],
-                    event["role"],
-                    event["text"],
-                    event["created_at"],
-                    event["ingested_at"],
-                    event["conversation_id"],
-                    event["session_id"],
-                    event["client"],
-                    event["metadata_json"],
-                ),
-            )
-            if cursor.rowcount:
-                row_id = int(cursor.lastrowid or 0)
-                if self.fts_enabled:
-                    try:
-                        conn.execute(
-                            """
-                            INSERT INTO raw_events_fts(rowid, text, source, conversation_id, session_id)
-                            VALUES (?, ?, ?, ?, ?)
-                            """,
-                            (
-                                row_id,
-                                event["text"],
-                                event["source"],
-                                event["conversation_id"],
-                                event["session_id"],
-                            ),
-                        )
-                    except sqlite3.OperationalError as exc:
-                        logger.warning("raw_events FTS insert failed: %s", exc)
-                conn.commit()
-                return "inserted", row_id
+            result = self._insert_event_on_connection(conn, event)
             conn.commit()
-            row_id = self._find_existing_id(conn, event)
-            return "duplicate", row_id
+            return result
         finally:
             conn.close()
+
+    def _insert_event_on_connection(self, conn: sqlite3.Connection, event: dict[str, Any]) -> tuple[str, int | None]:
+        """Use the caller's transaction, including its FTS and progress writes."""
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO raw_events
+            (source, source_event_id, event_hash, role, text, created_at, ingested_at,
+             conversation_id, session_id, client, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event["source"],
+                event["source_event_id"],
+                event["event_hash"],
+                event["role"],
+                event["text"],
+                event["created_at"],
+                event["ingested_at"],
+                event["conversation_id"],
+                event["session_id"],
+                event["client"],
+                event["metadata_json"],
+            ),
+        )
+        if cursor.rowcount:
+            row_id = int(cursor.lastrowid or 0)
+            if self.fts_enabled:
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO raw_events_fts(rowid, text, source, conversation_id, session_id)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            row_id,
+                            event["text"],
+                            event["source"],
+                            event["conversation_id"],
+                            event["session_id"],
+                        ),
+                    )
+                except sqlite3.OperationalError as exc:
+                    logger.warning("raw_events FTS insert failed: %s", exc)
+            return "inserted", row_id
+        row_id = self._find_existing_id(conn, event)
+        return "duplicate", row_id
 
     def _find_existing_id(self, conn: sqlite3.Connection, event: dict[str, Any]) -> int | None:
         if event.get("source_event_id"):

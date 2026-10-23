@@ -19,6 +19,12 @@ def _arcs(reader, hits, arc_key=None):
         key = meta.get('arc_key')
         if not key:
             continue
+        if key != arc_key and hits and all(hit.get('kind') in ('event', 'scene') for hit in hits):
+            # Only relevant Arcs need their full menus (including notebook bodies).
+            targets = {value for hit in hits for value in (hit['id'], hit['kind'] + ':' + hit['id'])}
+            if not any(ref['target_id'] in targets and ref['kind'] in ('event', 'scene')
+                       for ref in reader._material_references(doc)):
+                continue
         members, offset = [], 0
         while True:
             page = reader.materials(row['id'], offset=offset, limit=100)
@@ -75,6 +81,26 @@ def render(hits, *, reader=None, body_char_limit=1200, scope_arc_key='', deliver
         source = doc['body_md']
         if hit['kind'] == 'scene':
             source = bucket_text_for_embedding({'content': source, 'metadata': {'memory_value_source': 'authored_scene', **doc['metadata']}})
+        excerpt = hit.get('body_excerpt')
+        if excerpt:
+            if not excerpt['text'].strip():
+                continue
+            from .passages import regions
+            spans = excerpt.get('source_spans') or [
+                {'start_offset':excerpt['start_offset'],'end_offset':excerpt['end_offset']}]
+            allowed = regions(doc)
+            previous_end = 0
+            pieces = []
+            for span in spans:
+                start,end = span['start_offset'],span['end_offset']
+                if (type(start) is not int or type(end) is not int or start < previous_end or
+                        not any(a <= start < end <= b for a,b in allowed)):
+                    raise ValueError('Recall excerpt must match a canonical evidence region')
+                pieces.append(doc['body_md'][start:end])
+                previous_end = end
+            if ''.join(pieces) != excerpt['text']:
+                raise ValueError('Recall excerpt must match canonical evidence text')
+            source = excerpt['text']
         body = GatewayService._clip_text(source.strip(), max(160, min(2400, int(body_char_limit or 1200))))
         if not body:
             continue
@@ -83,6 +109,9 @@ def render(hits, *, reader=None, body_char_limit=1200, scope_arc_key='', deliver
         card = {'id': ref, 'source': 'serein', 'source_kind': hit['kind'], 'title': title,
                 'text': body, 'score': round(float(hit.get('score') or 0), 4), 'render_shape': 'typed_memory',
                 **memory_dates(doc, hit['kind'])}
+        if excerpt:
+            card['source_spans'] = spans
+            card['reranker_input_tokens'] = excerpt.get('input_tokens')
         cards.append(card)
         lines = [f'[typed_memory ref={ref}]', f'title: {title}']
         lines.extend(date_lines(card))

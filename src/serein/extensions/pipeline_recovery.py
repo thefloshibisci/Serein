@@ -16,6 +16,12 @@ MAX_HISTORY_JOBS = 256
 SOURCE_STATES = ('routed', 'done', 'superseded_input_budget')
 MESSAGE_KEYS = ('id', 'source', 'source_event_id', 'original_session_id',
                 'session_id', 'role', 'content', 'created_at')
+# rc65 before the replay-seed fix, with Windows CRLF or release LF files.
+# Only its completed, compacted producers qualify; unfinished work stays held.
+COMPACTED_ROUTER_REVISIONS = frozenset({
+    '4fc0c763905e28e35af100115e6b265817662d38d896e0eec0cb3b20f3f3f679',
+    '0a8a6382fe8f0e6e02e2f165c69c179cce0925669c59d30677f5a8e673099620',
+})
 
 
 def initialize(conn):
@@ -27,12 +33,15 @@ def initialize(conn):
     ''')
 
 
-def record_routes(conn, batch_id, assignments):
+def record_routes(conn, batch_id, assignments, *, preserve_existing=False):
     """Call inside the SAME transaction that saves the producer's snapshot."""
     for assignment in assignments:
         raw_id = assignment['source_message_id']
         value = encode(assignment)
         conn.execute('INSERT OR REPLACE INTO pipeline_routes VALUES (?,?)', (raw_id, value))
+        if preserve_existing:
+            existing=conn.execute('SELECT route_json FROM pipeline_route_provenance WHERE raw_id=?',(raw_id,)).fetchone()
+            if existing and existing[0]==value:continue
         conn.execute('INSERT OR REPLACE INTO pipeline_route_provenance VALUES (?,?,?)',
                      (raw_id, batch_id, value))
 
@@ -52,15 +61,30 @@ def _frames(database, batch):
     """Replay accepted jobs against THEIR inputs/ordinals, without invoking job()."""
     from . import pipeline as p
     original = json.loads(batch['input_json'])
-    if (original.get('contract') != p.CONTRACT
-            or original.get('runtime_revision') != p.runtime_revision()
-            or original.get('scope') != batch['scope']):
-        raise p.RoutingRecoveryError('route producer has an incompatible frozen contract')
-    if not _same_scope(original, original.get('routing_messages', [])):
-        raise p.RoutingRecoveryError('route producer messages do not belong to its frozen scope')
+    legacy_compacted = (batch['status'] == 'done' and original.get('task_snapshot_compacted') is True
+        and all(key not in original for key in ('tracks', 'recent', 'next_track_ordinal', 'input_policy')))
     jobs = p.router_jobs(database, batch)
     if len(jobs) > MAX_HISTORY_JOBS:
         raise p.RoutingRecoveryError('route history exceeds bounded job recovery limit')
+    # The runtime revision protects unfinished execution. Published Router
+    # receipts with a complete seed and per-request proofs can instead be
+    # checked below against their own inputs, even after downstream code changes.
+    published_replay = (batch['status'] in SOURCE_STATES
+        and all(key in original for key in ('tracks', 'recent', 'next_track_ordinal', 'input_policy'))
+        and bool(jobs) and all('routing_frame' in json.loads(row['request_json']) for row in jobs))
+    current_revision = p.runtime_revision()
+    if (original.get('contract') != p.CONTRACT
+            or (original.get('runtime_revision') != current_revision
+                and not published_replay
+                and not (legacy_compacted and original.get('runtime_revision') in COMPACTED_ROUTER_REVISIONS))
+            or original.get('scope') != batch['scope']):
+        raise p.RoutingRecoveryError('route producer has an incompatible frozen contract: '
+            f"producer={batch['id']}; status={batch['status']}; "
+            f"contract={original.get('contract')!r}; expected_contract={p.CONTRACT!r}; "
+            f"runtime_revision={original.get('runtime_revision')!r}; current_runtime_revision={current_revision!r}; "
+            f"scope={original.get('scope')!r}; expected_scope={batch['scope']!r}")
+    if not _same_scope(original, original.get('routing_messages', [])):
+        raise p.RoutingRecoveryError('route producer messages do not belong to its frozen scope')
     if not jobs:
         result = original.get('routing_result')
         if result is None:
@@ -76,11 +100,41 @@ def _frames(database, batch):
                  'next_track_ordinal': result['next_track_ordinal']}]
     frames = []
     cursor = 0
+    state=list(original.get('tracks',[]));ordinal=original.get('next_track_ordinal',1)
+    prior=list(original.get('recent',[]))
     for row in jobs:
         request = json.loads(row['request_json'])
         if request.get('batch_id') != batch['id']:
             raise p.RoutingRecoveryError('Router job belongs to another producer batch')
         messages = p._router_prefix(original, request, cursor)
+        if legacy_compacted:
+            if 'routing_frame' not in request:
+                raise p.RoutingRecoveryError('compacted Router request has no frozen frame proof')
+            # Old compaction lost the complete seed AND candidate policy. Saved
+            # requests still prove their selected cards; retain every encountered
+            # card so a hidden candidate must match when it returns later.
+            if cursor == 0:
+                ordinal=request['next_track_ordinal'];prior=list(request.get('recent_context',[]))
+                if prior and not _same_scope(original,prior):
+                    raise p.RoutingRecoveryError('Router recent context is outside its frozen scope')
+            known={card['track_id']:card for card in state}
+            with Store(database,read_only=True) as store:
+                for card in request['active_tracks']:
+                    if card['track_id'] not in known:
+                        tracks.assert_before(store,[card],original['routing_messages'][0]['id'])
+                        state.append(card);known[card['track_id']]=card
+            selected=[known[card['track_id']] for card in request['active_tracks']]
+            p.assert_router_state({'input_policy':{}},request,selected,ordinal,prior)
+        else:
+            p.assert_router_state(original,request,state,ordinal,prior)
+        if 'routing_frame' in request:
+            with Store(database,read_only=True) as store:
+                tracks.assert_before(store,request['active_tracks'],messages[0]['id'])
+        with Store(database,read_only=True) as store:
+            for key,value in request.get('routing_frame',{}).get('source_hashes',{}).items():
+                raw=store.conn.execute('SELECT event_hash FROM raw_events WHERE id=?',(int(key),)).fetchone()
+                if raw is None or raw[0]!=value:
+                    raise p.RoutingRecoveryError('frozen Router source hash changed: '+str(key))
         cursor += len(messages)
         if row['output_json'] is None:
             break  # An unfinished suffix is never rerun by recovery.
@@ -90,8 +144,9 @@ def _frames(database, batch):
             output, messages, request['active_tracks'], session_id=original['scope'],
             next_track_ordinal=request['next_track_ordinal'])
         with p.latest.identity_scope(request['identity']):
-            cards = tracks.update_cards(request['active_tracks'], assignments, updates,
+            cards = tracks.update_cards(state, assignments, updates,
                                         messages, original['scope'])
+        state=cards;prior.extend(messages)
         used = {key for a in assignments for key in [a['primary_track_id'], *a['context_track_ids']]}
         frames.append({'batch_id': batch['id'], 'job_id': row['id'], 'messages': messages,
                        'assignments': assignments, 'tracks': [c for c in cards if c['track_id'] in used],
@@ -251,7 +306,7 @@ def _rebuild(database, batch_id):
         data = json.loads(batch['input_json'])
         if data.get('contract') != p.CONTRACT:
             raise Conflict('旧批次契约不兼容，不能自动重建')
-        stable = [m['id'] for m in data['messages']]
+        stable = [m['id'] for m in data.get('messages',data['routing_messages'])]
         routing = data['routing_messages']
         if not stable or not _same_scope(data, routing):
             raise Conflict('冻结原话范围无法验证，不能自动重建')
@@ -289,22 +344,35 @@ def _rebuild(database, batch_id):
             store.conn.execute('DELETE FROM pipeline_route_provenance WHERE raw_id=?', (frozen['id'],))
         # Retain only the original pre-routing input, never old ownership/plans.
         fresh = {key: deepcopy(data[key]) for key in ('contract', 'runtime_revision', 'input_policy', 'messages', 'parked',
-                 'routing_messages', 'tracks', 'scope', 'source', 'recent', 'day') if key in data}
+                 'routing_messages', 'tracks', 'scope', 'source', 'recent', 'day', 'recovery_downgrade') if key in data}
         fresh['contract'] = p.CONTRACT
         fresh['runtime_revision'] = p.runtime_revision()
         fresh['tracks'] = [c for c in fresh['tracks'] if p._card_is_complete(c)]
+        previous_result = json.loads(batch['result_json'] or '{}')
+        history_error = data.get('routing_evidence_error') or previous_result.get('reason', '')
+        if data.get('routing_evidence_error') or 'No bounded historical pre-routing Track frame:' in history_error:
+            # The existing explicit rebuild starts a new history segment for
+            # this scope. Later windows must not reintroduce the same gap.
+            fresh['tracks'] = []
+            fresh['recent'] = []
+            fresh['recovery_downgrade'] = {'reason': history_error,
+                'history_before_id': min(m['id'] for m in routing),
+                'confirmed_by': 'REBUILD_PIPELINE_BATCH', 'source_batch_id': batch_id}
         fresh['next_track_ordinal'] = max(data.get('next_track_ordinal', 1),
                                          tracks.next_ordinal(data['scope'], reserved))
         fresh['ignore_route_cache'] = True
         fresh['rebuild_of'] = batch_id
         fresh['queue_order'] = data.get('queue_order', batch['queue_order'])
-        replacement = 'pipeline:'+digest(encode([batch_id, uuid4().hex]))
+        route_only=batch_id.startswith('route:')
+        replacement = ('route:' if route_only else 'pipeline:')+digest(encode([batch_id, uuid4().hex]))
         audit = {'status': 'superseded_repair', 'replacement_batch_id': replacement,
-                 'confirmed_at': now(), 'previous_result': json.loads(batch['result_json'] or '{}'),
+                 'confirmed_at': now(), 'previous_result': previous_result,
                  'discarded_route_cache': cache}
+        if fresh.get('recovery_downgrade'):
+            audit['recovery_downgrade'] = fresh['recovery_downgrade']
         store.conn.execute("UPDATE pipeline_batches SET status='superseded_repair',result_json=? WHERE id=?",
                            (encode(audit), batch_id))
-        store.conn.execute('INSERT INTO pipeline_batches(id,scope,input_json) VALUES (?,?,?)',
-                           (replacement, data['scope'], encode(fresh)))
+        store.conn.execute('INSERT INTO pipeline_batches(id,scope,input_json,status) VALUES (?,?,?,?)',
+                           (replacement, data['scope'], encode(fresh),'routing_only' if route_only else 'pending'))
         return {'status': 'rebuilt', 'batch_id': replacement, 'superseded_batch_id': batch_id,
                 'note': '旧计划与模型结果已保留，尚未处理的原话将重新归线；已保存的 Event 不变。'}

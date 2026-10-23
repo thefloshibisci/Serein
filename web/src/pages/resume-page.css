@@ -1,0 +1,44 @@
+.app-shell.app-shell--resume { min-height: 100dvh; overflow: visible; }
+.resume-page { min-height: 100dvh; background: var(--paper); }
+.resume-page > .sidebar { position: fixed; opacity: 1; visibility: visible; animation: sidebar-arrive var(--sidebar-duration) var(--sidebar-ease) both; }
+.resume-layout { max-width: 1360px; display: flex; flex-direction: column; margin: 0 auto; padding: 64px 48px 24px 118px; color: var(--ink); }
+.resume-header { flex-shrink: 0; margin-bottom: 40px; }
+.resume-header > p, .resume-preview > header p, .resume-materials > article > p:first-child { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+.resume-header h1 { margin: 0 0 16px; font-family: var(--font-editorial-cjk); font-size: 38px; font-weight: 400; letter-spacing: .12em; }
+.resume-header > span { color: var(--muted); font-family: var(--font-editorial-cjk); font-size: 15px; }
+.resume-columns { display: grid; grid-template-columns: minmax(270px,360px) minmax(0,1fr); align-items: start; gap: 56px; }
+.resume-options { min-width: 0; }
+.resume-options .resume-selection { margin: 0; padding: 0; border: 0; min-width: 0; }
+.resume-options .resume-selection legend, .resume-preview h2, .resume-disabled h2 { font-family: var(--font-editorial-cjk); font-size: 21px; font-weight: 400; }
+.resume-options .resume-selection > p { color: var(--muted); font-size: 12px; line-height: 1.8; }
+.resume-options .resume-selection > div { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.resume-options .resume-selection > div > label:first-child { display: flex; align-items: center; gap: 12px; }
+.resume-options input[type=checkbox] { accent-color: var(--sage); width: 17px; height: 17px; }
+.resume-options .settings-field { margin: 22px 0; }
+.resume-preview { position: sticky; top: 24px; height: calc(100dvh - 48px); min-width: 0; min-height: 0; display: flex; flex-direction: column; padding-left: 32px; border-left: 1px solid var(--line); }
+.resume-preview > :not(.resume-preview-scroll) { flex-shrink: 0; }
+.resume-preview-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #bac6bf transparent; padding-right: 12px; overflow-wrap: anywhere; }
+.resume-preview-scroll:focus-visible { outline: 2px solid var(--sage); outline-offset: 3px; }
+.resume-preview > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.resume-preview h2 { margin: 0; }
+.resume-layout button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 10px 15px; min-height: 40px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--ink); cursor: pointer; font-size: 13px; }
+.resume-layout button[type=submit] { background: var(--sage); color: var(--white); border-color: var(--sage); }
+.resume-layout button:disabled { opacity: .48; cursor: default; }
+.resume-layout .resume-settings-link { min-height: 0; margin-left: 8px; padding: 0; border: 0; border-radius: 0; border-bottom: 1px dashed currentColor; color: var(--muted); font: inherit; }
+.resume-layout button:focus-visible, .resume-layout input:focus-visible, .resume-layout select:focus-visible { outline: 2px solid var(--sage); outline-offset: 3px; }
+.resume-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 26px; }
+.resume-note { color: var(--muted); font-size: 12px; line-height: 1.8; }
+.resume-empty { display: grid; align-content: center; min-height: 100%; text-align: center; color: var(--muted); }
+.resume-empty p { font-family: var(--font-editorial-cjk); font-size: 18px; }
+.resume-empty span { font-size: 12px; }
+.resume-materials > article { padding: 28px 0; border-bottom: 1px solid var(--line); }
+.resume-materials > article > h3, .resume-handoff > h3 { margin: 0 0 12px; font-family: var(--font-editorial-cjk); font-size: 21px; font-weight: 400; line-height: 1.6; }
+.resume-materials small { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.resume-materials .markdown-projection, .resume-handoff .markdown-projection { margin-top: 21px; font-family: var(--font-editorial-cjk); font-size: 14px; line-height: 1.95; }
+.resume-feedback, .resume-disabled p { max-width: 65ch; color: var(--muted); font-size: 13px; line-height: 1.8; }
+.resume-feedback { flex-shrink: 0; margin: 18px 0 0; }
+.resume-disabled button + button { margin-left: 12px; }
+@media (max-width: 1050px) { .resume-layout { padding: 45px 30px 24px 100px; } .resume-columns { gap: 30px; grid-template-columns: minmax(240px,300px) minmax(0,1fr); } .resume-preview { padding-left: 24px; } }
+@media (max-width: 760px) { .resume-layout { display: block; padding: 38px 24px 65px 84px; } .resume-header h1 { font-size: 30px; } .resume-columns { grid-template-columns: 1fr; gap: 40px; } .resume-preview { position: static; height: max(560px,calc(100dvh - 48px)); padding: 30px 0 0; border-left: 0; border-top: 1px solid var(--line); } }
+@media (max-width: 430px) { .resume-layout { padding-left: 76px; padding-right: 18px; } .resume-preview > header { align-items: start; flex-direction: column; } }
+@media (prefers-reduced-motion: reduce) { .resume-page > .sidebar { animation: none; } }

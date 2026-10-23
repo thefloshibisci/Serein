@@ -158,7 +158,10 @@ class NarrativeHTTP:
             "linked_darkroom_ids": proposed_material_ids["darkroom_ids"],
             "linked_upload_ids": proposed_material_ids["upload_ids"],
         }
-        selection = writer_material_ids(mode, current_material_ids, proposed_material_ids)
+        selection = writer_material_ids(
+            mode, current_material_ids, proposed_material_ids,
+            body_material_ids=self.rolls.body_material_ids(narrative) if mode == "update" else None,
+        )
         if selection.get("status") != "ok":
             return JSONResponse({**selection, "writes_performed": []}, status_code=409)
         writer_ids = selection["material_ids"]

@@ -64,7 +64,7 @@ def test_new_schema_has_self_use_required_fields_and_defaults(runtime):
     favorites = tools['read_favorites'].inputSchema['properties']
     assert favorites['limit']['default'] == 5
     assert favorites['include_archived']['default'] is False
-    assert tools['write_diary'].inputSchema['properties']['author']['default'] == 'ai'
+    assert 'author' not in tools['write_diary'].inputSchema['properties']
     for name in ('read_memory', 'recall_memory', 'find_arc', 'read_arc_materials', 'read_diary', 'read_favorites'):
         assert tools[name].outputSchema is None
 

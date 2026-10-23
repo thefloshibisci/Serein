@@ -90,8 +90,12 @@ def test_temporary_download_failure_is_not_a_missing_original(settings, monkeypa
     monkeypatch.setattr('serein.extensions.pipeline_images.image_bytes', timeout)
     async def runner(role, request):
         return output_for(role, request)
+    from serein.extensions.pipeline_images import image_bytes
     with pytest.raises(TimeoutError):
-        asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))
+        image_bytes('https://example.com/slow.png')
+    result=asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))
+    assert result['events']==1 and result['processed_originals']==2
+    assert result['missing_images']==[{'source_message_id':1,'position':1,'reason':'original_unavailable'}]
 
 
 def test_reply_to_other_user_does_not_count_as_an_owned_round():
@@ -165,7 +169,7 @@ def test_paused_writer_holds_its_chat_but_allows_another_and_resumes_frozen_step
     async def succeeds(role, request):return output_for(role, request)
     result = asyncio.run(p.advance(settings.database, include_recent=True, runner=succeeds))
     assert result['events'] == 1 and result['batch_id'] != paused['batch_id']
-    assert asyncio.run(p.advance(settings.database, include_recent=True, runner=succeeds))['status'] == 'current'
+    assert asyncio.run(p.advance(settings.database, include_recent=True, runner=succeeds))['status'] == 'blocked'
     with Store(settings.database, read_only=True) as store:
         assert store.conn.execute('SELECT count(*) FROM raw_processing WHERE raw_id IN (1,2,3,4)').fetchone()[0] == 0
         assert store.conn.execute('SELECT count(*) FROM pipeline_jobs WHERE batch_id=? AND output_json IS NOT NULL',
@@ -195,16 +199,28 @@ def test_pause_budget_persists_api_attempts_and_retry_route_is_authenticated(set
     monkeypatch.setattr('serein.model_runtime.complete', broken)
     paused = asyncio.run(p.advance(settings.database, include_recent=True))
     assert paused['status'] == 'paused' and len(calls) == 3
-    assert asyncio.run(p.advance(settings.database, include_recent=True))['status'] == 'current'
+    assert asyncio.run(p.advance(settings.database, include_recent=True))['status'] == 'blocked'
     assert len(calls) == 3
+    with Store(settings.database, read_only=True) as store:
+        attempts_before_retry = [dict(row) for row in store.conn.execute('SELECT * FROM pipeline_attempts ORDER BY id')]
+    assert len(attempts_before_retry) == 3
     app = create_app(settings, token='test', live=True)
     assert TestClient(app).post('/v1/pipeline/retry-batch', json={'batch_id': paused['batch_id']}).status_code == 401
     client = TestClient(app, headers={'Authorization': 'Bearer test'})
     assert client.get('/v1/pipeline/status').json()['paused_batches'][0]['batch_id'] == paused['batch_id']
     assert client.post('/v1/pipeline/retry-batch', json={'batch_id': paused['batch_id']}).json()['status'] == 'resumed'
+    assert len(calls) == 3  # Resuming resets the budget without calling the model.
     with Store(settings.database, read_only=True) as store:
         assert store.conn.execute('SELECT count(*) FROM pipeline_job_failures').fetchone()[0] == 0
-        assert store.conn.execute('SELECT count(*) FROM pipeline_attempts').fetchone()[0] == 3
+        attempts = [dict(row) for row in store.conn.execute('SELECT * FROM pipeline_attempts ORDER BY id')]
+    resets = [row for row in attempts if row['error'] == 'curator_omission_retry_reset']
+    model_attempts = [row for row in attempts if row['error'] != 'curator_omission_retry_reset']
+    assert len(model_attempts) == 3
+    assert model_attempts == attempts_before_retry  # Preserve the original attempt history.
+    assert len(resets) == 1
+    assert resets[0]['output_text'] == ''
+    assert resets[0]['job_id'] == attempts_before_retry[-1]['job_id']
+    assert resets[0]['id'] > attempts_before_retry[-1]['id']
 
 
 def test_continue_worker_moves_to_independent_chat_after_pausing_failed_batch(settings, monkeypatch):
@@ -235,5 +251,5 @@ def test_continue_worker_moves_to_independent_chat_after_pausing_failed_batch(se
         return result
     monkeypatch.setattr(p, '_advance', controlled)
     result = asyncio.run(work(settings, 'pipeline', {'include_recent': True}))
-    assert results == ['paused', 'processed', 'current']
+    assert results == ['paused', 'processed', 'blocked']
     assert result['events'] == 1

@@ -35,6 +35,9 @@ def test_legacy_domain_exclusions_apply_to_lookup_and_both_edge_ends(setup,metad
     with Store(setup.database) as store:
         old=store.read('scene_tech')
         store.revise('scene_tech',expected_revision=old['revision'],title=old['title'],body_md=old['body_md'],metadata=metadata)
+        # The shared fixture's earlier edge otherwise consumes the single
+        # neighbor slot before this test can exercise the target domain.
+        store.conn.execute("DELETE FROM scene_relations WHERE id='edge'")
         store.conn.execute("INSERT INTO scene_relations VALUES ('tech-edge','test','scene_tech','scene_a','active',1,'{}')")
     from serein.recall.index import refresh_index
     refresh_index(setup.database,setup.index,{'scene_tech'})
@@ -43,6 +46,7 @@ def test_legacy_domain_exclusions_apply_to_lookup_and_both_edge_ends(setup,metad
     with Reader(setup.database) as reader:
         assert bool(related_candidates(reader,['scene_tech'],Query('技术说明'),engine.policy)) is not excluded
         targets=related_candidates(reader,['scene_a'],Query('世界之窗'),engine.policy)
+        assert len(targets)<=1
         assert any(row['id']=='scene_tech' for row in targets) is not excluded
 
 

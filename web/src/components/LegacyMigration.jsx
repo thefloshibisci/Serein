@@ -14,6 +14,26 @@ export function LegacyMigration(){
   const [sourcePath,setSourcePath]=useState(''),[installation,setInstallation]=useState(null);
   const [names,setNames]=useState({user_name:'',ai_name:'',aliases:''}),[confirmed,setConfirmed]=useState(false);
   const [generateCues,setGenerateCues]=useState(true),[cueChoices,setCueChoices]=useState({});
+  const [backupBusy,setBackupBusy]=useState(false),[backupMessage,setBackupMessage]=useState('');
+  async function downloadBackup(){
+    if(backupBusy)return;
+    setBackupBusy(true);setBackupMessage('正在准备并接收数据库备份，请保持页面打开…');
+    try{
+      // Fetch inside the signed-in page: mobile download managers may lose Basic auth.
+      const response=await fetch('/__serein/export/backup',{credentials:'same-origin',cache:'no-store'});
+      if(!response.ok){
+        const error=await response.json().catch(()=>null);
+        throw new Error(response.status===401?'登录已失效，请刷新页面重新登录后下载。':error?.detail||'数据库备份未完成，请稍后重试。');
+      }
+      const blob=await response.blob();
+      if(!blob.size)throw new Error('收到的备份为空，请重试。');
+      const url=URL.createObjectURL(blob),link=document.createElement('a');
+      link.href=url;link.download='serein-backup.db';document.body.appendChild(link);
+      link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60_000);
+      setBackupMessage('备份已接收，已请求浏览器保存 serein-backup.db。');
+    }catch(error){setBackupMessage(error instanceof TypeError?'备份连接中断，请保持网络稳定后重试。':error.message||'备份下载未完成，请重试。');}
+    finally{setBackupBusy(false);}
+  }
   useEffect(()=>{
     let disposed=false,pending=false;
     async function refresh(){if(pending)return;pending=true;try{const data=await call();if(!disposed)setItems(data.items);}catch(error){if(!disposed)setMessage(error.message);}finally{pending=false;}}
@@ -87,7 +107,8 @@ export function LegacyMigration(){
       {!active&&task.status!=='completed'&&<p className="import-help">{item.errors.length?'请先修正上面的扫描错误并重新预览。':!item.options&&(!names.user_name.trim()||!names.ai_name.trim())?'请先填写上方旧记忆里的用户名字和 AI 名字。':!confirmed?'请先打开上方“确认转换规则与模型费用”开关。':'可以开始；旧边为 0 不会禁用此按钮。'}</p>}
     </section>;})}
     <p role="status">{message}</p>
-    <p><a className="settings-link" href="/__serein/export/backup" download>下载当前数据库备份</a></p>
+    <div className="settings-actions"><button type="button" disabled={backupBusy} onClick={downloadBackup}>{backupBusy?'正在下载备份…':'下载当前数据库备份'}</button></div>
+    <p role="status">{backupMessage}</p>
     <p>旧库 ZIP 包含所选路径中的全部文件，可能含配置和密钥；数据库备份也包含记忆与模型密钥，请妥善保存。图片、向量索引和安装账号文件需随安装目录另行备份；数据库备份不是一键恢复整站的安装包。</p>
   </section>;
 }

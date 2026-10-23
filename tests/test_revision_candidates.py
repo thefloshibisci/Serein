@@ -34,8 +34,11 @@ def test_promoted_live_event_keeps_originals_and_retires_hint_without_losing_dra
     save_settings(settings.database, {'features':{'event_to_scene':True}})
     services = Application(settings).services
     original = services.read(key)
+    services.write('approve-promotion','mailbox_select',{'event_id':key,
+        'expected_revision':original['document']['revision'],'expected_queue_revision':0})
     result = services.write('promotion', 'promote_event', {'event_id':key,
-        'expected_revision':original['document']['revision'], 'title':'Rain scene', 'body_md':'I remember the rain.'})
+        'expected_revision':original['document']['revision'],'expected_queue_revision':1,
+        'title':'Rain scene', 'body_md':'I remember the rain.'})
     scene = services.read(result['id'])
     assert {e['source_id'] for e in scene['evidence']} == {e['source_id'] for e in original['evidence']}
     assert services.read(key)['document'] == original['document']

@@ -7,7 +7,13 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "test:backup-dom": "node tests/backup-download.dom.mjs",
+    "test:mailbox-dom": "node tests/event-mailbox.dom.mjs",
+    "test:darkroom-dom": "node tests/darkroom.dom.mjs",
+    "test:scene-restore-dom": "node tests/scene-restore.dom.mjs",
+    "test:imports-dom": "node tests/import-batches.dom.mjs",
+    "test:index-throughput-dom": "node tests/index-throughput.dom.mjs"
   },
   "dependencies": {
     "@fontsource/noto-serif-sc": "^5.2.8",
@@ -21,5 +27,8 @@
     "remark-gfm": "^4.0.1",
     "three": "^0.160.0",
     "vite": "6.4.3"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
   }
 }

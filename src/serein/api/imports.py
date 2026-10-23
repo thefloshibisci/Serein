@@ -15,6 +15,9 @@ def routes(settings,auth):
         mode: Literal['auto','conversation','operit'] = 'auto'
         tagging: bool = True
 
+    class ImportOptions(BaseModel):
+        large_batch: bool = Field(default=False,strict=True)
+
     @router.post('/v1/imports/preview')
     def preview(body:Upload):
         return stage(settings.database,body.content,body.filename,body.mode,body.tagging)
@@ -36,12 +39,12 @@ def routes(settings,auth):
         return {'items':entries,'tagging':tags,'tagging_errors':failures}
 
     @router.post('/v1/imports/{identifier}/continue')
-    def proceed(identifier:str):
+    def proceed(identifier:str,body:ImportOptions|None=Body(default=None)):
         initialize_imports(settings.database)
         with Store(settings.database,read_only=True) as store:
             if not store.conn.execute('SELECT 1 FROM file_imports WHERE id=?',(identifier,)).fetchone():
                 raise ValueError('找不到导入任务')
-        return enqueue(settings.database,'import:'+identifier)
+        return enqueue(settings.database,'import:'+identifier,{'large_batch':body.large_batch if body else False})
 
     @router.post('/v1/imports/{identifier}/pause')
     def stop(identifier:str):
@@ -84,6 +87,8 @@ def routes(settings,auth):
                 if store.conn.execute("SELECT 1 FROM sqlite_master WHERE name='raw_processing'").fetchone() else 0)
             if store.conn.execute("SELECT 1 FROM sqlite_master WHERE name='pipeline_batches'").fetchone():
                 value['paused_batches']=[json.loads(row[0]) for row in store.conn.execute("SELECT result_json FROM pipeline_batches WHERE status='paused_failure' ORDER BY rowid")]
+                from ..extensions.pipeline import scope_holds
+                value['blocked_scopes']=scope_holds(settings.database)
             value['failed_images']=[dict(row) for row in store.conn.execute(
                 'SELECT sha256,failures,error FROM pipeline_image_failures WHERE failures>=3 ORDER BY updated_at DESC')]
             quiet=value['status']=='completed' and value.get('stage') in ('settled_today','waiting_settlement_window')
@@ -101,6 +106,8 @@ def routes(settings,auth):
             value['attempts']=[dict(row) for row in store.conn.execute(
                 'SELECT id,attempt,created_at,error,length(output_text) output_chars FROM pipeline_attempts WHERE job_id=? ORDER BY id DESC LIMIT 5',
                 (value.get('job_id',''),))] if store.conn.execute("SELECT 1 FROM sqlite_master WHERE name='pipeline_attempts'").fetchone() else []
+        if value.get('blocked_scopes') and value['status'] in ('idle','completed'):
+            value.update(status='blocked',stage='blocked')
         return value
 
     @router.post('/v1/pipeline/retry-batch')

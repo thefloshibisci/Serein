@@ -80,6 +80,50 @@ def test_configured_body_candidate_threshold_applies_on_next_recall(legacy):
     assert result['candidate_policy']['tail_body_or_passage_floor']==.47
 
 
+def test_saved_pool_limit_admits_target_beyond_twenty_without_lowering_rerank_threshold(legacy):
+    from serein.configured_models import effective_settings
+    settings,build=legacy
+    engine,_=build([(f's{i}','scene',.90-i*.01,'2026-09-01') for i in range(20)]+
+                   [('target','scene',.59,'2026-09-01')])
+    seen=[]
+    def score(query,docs):
+        seen.extend(d['ref'] for d in docs)
+        return {d['ref']:(.95 if d['ref']=='scene:target' else .1) for d in docs}
+    engine.reranker=score
+    before=engine.run('手机维修',method='semantic',min_cosine=.5)
+    assert len(seen)==20 and 'scene:target' not in seen
+    assert before['selected_refs']==[]
+    save_settings(settings.database,{'recall':{'direct_pool_limit':30}})
+    seen.clear()
+    engine=Recall(effective_settings(settings),reranker=score)
+    after=engine.run('手机维修',method='semantic',min_cosine=.5)
+    assert len(seen)==21 and 'scene:target' in seen
+    assert after['selected_refs']==['scene:target']
+    assert after['candidate_policy']['direct_pool_limit']==30
+    assert after['candidate_policy']['pool_limit']==30
+    assert after['candidate_policy']['base_vector_pool_limit']==6
+    assert engine.policy.direct_threshold==.65
+
+
+@pytest.mark.parametrize('limit',[6,30])
+def test_configured_pool_stays_bounded_with_one_extra_relation(legacy,limit):
+    from serein.configured_models import effective_settings
+    settings,build=legacy
+    _,calls=build([(f's{i}','scene',.90-i*.005,'2026-09-01') for i in range(32)]+
+                  [('neighbor','scene',.4,'2026-09-01'),('other','scene',.3,'2026-09-01')])
+    link_scenes(settings,[('a','s0','neighbor',1),('b','s0','other',1)])
+    save_settings(settings.database,{'recall':{'direct_pool_limit':limit}})
+    def score(query,docs):
+        calls.extend(docs)
+        return {d['ref']:.9 for d in docs}
+    result=Recall(effective_settings(settings),reranker=score).run('手机维修',method='semantic',min_cosine=.5)
+    assert len(calls)==limit+1
+    assert result['candidate_retrieval']['actual_candidate_count']==limit+1
+    assert result['candidate_policy']['pool_limit']==limit+1
+    assert sum(row['candidate_origin']=='relation' for row in result['candidate_scores'])==1
+    assert result['candidate_retrieval']['base_pool_count']==6
+
+
 @pytest.mark.parametrize('cooled,expected',[(['scene:s0'],['scene:s1']),(['scene:s0','scene:s1'],[])])
 def test_old_winners_are_cooled_without_refilling(legacy,cooled,expected):
     _,build=legacy
@@ -224,6 +268,36 @@ def test_replaced_and_scene_covered_events_are_filtered_before_reranker(legacy,m
     assert result['candidate_retrieval']['snapshot_suppressed']['manual_surface_not_enabled']==1
 
 
+@pytest.mark.parametrize('manual', [False, None, True])
+def test_explicit_scene_restore_reenters_real_typed_candidates(legacy, manual):
+    from serein.compat.scenes import Scenes
+    from serein.recall.index import refresh_index
+    settings, build = legacy
+    engine, calls = build([('restore', 'scene', .95, '2026-09-01')])
+    def refresh_with_synthetic_vector():
+        refresh_index(settings.database, settings.index, ['restore'])
+        with sqlite3.connect(settings.index) as db:
+            db.execute('INSERT OR REPLACE INTO vectors VALUES (?,?,2)',
+                       ('restore', json.dumps([.95, math.sqrt(1-.95**2)])))
+    with Store(settings.database) as store:
+        store.set_lifecycle('restore', 'archived')
+        store.set_manual_surface('restore', manual)
+        before = store.read('restore')
+    assert not engine.run('手机维修', method='semantic', min_cosine=.5)['selected_refs']
+    assert not calls
+    # Even when ordinary unarchive removes the lifecycle gate, false/null stay out.
+    ordinary = Scenes(settings.database).edit('restore', before['updated_at'], status='active')
+    refresh_with_synthetic_vector()
+    ordinary_result = engine.run('手机维修', method='semantic', min_cosine=.5)
+    assert bool(ordinary_result['selected_refs']) == (manual is True)
+    calls.clear()
+    Scenes(settings.database).edit('restore', ordinary['updated_at'], status='active', restore_surface=True)
+    refresh_with_synthetic_vector()
+    restored = engine.run('手机维修', method='semantic', min_cosine=.5)
+    assert [row['ref'] for row in calls] == ['scene:restore']
+    assert restored['selected_refs'] == ['scene:restore']
+
+
 def link_scenes(settings, edges, *, association=True):
     if association:save_settings(settings.database,{'features':{'association':True}})
     with Store(settings.database) as store:
@@ -295,7 +369,7 @@ def test_relation_candidate_stays_within_the_resolved_arc(legacy,monkeypatch):
     link_scenes(settings,[('out','s0','outside',1),('in','s0','inside',1)])
     monkeypatch.setattr('serein.recall.typed_surface.scope_members',lambda reader:{
         'arc:synthetic':{('scene',f's{i}') for i in range(6)}|{('scene','inside')}})
-    monkeypatch.setattr('serein.recall.typed_surface.CandidateGateway._passage_candidate_shadow_debug',
+    monkeypatch.setattr('serein.recall.typed_surface.CandidateGateway.collect_signals',
         lambda *args:{'status':'retrieved','entity_scope':{'scope_anchor':{'arc_key':'arc:synthetic'},
             'operator':'none'},'lanes':{}})
     result=engine.run('手机维修',method='semantic',min_cosine=.5)

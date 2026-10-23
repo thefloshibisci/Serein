@@ -9,9 +9,14 @@ export function PipelineSettings({onOpenSummary}) {
   const mounted=useRef(true),polling=useRef(false),rebuildDialog=useRef(null),restoreDialog=useRef(null);
   const [rebuildTarget,setRebuildTarget]=useState('');
   const running=['queued','running'].includes(work?.status);
-  const needsRepair=work?.status==='needs_repair'||work?.result?.status==='needs_repair';
+  const holds=work?.blocked_scopes||[];
+  const repairHold=holds.find(item=>item.hold_status==='needs_repair');
+  const needsRepair=work?.status==='needs_repair'||work?.result?.status==='needs_repair'||Boolean(repairHold);
+  const repairInfo=repairHold||(work?.result?.status==='needs_repair'?work.result:work);
+  const runtimeContractRepair=needsRepair&&repairInfo?.repair_kind==='runtime_contract';
   const failure=work?.error||(needsRepair?work?.result?.reason:'');
   const candidateOverflows=work?.result?.candidate_overflow_deferrals||[];
+  const curatorOmissions=work?.result?.curator_omission_deferrals||[];
   const roleNames={track_router:'归线',event_curator:'切分',event_writer:'Event 写作'};
   const autoMessage=limits?.auto_enabled===false?'自动整理已暂停；手动点击“继续整理”仍可启动任务。'
     :work?.auto_boundary_originals>0?`自动整理已开启，但 ${work.auto_boundary_originals} 条旧原话在启用边界外，需要手动恢复。`
@@ -23,7 +28,7 @@ export function PipelineSettings({onOpenSummary}) {
     :work?.execution_mode==='agent'?'自动整理已开启，当前为 Agent 模式；点击“继续整理”可创建任务，等待 Agent 领取。'
     :work?.stage==='settled_today'?'今天的自动检查已完成；新原话会在下一轮检查。'
     :'自动整理已开启；后台在每天 03:00 后检查新原话。要立即运行可点击“继续整理”。';
-  const stages={paused:'本批已暂停',idle:'尚未开始',queued:'等待后台处理',starting:'正在准备',track_router:'归线',event_curator:'切分整理',event_writer:'Event 写作',awaiting_agent:'等待 Agent',processed:'已保存',current:'整理完成',needs_repair:'归线材料待修复',rebuilt:'计划已重建'};
+  const stages={paused:'本批已暂停',idle:'尚未开始',queued:'等待后台处理',starting:'正在准备',track_router:'归线',event_curator:'切分整理',event_writer:'Event 写作',awaiting_agent:'等待 Agent',processed:'已保存',current:'整理完成',needs_repair:'归线材料待修复',rebuilt:'计划已重建',blocked:'部分聊天等待处理',retry_wait:'等待有限重试'};
   async function call(action,body) {
     const response=await fetch('/__serein/pipeline/'+action,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const result=await response.json();
@@ -46,14 +51,14 @@ export function PipelineSettings({onOpenSummary}) {
   },[]);
   async function next() {
     if(busy||running)return;
-    setBusy(true);setStatus(needsRepair?'正在请求重新校验归线材料…':'正在提交后台整理任务…');
+    setBusy(true);setStatus(runtimeContractRepair?'正在请求继续整理其他聊天；旧计划仍等待明确重建…':needsRepair?'正在请求重新校验归线材料…':'正在提交后台整理任务…');
     try {
       const result=await call('next',{include_recent:true});accept(result);setOutput('');
-      setStatus('后台任务已提交，可离开页面；已完成步骤会保留。');
+      setStatus(runtimeContractRepair?'已提交继续请求；版本变化的旧计划仍需明确重建，其他可处理聊天继续。':'后台任务已提交，可离开页面；已完成步骤会保留。');
     }catch(error){setStatus(error.message);}finally{setBusy(false);}
   }
-  function beginRebuild() {
-    setRebuildTarget(work?.result?.batch_id||work?.batch_id||'');
+  function beginRebuild(batchId) {
+    setRebuildTarget(typeof batchId==='string'?batchId:repairHold?.batch_id||work?.result?.batch_id||work?.batch_id||'');
     rebuildDialog.current.showModal();
   }
   async function retryBatch(batchId) {
@@ -128,25 +133,33 @@ export function PipelineSettings({onOpenSummary}) {
       {work.result?.note&&<p>{work.result.note}</p>}
       {work.result?.pending>0&&<p>本批仍有 {work.result.pending} 条原话等待后续处理。</p>}
       {work.result?.deferred>0&&<p>暂缓 {work.result.deferred} 条原话；其中 {work.result.protected_deferrals?.length||0} 条事件提案涉及已有内容保护。可对照原话与已有事件人工处理。</p>}
+      {curatorOmissions.map((item,index)=><p key={index} className="import-error">Curator {item.reason==='curator_omission_dependency'?'所在范围与漏项共享原话，已一起留待下轮':'未说明原话去向，已将所在审阅范围留待下轮'}：{item.missing_source_message_ids.join('、')}。本轮没有将这些原话标为跳过。</p>)}
       {candidateOverflows.map(item=><p key={item.track_id} className="import-error">Track <code>{item.track_id}</code> 有 {item.eligible_active_leaf_count} 条 active Event leaves，超过上限 {item.limit}；本批未调用 Curator 或 Writer。请先归档误归线或不再需要的 Event，或人工安全合并相关 leaves。</p>)}
       {work.result?.skipped>0&&<p>本批跳过 {work.result.skipped} 条原话，原始记录仍保留。</p>}
       {work.result?.missing_images?.length>0&&<p>已跳过 {work.result.missing_images.length} 个缺失的图片附件；原话文字保留，未猜补图片内容。</p>}
       {(work.failed_images||[]).map(image=><p className="import-error" key={image.sha256}>
         图片 {image.sha256.slice(0,8)} 转录失败三次，已暂停自动重试；依赖它的原话仍保留。
         <button type="button" disabled={busy||running} onClick={()=>retryImage(image.sha256)}>重试这张图片</button></p>)}
+      {holds.filter(item=>item.hold_status!=='paused_failure').map(item=><p className="import-error" key={item.batch_id}>
+        聊天 <code>{item.scope}</code>：{item.hold_status==='needs_repair'?(item.repair_kind==='runtime_contract'?'旧计划版本已变化':'归线证据待修复'):item.hold_status==='retry_wait'?'等待有限重试':'归线尚未完成'}。{item.repair_kind==='runtime_contract'?'重新校验不会迁移旧计划；请先查看重建确认。':item.reason}
+        {item.next_retry_at&&<> 下次重试：{new Date(item.next_retry_at).toLocaleString()}。</>}
+        {' '}原文保留，此聊天按序等待，其他聊天可继续；当日尚未全部结算。
+        {item.hold_status==='needs_repair'&&<button type="button" disabled={busy||running} onClick={()=>beginRebuild(item.batch_id)}>查看重建确认</button>}
+      </p>)}
       {(work.paused_batches||[]).map(batch=><p className="import-error" key={batch.batch_id}>本批已暂停：{batch.reason}。同一聊天的后续整理等待它恢复，其他聊天可继续。<button type="button" disabled={busy||running} onClick={()=>retryBatch(batch.batch_id)}>重试此批次</button></p>)}
       {failure&&<p className="import-error">{needsRepair?'待修复原因':'失败原因'}：{failure}</p>}
-      {needsRepair&&<p>批次：<code>{work.result?.batch_id||work.batch_id}</code>。原话与已完成步骤保留。先重新校验以恢复历史归线；无法恢复时，可明确作废本批计划并重新归线。不会跳过原话或删除已保存的 Event。</p>}
+      {needsRepair&&<p>批次：<code>{repairHold?.batch_id||work.result?.batch_id||work.batch_id}</code>。原话与已完成步骤保留。{runtimeContractRepair?'当前程序与冻结旧计划的版本不一致，重新校验不会迁移旧计划。请查看重建确认，明确同意后才重新归线；也可继续整理其他聊天。':'先重新校验以恢复历史归线；无法恢复时，可明确作废本批计划并重新归线。'}不会跳过原话或删除已保存的 Event。</p>}
       {task&&<p>等待 {stages[task.role]||task.role}：下载任务交给 Agent，再提交返回的 JSON。</p>}</div>}
     {work?.attempts?.length>0&&<details><summary>模型返回与纠错记录</summary>{work.attempts.map(item=><p key={item.id}>
       第 {item.attempt} 次：{item.error||'校验通过'} · {item.output_chars} 字符 <button type="button" onClick={()=>downloadAttempt(item.id)}>下载返回</button></p>)}</details>}
-    <div className="settings-actions"><button type="button" disabled={busy||running} onClick={next}>{running?'后台整理中…':needsRepair?'重新校验并继续':'继续整理'}</button>
-      {needsRepair&&<button type="button" disabled={busy||running} onClick={beginRebuild}>作废本批计划并重新归线</button>}
+    <div className="settings-actions"><button type="button" disabled={busy||running} onClick={next}>{running?'后台整理中…':runtimeContractRepair?'继续整理其他聊天':needsRepair?'重新校验并继续':'继续整理'}</button>
+      {needsRepair&&<button type="button" disabled={busy||running} onClick={beginRebuild}>{runtimeContractRepair?'查看重建确认':'作废本批计划并重新归线'}</button>}
       {task&&<button type="button" onClick={download}>下载 agent 任务</button>}</div>
     {task&&<><label className="settings-field"><span>Agent 返回的 JSON</span><textarea rows={8} value={output} onChange={event=>setOutput(event.target.value)}/></label>
       <div className="settings-actions"><button type="button" disabled={busy||!output.trim()} onClick={submit}>提交并校验</button></div></>}
     <dialog ref={rebuildDialog} className="agent-guide" aria-labelledby="pipeline-rebuild-title" onCancel={()=>setRebuildTarget('')}>
       <h3 id="pipeline-rebuild-title">重新生成这批原话的整理计划？</h3>
+      <p>若缺少可验证的历史 Track，此次确认会从本批原话重新开始归线；该聊天后续批次也不再引用截断点之前的归线历史。</p>
       <p>批次：<code>{rebuildTarget}</code></p>
       <p>旧的归线、切分和 Writer 结果会保留为历史记录，但不会再用于新计划。尚未处理的原话将重新归线，可能需要重新调用模型。</p>
       <p>原话和已经保存的 Event 不会被删除。此操作不会把原话标成已处理或跳过。</p>

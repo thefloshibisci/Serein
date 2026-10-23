@@ -121,13 +121,18 @@ def output_for(role,request):
 async def synthetic_runner(role,request):return output_for(role,request)
 
 def test_pipeline_does_not_truncate_a_long_dialogue_unit(settings):
-    raw_archive(settings).ingest([{'source_event_id':str(i),'session_id':'long','role':'assistant' if i==201 else 'user',
-        'text':f'part {i}','created_at':'2025-01-01T00:00:00Z'} for i in range(202)],source='test')
+    messages=[{'source_event_id':str(i),'session_id':'long','role':'assistant' if i==201 else 'user',
+        'text':f'part {i}','created_at':'2025-01-01T00:00:00Z'} for i in range(202)]
+    raw_archive(settings).ingest(messages,source='test')
+    # Exercise rejection and recovery with explicit budgets, independent of defaults.
+    save_settings(settings.database,{'pipeline':{'max_prompt_chars':1}})
     with pytest.raises(ValueError,match='提示词'):
         asyncio.run(advance(settings.database,include_recent=True))
-    save_settings(settings.database,{'pipeline':{'max_prompt_chars':80000}})
+    save_settings(settings.database,{'pipeline':{'max_prompt_chars':300000}})
     task=asyncio.run(advance(settings.database,include_recent=True))
-    assert task['status']=='awaiting_agent' and len(task['request']['messages'])==202
+    assert task['status']=='awaiting_agent'
+    assert [(m['role'],m['content']) for m in task['request']['messages']]==[
+        (m['role'],m['text']) for m in messages]
 
 def test_pipeline_agent_jobs_retry_ownership_and_rolling_extension(settings):
     ingest(settings)

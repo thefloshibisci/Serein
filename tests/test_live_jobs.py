@@ -16,6 +16,7 @@ from serein.core.store import Store
 from test_live_clients import live
 from test_live_relations import seed
 from test_live_narratives import seed as seed_narrative
+from test_public_features import settings as idle_settings
 
 
 def test_scene_job_survives_failure_and_concurrent_edit(live):
@@ -81,7 +82,7 @@ def test_scene_failure_blocks_restart_but_new_content_can_run(live,failure):
     if failure=='contract':
         assert failures[0]['attempts'][0]['status']=='invalid_json_contract'
         assert '格式' in failures[0]['error']
-    with Store(settings.database) as store:
+    with Store(settings.database) as store,store.transaction(immediate=True):
         doc=store.read(source)
         store.revise(source,expected_revision=doc['revision'],title=doc['title'],body_md='Synthetic changed content.')
     restarted.link_scene.reset_mock()
@@ -111,8 +112,8 @@ def test_scene_retry_endpoint_is_explicit_and_rejects_duplicate_requests(live):
     assert client.post('/api/scene-relation-jobs/retry',json=body).status_code==409
 
 
-def test_blocked_scene_jobs_do_not_starve_later_scenes(live):
-    settings,_=live
+def test_blocked_scene_jobs_do_not_starve_later_scenes(idle_settings):
+    settings=idle_settings
     with Store(settings.database) as store:
         for i in range(102):
             store.create(f'scene-{i:03}','scene','Synthetic','Synthetic content.')
@@ -253,8 +254,12 @@ def test_promoted_event_leaves_revision_inbox_and_future_scout_materials(live):
     before = Scout(settings)
     assert any(item['source_type'] == 'event' and item['source_id'] == event_id
                for item in asyncio.run(before._active_narrative_material_inventory()))
-    promoted = Application(settings).services.write('promote-event', 'promote_event', {
+    services=Application(settings).services
+    services.write('approve-event', 'mailbox_select', {
+        'event_id':event_id,'expected_revision':1,'expected_queue_revision':0})
+    promoted = services.write('promote-event', 'promote_event', {
         'event_id': event_id, 'expected_revision': 1,
+        'expected_queue_revision':1,
         'title': '我记得的雨声', 'body_md': '那天的雨声还在。'})
     assert Scenes(settings.database).evidence(promoted['id'])['evidence_status'] == 'bound'
     with narrative_transaction(settings.database) as rolls:

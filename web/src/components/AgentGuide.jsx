@@ -26,7 +26,7 @@ export function AgentGuide({initial='event',label='如何接入 Agent'}) {
         <ol>
           <li>保持 Serein HTTP 后端运行。在发行包源码目录、使用同一 Python 环境安装 MCP 支持：<code>python -m pip install ".[mcp]"</code>。</li>
           <li>把下面配置加入 Agent 客户端的 MCP 设置。路径指向发行包里的 <code>scripts/event_agent_mcp.py</code>，地址填后端地址，密钥填 Serein 访问密钥。</li>
-          <li>重新连接客户端的 MCP。让 Agent 调用 <code>pipeline_next</code>，完整读取返回的 <code>request.prompt</code> 与角色规则；完成后用 <code>pipeline_submit(job_id, output)</code> 提交，再领取下一步。</li>
+          <li>先在“功能”页开启“自动摘要 Agent 工具”并保存，再重新连接客户端的 MCP。让 Agent 调用 <code>pipeline_next</code>，完整读取返回的 <code>request.prompt</code> 与角色规则；完成后用 <code>pipeline_submit(job_id, output)</code> 提交，再领取下一步。</li>
           <li>手动立即整理时传 <code>include_recent: true</code>；未完成的对话仍会等待。Agent 客户端需支持 MCP 工具调用；留空不会自行启动一个 Agent。</li>
         </ol>
         <pre>{JSON.stringify(config,null,2)}</pre>
@@ -34,7 +34,7 @@ export function AgentGuide({initial='event',label='如何接入 Agent'}) {
       </>:<>
         <p>叙事卷 Writer 接收绑定材料，生成待确认的正文预览。它使用独立的 Agent runner，与 Event 流水线分别配置。</p>
         <ol>
-          <li>准备能以非交互方式运行的 Agent runner：从标准输入读取一份 JSON，读取其中的 <code>prompt</code>、<code>materials</code>、<code>image_inputs</code> 和 <code>output_schema</code>，标准输出只返回符合 schema 的 JSON；日志写入标准错误。</li>
+          <li>准备能以非交互方式运行的 Agent runner：从标准输入读取一份 JSON，读取其中的 <code>prompt</code>、<code>materials</code> 和 <code>output_schema</code>，标准输出只返回符合 schema 的 JSON；日志写入标准错误。叙事卷 Writer 只读文字，不加载原消息图片。</li>
           <li>在启动前端 Node 服务的环境中设置下方三个变量，替换模型名和 runner 的绝对路径，然后重启前端 Node 服务使环境变量生效。</li>
           <li>设置页的“启用 API Writer”保持关闭，避免优先使用模型 API。在叙事卷里绑定材料，再选择更新或重写，现有预览入口就会调用这个 runner。</li>
           <li>更新使用现有正文与新增材料；重写使用全部绑定材料。查看预览后明确保存，才会写入叙事卷。</li>

@@ -1,5 +1,6 @@
 """Persistent changed-owner queue; provider failures leave work pending."""
 
+from .index_safety import guarded_index, IndexBlocked
 import logging
 import threading
 
@@ -11,9 +12,13 @@ from .entities import rebuild_entities
 from .policy import RecallPolicy
 
 
+@guarded_index
 def update_pending(settings, *, client=None):
+    from ..configured_models import recall_settings
+    policy=RecallPolicy.from_config(recall_settings(settings))
     with Store(settings.database,read_only=True) as store:
-        rows=store.conn.execute('SELECT * FROM index_outbox ORDER BY sequence LIMIT 100').fetchall()
+        rows=store.conn.execute('SELECT * FROM index_outbox ORDER BY sequence LIMIT ?',
+                               (500 if policy.index_catch_up else 100,)).fetchall()
     if not rows:
         return {'status':'current','updated':0}
     ids={row['document_id'] for row in rows}
@@ -24,9 +29,9 @@ def update_pending(settings, *, client=None):
     refresh_index(settings.database,settings.index,ids)
     prepare_passages(settings, document_ids=ids)
     if settings.embedding or client is not None:
-        fill_vectors(settings,document_ids=ids,client=client)
+        fill_vectors(settings,document_ids=ids,client=client,with_coverage=False)
         if RecallPolicy.from_config(settings.recall).passages_enabled:
-            fill_passages(settings,document_ids=ids,client=client)
+            fill_passages(settings,document_ids=ids,client=client,with_coverage=False)
     from ..compat.entity_scope import update_scope
     entities=update_scope(settings)
     rebuild_entities(settings,legacy_rows=entities,document_ids=ids)
@@ -40,7 +45,8 @@ def update_pending(settings, *, client=None):
     with Store(settings.database) as store:
         # Writes received during model requests stay queued for the next cycle.
         store.conn.execute('DELETE FROM index_outbox WHERE sequence<=?',(rows[-1]['sequence'],))
-    return {'status':'updated','updated':len(ids)}
+        remaining=store.conn.execute('SELECT count(*) FROM index_outbox').fetchone()[0]
+    return {'status':'updated','updated':len(ids),'remaining':remaining,'catch_up':policy.index_catch_up}
 
 
 class IndexWorker:
@@ -51,8 +57,12 @@ class IndexWorker:
 
     def run(self):
         while not self.stop.is_set():
+            delay=5
             try:
-                update_pending(self.settings)
+                result=update_pending(self.settings)
+                if result.get('catch_up') and result.get('remaining',0):delay=.1
+            except IndexBlocked:
+                pass  # Durable pause/backoff/busy state is exposed in Settings.
             except Exception:
-                logging.getLogger(__name__).exception('Index update failed; retaining pending owners')
-            self.stop.wait(5)
+                logging.getLogger(__name__).warning('Index update deferred; inspect persisted index status')
+            self.stop.wait(delay)

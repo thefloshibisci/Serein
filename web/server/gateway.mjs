@@ -25,7 +25,12 @@ const bearerPaths = new Set(['/v1/models', '/v1/chat/completions',
 const hopHeaders = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'];
 
 const server = http.createServer((req, res) => {
-  const path = new URL(req.url, 'http://localhost').pathname;
+  let path;
+  try { path = new URL(req.url, 'http://localhost').pathname; }
+  catch {
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' });
+    res.end('Invalid request URL'); return;
+  }
   if (path === '/ready' && req.method === 'GET') {
     Promise.all([fetch(new URL('/health', core), {signal:AbortSignal.timeout(3000)}),
       fetch(`http://127.0.0.1:${web.httpServer.address().port}/`, {signal:AbortSignal.timeout(3000)})])

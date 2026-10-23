@@ -35,8 +35,17 @@ def _visible(message):
                         ('memory_review_only', 'memory_event_source', 'draft', 'discarded')))
 
 
+def _reply_target(message):
+    metadata = message.get('metadata') or {}
+    target = metadata.get('reply_to_user_message_id')
+    if (message.get('role') == 'assistant' and type(target) is int
+            and not (metadata.get('proactive') or metadata.get('autonomy'))):
+        return target
+    return None
+
+
 def exchanges(messages):
-    """Group adjacent role runs; separate a completed exchange at the next user."""
+    """Group complete exchanges without absorbing replies to another user."""
     result, current = [], []
     for message in sorted(messages, key=lambda row: int(row['id'])):
         if not _visible(message):
@@ -44,7 +53,21 @@ def exchanges(messages):
         if current and message.get('session_id') != current[0].get('session_id'):
             result.append(current)
             current = []
-        if {row['role'] for row in current} == {'user', 'assistant'} and message['role'] == 'user':
+        roles = {row['role'] for row in current}
+        users = {int(row['id']) for row in current if row['role'] == 'user'}
+        targets = {_reply_target(row) for row in current} - {None}
+        target = _reply_target(message)
+        metadata = message.get('metadata') or {}
+        proactive = message['role'] == 'assistant' and bool(
+            metadata.get('proactive') or metadata.get('autonomy'))
+        # A reply whose user is absent stays separate, including from a later
+        # user message: it must not become a fabricated proactive exchange.
+        if current and (
+            (target is not None and target not in users and target not in targets)
+            or (message['role'] == 'user' and (roles == {'user', 'assistant'}
+                                             or (roles == {'assistant'} and targets)))
+            or (proactive and 'user' in roles)
+        ):
             result.append(current)
             current = []
         current.append(message)

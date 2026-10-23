@@ -1,6 +1,6 @@
 from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Query, Response
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer, ValidationError
 from ..deployment import read_settings, save_settings, TASKS, DEFAULT_FEATURES, DEFAULT_RESUME
 from typing import Literal
 from datetime import date
@@ -69,21 +69,38 @@ class ModelConnection(BaseModel):
         return self
 
 
+class TokenizerWindow(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    path: str = Field(min_length=1, max_length=2000)
+    max_tokens: int = Field(ge=8, le=1000000)
+
+
 class ModelEntry(ModelConnection):
+    reasoning_content_compat: Literal['auto', 'on', 'off'] = 'auto'
     id: str = Field(min_length=1, max_length=100)
     label: str = Field(min_length=1, max_length=100)
     model: str = Field(min_length=1, max_length=200)
     dimension: int | None = Field(default=None, ge=1, le=65536)
+    tokenizer: TokenizerWindow | None = None
     query_instruction: str = Field(default='', max_length=1000)
     document_instruction: str = Field(default='', max_length=1000)
+
+    @model_serializer(mode='wrap')
+    def preserve_explicit_tokenizer_clear(self, handler):
+        value = handler(self)
+        if 'tokenizer' in self.model_fields_set and self.tokenizer is None:
+            value['tokenizer'] = None
+        return value
 
 
 class ModelRoute(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    reasoning_content_compat: Literal['auto', 'on', 'off'] = 'auto'
     id: str = Field(min_length=1, max_length=200)
     upstream_model: str = Field(min_length=1, max_length=200)
     label: str = Field(default='', max_length=100)
     dimension: int | None = Field(default=None, ge=1, le=65536)
+    tokenizer: TokenizerWindow | None = None
     query_instruction: str = Field(default='', max_length=1000)
     document_instruction: str = Field(default='', max_length=1000)
 
@@ -131,18 +148,23 @@ class DomainEntry(BaseModel):
 
 class TaggingPatch(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    domains: list[DomainEntry] = Field(max_length=50)
+    domains: list[DomainEntry] | None = Field(default=None, max_length=50)
+    policies: dict[Literal['event', 'scene'], dict[str, Literal['normal', 'explicit_only', 'excluded']]] | None = None
 
     @field_validator('domains')
     @classmethod
     def unique_domains(cls, value):
-        if len({item.key for item in value}) != len(value):
+        if value is not None and len({item.key for item in value}) != len(value):
             raise ValueError('Domain keys must be unique')
         return value
 
 
 class ResumePatch(BaseModel):
     model_config = ConfigDict(extra='forbid')
+    mode: Literal['command','mcp'] | None = None  # Legacy exclusive selector.
+    command_enabled: bool | None = Field(default=None, strict=True)
+    mcp_enabled: bool | None = Field(default=None, strict=True)
+
     latest_shadow: bool | None = None
     recent_events: bool | None = None
     favorite_scenes: bool | None = None
@@ -151,6 +173,13 @@ class ResumePatch(BaseModel):
     recent_original_limit: int | None = Field(default=None, ge=1, le=50, strict=True)
     pending_originals: bool | None = None
     selected_ids: list[str] | None = Field(default=None, max_length=200)
+
+    @field_validator('command_enabled', 'mcp_enabled', mode='before')
+    @classmethod
+    def entry_switch(cls, value):
+        if type(value) is not bool:
+            raise ValueError('Resume entry switches must be booleans')
+        return value
 
     @field_validator('selected_ids')
     @classmethod
@@ -188,6 +217,10 @@ class PipelinePatch(BaseModel):
     timeout_seconds: int | None = Field(default=None,ge=30,le=1800)
     event_writer_concurrency: int | None = Field(default=None,ge=1,le=8,strict=True)
     track_lookback_days: int | None = Field(default=None,ge=1,le=365,strict=True)
+    track_candidates_enabled: bool | None = Field(default=None,strict=True)
+    track_direct_hours: Literal[12,24,48,72] | None = None
+    track_candidate_limit: int | None = Field(default=None,ge=1,le=50,strict=True)
+    router_compact_cards: bool | None = Field(default=None,strict=True)
     joint_review_enabled: bool | None = None
     material_review_enabled: bool | None = None
     round_gate_enabled: bool | None = None
@@ -199,11 +232,16 @@ class RecallPatch(BaseModel):
     direct_threshold: float | None = Field(default=None, ge=0, le=1, strict=True)
     body_candidate_threshold: float | None = Field(default=None, ge=0, le=1, strict=True)
     cue_candidate_threshold: float | None = Field(default=None, ge=0, le=1, strict=True)
+    direct_pool_limit: int | None = Field(default=None, ge=6, le=100, strict=True)
     passages_enabled: bool | None = Field(default=None, strict=True)
     passage_min_chars: int | None = Field(default=None, ge=1, le=100000, strict=True)
+    embedding_batch_size: int | None = Field(default=None, ge=1, le=64, strict=True)
+    embedding_concurrency: int | None = Field(default=None, ge=1, le=4, strict=True)
+    index_catch_up: bool | None = Field(default=None, strict=True)
 
     @field_validator('direct_threshold', 'body_candidate_threshold', 'cue_candidate_threshold',
-                     'passages_enabled', 'passage_min_chars', mode='before')
+                     'direct_pool_limit', 'passages_enabled', 'passage_min_chars',
+                     'embedding_batch_size', 'embedding_concurrency', 'index_catch_up', mode='before')
     @classmethod
     def reject_null(cls, value):
         if value is None: raise ValueError('Recall settings cannot be null')
@@ -213,6 +251,7 @@ class RecallPatch(BaseModel):
 class SettingsPatch(BaseModel):
     model_config = ConfigDict(extra='forbid')
     expected_version: int | None = Field(default=None,ge=0)
+    expected_tagging_version: int | None = Field(default=None,ge=1,strict=True)
     identity: IdentityPatch | None = None
     upstream: UpstreamPatch | None = None
     models: list[ModelEntry] | None = Field(default=None, max_length=50)
@@ -357,6 +396,7 @@ def _link_candidates(conn, kind, query='', date_filter='', offset=0, limit=30, i
 def routes(settings, auth):
     router = APIRouter(dependencies=auth)
     from ..configured_models import memory_ready, memory_status, prepare_selected
+    from ..recall.index_safety import index_status, resume_index, IndexBlocked
 
     @router.get('/v1/settings/resume-candidates')
     def resume_candidates(response: Response, kind: Literal['event','scene','diary','darkroom','upload',''] = 'event', q: str = Query('',max_length=200),
@@ -394,8 +434,10 @@ def routes(settings, auth):
         policy=RecallPolicy.from_config(recall_settings(settings))
         return {**read_settings(settings.database, public=True), 'recall':{key:getattr(policy,key) for key in
                 ('direct_threshold','body_candidate_threshold','cue_candidate_threshold',
-                 'passages_enabled','passage_min_chars')},
-                'memory_ready': status['ready'], 'memory_status':status}
+                 'direct_pool_limit','passages_enabled','passage_min_chars',
+                 'embedding_batch_size','embedding_concurrency','index_catch_up')},
+                'memory_ready': status['ready'], 'memory_status':status,
+                'index_status':index_status(settings.database)}
 
     @router.patch('/v1/settings')
     def save(body: SettingsPatch, response: Response):
@@ -418,6 +460,22 @@ def routes(settings, auth):
         except ValueError as error:
             raise HTTPException(400, str(error)) from None
 
+    @router.get('/v1/settings/index-status')
+    def read_index_status(response: Response):
+        response.headers['Cache-Control'] = 'no-store'
+        return index_status(settings.database)
+
+    @router.post('/v1/settings/resume-index')
+    def recover_index(body: dict):
+        if not settings.writable:
+            raise HTTPException(403, 'This deployment is read-only')
+        if body.get('confirm') != 'RESUME_INDEX_EMBEDDING':
+            raise HTTPException(400, 'Explicit index recovery confirmation required')
+        try:
+            return resume_index(settings.database, body.get('recovery_token'))
+        except IndexBlocked as error:
+            raise HTTPException(409, str(error)) from None
+
     @router.post('/v1/settings/prepare-memory')
     def prepare_memory():
         return prepare_selected(settings)
@@ -429,7 +487,7 @@ def routes(settings, auth):
             state=read_settings(settings.database)
             domains=state['tagging']['domains']
             return {'ok':True,'active':True,'dataset_version':state['tagging_version'],
-                    'policies':domains,'deployment_state':'instance'}
+                    'policies':domains,'rules':state['tagging'].get('policies',{}),'deployment_state':'instance'}
 
         @router.post('/api/semantic-recall/domain-policies/publish')
         def save_domains(body:dict):
@@ -450,7 +508,12 @@ def routes(settings, auth):
                     patch=TaggingPatch(domains=[{**item,'policy':by_key[item['key']]} for item in current['policies']])
             except (ValidationError, KeyError, TypeError):
                 raise HTTPException(400,'Invalid domain catalog')
-            save_settings(settings.database,{'tagging':patch.model_dump()})
+            from ..core.store import Conflict
+            try:
+                save_settings(settings.database,{'tagging':patch.model_dump(exclude_none=True),
+                    'expected_tagging_version':body['expected_dataset_version']})
+            except Conflict:
+                raise HTTPException(409,'domain_policy_publish_version_conflict') from None
             return read_domains()
 
     class TemplateInput(BaseModel):

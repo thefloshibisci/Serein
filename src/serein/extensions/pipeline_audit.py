@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 from typing import Any
+from .pipeline_materials import retains_boundary_quote
 
 
 CLAIM_TYPES = {'trigger', 'fact', 'subjective_claim', 'subjective_comparison',
@@ -331,12 +332,28 @@ def curator_receipt_errors(review: Any, plan: dict, component: dict) -> list[str
             valid = _source_span(span, messages, 'boundary', errors)
             if valid:
                 sides = [side for side, ids in enumerate(owners) if valid[0] in ids]
+                if len(sides) == 2 and component.get('writer_material_review'):
+                    material_sides = []
+                    content = str(messages[valid[0]].get('content') or '')
+                    for side, index in enumerate(pair):
+                        event_reviews = [item for item in review['events']
+                                         if isinstance(item, dict) and item.get('event_index') == index]
+                        if len(event_reviews) != 1:
+                            continue
+                        materials = event_reviews[0].get('materials')
+                        if not isinstance(materials, list):
+                            continue
+                        annotations = [item for item in materials if isinstance(item, dict)
+                                       and item.get('source_message_id') == valid[0]]
+                        if len(annotations) == 1 and retains_boundary_quote(annotations[0], content, valid[1]):
+                            material_sides.append(side)
+                    sides = material_sides
                 if len(sides) == 1:
                     witnessed.add(sides[0])
                 else:
-                    errors.append('boundary 引文须来自一侧独占的 owned 原文')
+                    errors.append('boundary 引文须来自一侧独占的 owned 原文，或共享 bridge 中仅一侧 main/mixed 保留的逐字片段；不要改动完整 bridge 归属')
         if witnessed != {0, 1}:
-            errors.append('decision_review.boundaries 缺少双方独占原文')
+            errors.append('decision_review.boundaries 缺少双方独占原文或各自实质保留的 bridge 引文')
     if seen_pairs != pairs:
         errors.append('decision_review.boundaries 未覆盖全部相邻边界')
     memberships = {item['unit_root_message_id']: set(item['source_message_ids']) for item in component.get('memberships') or []}

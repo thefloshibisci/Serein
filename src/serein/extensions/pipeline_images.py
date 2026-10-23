@@ -140,9 +140,10 @@ def freeze_task_images(database,batch_id,images,previous=(),*,missing=None):
         else:
             try:
                 body,mime=image_bytes(image['url'])
-            except MissingOriginalImage:
+            except (ValueError, OSError, http.client.HTTPException) as error:
                 if missing is None:raise
-                missing.append({'source_message_id':key[0],'position':key[1],'reason':'original_missing'})
+                missing.append({'source_message_id':key[0],'position':key[1],
+                                'reason':'original_missing' if isinstance(error,MissingOriginalImage) else 'original_unavailable'})
                 continue
             sha=hashlib.sha256(body).hexdigest()
             new.append((batch_id,key[0],key[1],sha,mime,body))
@@ -221,7 +222,7 @@ def decision(output):
 
 def verify_transcriptions(transcriptions, images):
     """Require exact coverage, unchanged bytes and unchanged evidence roles."""
-    if any(item.get('url') for item in images):verify_images(images)
+    verify_images([item for item in images if item.get('url')])
     actual = {(item['source_message_id'], item['position']): item for item in images}
     seen = set()
     for row in transcriptions:
@@ -249,7 +250,8 @@ def _strip_task_media(value,key=''):
 def compact_batch_snapshot(data):
     """Keep the exact Router proof while dropping completed downstream material."""
     keys=('contract','runtime_revision','scope','source','day','routing_messages','routing_result',
-          'last_routing_repair','rebuild_of')
+          'tracks','recent','next_track_ordinal','input_policy',
+          'last_routing_repair','rebuild_of','recovery_downgrade')
     compact={key:data[key] for key in keys if key in data}
     compact['task_snapshot_compacted']=True
     return _strip_task_media(compact)
