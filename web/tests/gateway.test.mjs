@@ -28,6 +28,15 @@ test('gateway separates web auth from API auth, saves settings and streams respo
       res.writeHead(req.url==='/register'?201:200,{'Content-Type':'application/json'});res.end('{"oauth":true}');return;
     }
     if(req.headers.authorization!=='Bearer synthetic-api-key'){res.writeHead(401);res.end('{}');return;}
+    if(req.url==='/api/ingest-raw'){
+      let raw='';req.on('data',chunk=>raw+=chunk);req.on('end',()=>{
+        const body=JSON.parse(raw||'{}');requests.push({path:req.url,raw,body,contentType:req.headers['content-type']});
+        res.writeHead(200,{'Content-Type':'application/json'});
+        res.end(JSON.stringify({ok:true,items:(body.events||[]).map(event=>({
+          source:body.source,source_event_id:event.source_event_id,status:'inserted',id:1,
+        }))}));
+      });return;
+    }
     if(req.url==='/v1/extensions/resume'){
       let raw='';req.on('data',chunk=>raw+=chunk);req.on('end',()=>{
         requests.push({path:req.url,body:JSON.parse(raw)});
@@ -287,13 +296,20 @@ test('gateway separates web auth from API auth, saves settings and streams respo
     for(const action of ['continue','pause'])assert.equal((await fetch(base+'/__serein/imports/'+upload+'/'+action,{method:'POST',headers:postHeaders,body:'{}'})).status,200);
     assert.equal((await fetch(base+'/v1/models',{headers:auth})).status,401);
     assert.equal((await fetch(base+'/v1/models',{headers:{Authorization:'Bearer wrong'}})).status,401);
-    for(const [path,method] of [['/api/hook/recall','POST'],['/v1/host/deliveries','GET'],['/v1/host/deliveries','POST']]) {
-      const body=method==='POST'?'{}':undefined;
+    for(const [path,method] of [['/api/hook/recall','POST'],['/api/ingest-raw','POST'],['/v1/host/deliveries','GET'],['/v1/host/deliveries','POST']]) {
+      const body=path==='/api/ingest-raw' ? JSON.stringify({source:'orangechat',conversation_id:'synthetic-chat',
+        events:[{source_event_id:'orangechat:synthetic:1',role:'user',text:'合成原话 "quote"\n第二行 🦊'}]})
+        : method==='POST'?'{}':undefined;
       assert.equal((await fetch(base+path,{method,headers:{...auth,'Content-Type':'application/json'},body})).status,401);
       assert.equal((await fetch(base+path,{method,headers:{Authorization:'Bearer wrong','Content-Type':'application/json'},body})).status,401);
       const response=await fetch(base+path,{method,headers:{Authorization:'Bearer synthetic-api-key','Content-Type':'application/json'},body});
       assert.equal(response.status,200);
       assert.ok(requests.some(r=>r.path===path&&r.method===method&&r.auth==='Bearer synthetic-api-key'));
+      if(path==='/api/ingest-raw'){
+        assert.ok(requests.some(r=>r.path===path&&r.raw===body&&r.contentType==='application/json'));
+        assert.deepEqual(await response.json(),{ok:true,items:[{source:'orangechat',
+          source_event_id:'orangechat:synthetic:1',status:'inserted',id:1}]});
+      }
     }
     for (const path of ['/serein/mcp', '/serein/mcp/', '/mcp', '/mcp/']) {
       assert.equal((await fetch(base+path,{headers:auth})).status,401);
