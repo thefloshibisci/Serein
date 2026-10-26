@@ -1,5 +1,6 @@
 """Model registry transport shared by chat and optional authoring tasks."""
 import asyncio
+import hashlib
 from copy import deepcopy
 from time import monotonic
 import json
@@ -92,6 +93,24 @@ def deepseek_tool_reasoning_compat(model, payload, *, window_id=''):
     return result, count
 
 
+SEREIN_USER_AGENT = 'serein/0.1'
+
+
+def identity_headers(model, *, window_id=''):
+    """Identify Serein honestly; OpenCode Go also asks for a stable session id."""
+    headers = {'User-Agent': SEREIN_USER_AGENT}
+    host = (urlsplit(str(model.get('base_url') or '')).hostname or '').lower()
+    if host == 'opencode.ai' or host.endswith('.opencode.ai'):
+        if window_id:
+            session = str(window_id)
+        else:
+            # Background tasks have no chat window; keep one stable id per upstream model.
+            seed = (str(model.get('base_url') or '') + '|' + str(model.get('model') or '')).encode()
+            session = 'serein-task-' + hashlib.sha256(seed).hexdigest()[:16]
+        headers['x-opencode-session'] = session[:128]
+    return headers
+
+
 def request_for(model, payload, *, window_id=''):
     adapter = ClientContext()
     payload = {**payload, 'model': model['model']}
@@ -114,7 +133,7 @@ def request_for(model, payload, *, window_id=''):
                 converted['system'] = system + rules
             else:
                 converted['system'] = [*system, {'type':'text','text':rules}]
-        headers = {'x-api-key': model.get('api_key', ''), 'anthropic-version': model.get('anthropic_version') or '2023-06-01'}
+        headers = {**identity_headers(model, window_id=window_id), 'x-api-key': model.get('api_key', ''), 'anthropic-version': model.get('anthropic_version') or '2023-06-01'}
         if model.get('anthropic_beta'):
             headers['anthropic-beta'] = model['anthropic_beta']
         return model['base_url'] + '/messages', headers, converted
@@ -124,7 +143,9 @@ def request_for(model, payload, *, window_id=''):
             payload.setdefault('prompt_cache_retention', model['prompt_cache_retention'])
     if model.get('prompt_cache') == 'anthropic':
         payload.setdefault('cache_control', adapter._anthropic_cache_control(model))
-    headers = {'Authorization': 'Bearer ' + model['api_key']} if model.get('api_key') else {}
+    headers = identity_headers(model, window_id=window_id)
+    if model.get('api_key'):
+        headers['Authorization'] = 'Bearer ' + model['api_key']
     return model['base_url'] + '/chat/completions', headers, payload
 
 
