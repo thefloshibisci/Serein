@@ -6,9 +6,30 @@ const noMatchTriggers = new Set([
 ]);
 
 export function resolveBridgeObservationOutcome({ injected = [], hookOutcome = "", trigger = "", routeAction = "" } = {}) {
+  if (['failed', 'interrupted'].includes(hookOutcome)) return 'failed';
+  if (hookOutcome === 'pending') return 'pending';
   if (injected.length || hookOutcome === "injected") return "injected";
   if (hookOutcome === 'no_match' || noMatchTriggers.has(trigger)) return "no_match";
   return routeAction === "skip" ? "skip" : "skip";
+}
+
+export function hostObservationDetails(row) {
+  if (!row?.observation_version) return {};
+  const states = {ready:'找到候选记忆', empty:'未命中可用记忆', timeout:'召回超时',
+    http_401:'召回鉴权失败', http_403:'召回访问被拒绝', network_error:'召回网络连接失败',
+    invalid_response:'召回响应格式不匹配', unavailable:'召回未完成'};
+  const status = row.recall_status;
+  const result = states[status] || (/^http_\d{3}$/.test(status || '') ? `召回接口返回 ${status.slice(5)}` : '召回未成功');
+  const completion = row.request_status === 'completed'
+    ? row.gateway_memory_injected_ids?.length ? '有效回复已完成，APP 确认交付；不代表模型使用了记忆' : '有效回复已完成，无确认交付的记忆'
+    : row.request_status === 'interrupted' ? '回复已中断，未确认交付' : '回复失败，未确认交付';
+  return {
+    requestLabel: `OrangeChat · ${result} · ${row.elapsed_ms ?? 0}ms；${completion}`,
+    prepared: (Array.isArray(row.prepared_items) ? row.prepared_items : []).map(item => ({
+      id:item.id, title:item.title || item.id, sourceKind:item.source_kind,
+      score:typeof item.score === 'number' && Number.isFinite(item.score) ? `${(item.score * 100).toFixed(1)}%` : '',
+    })),
+  };
 }
 
 export function resolveGatewayObservationOutcome(payload, legacyOutcome) {
