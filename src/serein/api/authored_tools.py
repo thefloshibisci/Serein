@@ -3,13 +3,16 @@ from contextlib import contextmanager
 from datetime import date as Date
 import json
 import logging
+from typing import Annotated, Literal
 from uuid import uuid4
 
-from pydantic import StrictBool
+from pydantic import Field, StrictBool
 
 from ..compat.diaries import Diaries, project_diaries
 from ..compat.scenes import Scenes, sources
+from ..compat.events import Events
 from ..core.personal import Personal
+from ..core.preferences import Preferences, preference_text
 from ..core.store import Store, now
 from ..deployment import read_settings
 from .read_text import diary_text
@@ -19,6 +22,7 @@ from .diary_read import diary_directory, validate_read
 def tools_for(services, settings):
     scenes = Scenes(settings.database)
     personal = Personal(settings.database)
+    preferences = Preferences(settings.database)
 
     def notebook(method, *args, write=False, **kwargs):
         # Read, validate, modify and project inside one transaction. The caller
@@ -54,7 +58,14 @@ def tools_for(services, settings):
             return diary_directory(settings.database, query=query, date=date, limit=limit, offset=offset, include_archived=True)
         return diary_text(notebook('read', diary_id=diary_id, date=date, limit=1))
 
-    tools = {'read_diary': read_diary}
+    def read_preferences(query: str = '', subject: str = '', limit: int = 50,
+                         offset: int = 0) -> str:
+        """Read preference notes by literal text and optional subject role: user, ai or shared."""
+        result = preferences.read(query=query, subject=subject, limit=limit, offset=offset)
+        text = preference_text(result['items']) or 'No preferences.'
+        return f"[preferences]\n{text}\nhas_more: {str(result['has_more']).lower()}\nnext_offset: {result['next_offset']}\n[/preferences]"
+
+    tools = {'read_diary': read_diary, 'read_preferences': read_preferences}
     if not settings.writable:
         return tools
 
@@ -101,6 +112,11 @@ def tools_for(services, settings):
         """Set a Scene active, archived or deleted using its current updated_at. Lifecycle changes preserve the manual surfacing switch. Explicit restore_surface=true with active also enables surfacing in the same transaction. Deleted is a retained soft deletion. Events cannot be changed through this tool."""
         return sync_scene(scenes.edit(scene_id, expected_updated_at, status=status, restore_surface=restore_surface))
 
+    def edit_event(event_id: str, expected_updated_at: str, title: str | None = None,
+                   content: str | None = None):
+        """Correct an active Event after read_memory: pass its ID and updated_at, with changed title/content. Omitted fields and original evidence are preserved. Returns a new event_id and retains the old version. Stale edits conflict."""
+        return Events(settings.database).edit(event_id, expected_updated_at, title=title, content=content)
+
     def write_diary(content: str, date: str = '', title: str = '', unlock_at: str = ''):
         """Write an AI-authored diary. Date defaults to today (UTC+8). A future unlock_at creates a sealed entry. IDs are generated internally; no kind or revision is needed. Use revise_diary for edits. Check existing entries before retrying a lost response."""
         return notebook('create', write=True, content=content, date=date, title=title, author='ai', unlock_at=unlock_at)
@@ -122,6 +138,33 @@ def tools_for(services, settings):
         return personal.annotate(memory_id, content, author or read_settings(settings.database)['identity']['ai_name'],
                                  role, annotation_id)
 
-    tools.update({fn.__name__: fn for fn in (write_scene, edit_scene, set_scene_status, write_diary,
-                                           revise_diary, comment_diary, delete_diary, annotate)})
+    def write_preference(subject: Literal['user', 'ai', 'shared'],
+                         polarity: Literal['like', 'dislike'],
+                         content: Annotated[str, Field(min_length=1, max_length=50)],
+                         reason: Annotated[str, Field(min_length=1, max_length=1000)],
+                         keywords: Annotated[list[Annotated[str, Field(min_length=1, max_length=80)]],
+                                             Field(min_length=1, max_length=32)]) -> str:
+        """Save one short preference with a subject role, like/dislike polarity, reason and literal match keywords."""
+        return preference_text([preferences.save(subject, content, reason, keywords, polarity=polarity)])
+
+    def edit_preference(preference_id: str, expected_revision: Annotated[int, Field(ge=1)],
+                        subject: Literal['user', 'ai', 'shared'],
+                        polarity: Literal['like', 'dislike'],
+                        content: Annotated[str, Field(min_length=1, max_length=50)],
+                        reason: Annotated[str, Field(min_length=1, max_length=1000)],
+                        keywords: Annotated[list[Annotated[str, Field(min_length=1, max_length=80)]],
+                                            Field(min_length=1, max_length=32)]) -> str:
+        """Replace one preference after reading its current ID and revision."""
+        return preference_text([preferences.save(subject, content, reason, keywords, polarity=polarity,
+                                                  preference_id=preference_id,
+                                                  expected_revision=expected_revision)])
+
+    def delete_preference(preference_id: str, expected_revision: Annotated[int, Field(ge=1)]) -> str:
+        """Delete one preference after reading its current ID and revision."""
+        preferences.delete(preference_id, expected_revision)
+        return f"Deleted preference: {preference_id}"
+
+    tools.update({fn.__name__: fn for fn in (write_scene, edit_scene, edit_event, set_scene_status, write_diary,
+                                           revise_diary, comment_diary, delete_diary, annotate,
+                                           write_preference, edit_preference, delete_preference)})
     return tools

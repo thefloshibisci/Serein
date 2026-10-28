@@ -108,6 +108,9 @@ def output_for(role,request):
     if role=='event_writer':
         from serein.extensions.pipeline_latest import _SELF_REVIEW_KEYS
         source=request['messages'][0]
+        if 'content' not in source:
+            reading=json.loads(request['prompt'].split('<event_reading_block_json>\n',1)[1].split('\n</event_reading_block_json>',1)[0])
+            source={**source,'content':next(row['text'] for row in reading if row['source_message_id']==source['id'])}
         span={'source_message_id':source.get('id',1),'quote':source['content']}
         sentence='We agreed to '+source['content']
         return {'title':'Book club','event_draft':sentence,
@@ -131,7 +134,9 @@ def test_pipeline_does_not_truncate_a_long_dialogue_unit(settings):
     save_settings(settings.database,{'pipeline':{'max_prompt_chars':300000}})
     task=asyncio.run(advance(settings.database,include_recent=True))
     assert task['status']=='awaiting_agent'
-    assert [(m['role'],m['content']) for m in task['request']['messages']]==[
+    reading=json.loads(task['request']['prompt'].split('<raw_messages_json>\n',1)[1].split('\n</raw_messages_json>',1)[0])
+    assert [row['source_message_id'] for row in reading]==[m['id'] for m in task['request']['messages']]
+    assert [(m['role'],row['text']) for m,row in zip(task['request']['messages'],reading)]==[
         (m['role'],m['text']) for m in messages]
 
 def test_pipeline_agent_jobs_retry_ownership_and_rolling_extension(settings):

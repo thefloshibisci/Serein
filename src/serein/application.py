@@ -72,7 +72,9 @@ class Services:
         if manual_fallback:
             from .recall.manual import fallback_lookup
             result = fallback_lookup(engine, query, result, options)
-        return {**result, 'direct_threshold':engine.policy.direct_threshold}
+        from .core.preferences import Preferences, surface
+        return {**surface(result, Preferences(settings.database).match(query)),
+                'direct_threshold':engine.policy.direct_threshold}
 
     def find_arc(self, query, limit=5):
         from .configured_models import effective_settings

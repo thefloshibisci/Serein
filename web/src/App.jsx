@@ -35,7 +35,7 @@ const readAreaFromHash = () => {
   if (window.location.hash === "#memos") return "备忘";
   if (window.location.hash === "#help") return "使用说明";
   if (window.location.hash === "#settings") return "设置";
-  if (window.location.hash === "#memory") return "记忆";
+  if (["#memory", "#preferences"].includes(window.location.hash)) return "记忆";
   if (window.location.hash === "#narrative") return "叙事卷";
   if (window.location.hash === "#diary") return "日记";
   if (window.location.hash === "#basement") return "地下室";

@@ -11,7 +11,7 @@ from serein.core.store import Store
 from serein.deployment import save_settings
 from serein.extensions import pipeline as p, pipeline_latest as latest
 from serein.extensions.pipeline_admission import apply_gate
-from test_public_features import output_for, settings
+from test_public_features import output_for, settings, synthetic_runner
 
 
 def _ingest_window(settings, number, *, exchanges=1):
@@ -195,7 +195,41 @@ def test_three_windows_persist_full_snapshots_but_curator_and_writer_annotate_on
         assert store.conn.execute("SELECT count(*) FROM fact_events WHERE status='superseded'").fetchone()[0] == 2
 
 
+def test_partial_snapshot_keeps_confirmed_omissions_across_later_windows(settings):
+    first_ids = _ingest_window(settings, 1)
+    assert asyncio.run(p.advance(settings.database, include_recent=True,
+                                runner=synthetic_runner))['events'] == 1
+    for number in (2, 3):
+        save_settings(settings.database, {'pipeline': {'material_review_enabled': True, 'curator_summary_first': True,
+                                                      'round_gate_enabled': number == 3}})
+        new_ids = _ingest_window(settings, number)
+        new_materials = [_material(sid, 'omit' if number == 2 and sid == new_ids[0] else 'main')
+                         for sid in new_ids]
+
+        async def runner(role, request):
+            output = output_for(role, request)
+            if role == 'event_curator':
+                _annotate(output, new_materials)
+                if number == 3:
+                    output['decision_review']['events'][0]['admission'] = {'closed_by': None}
+                    plan = latest.normalize_event_curator_output(copy.deepcopy(output), request['component'])
+                    assert apply_gate(plan, request['component'])['admission_receipts'][0]['rounds'] == 2
+            if role == 'event_writer' and number == 2:
+                # The synthetic Writer must not ground prose in the omitted new source.
+                output = output_for(role, {**request, 'messages': request['messages'][1:]})
+            return output
+
+        assert asyncio.run(p.advance(settings.database, include_recent=True, runner=runner))['events'] == 1
+        active, = _active_details(settings.database)
+        snapshot = json.loads(active['details_json'])['material_snapshot']
+        assert snapshot['unreviewed_source_message_ids'] == first_ids
+        assert next(row for row in snapshot['source_materials'] if row['source_message_id'] == 3)['use'] == 'omit'
+        assert {row['source_message_id'] for row in snapshot['source_fingerprints']} == set(range(1, number * 2 + 1))
+        assert {row['source_message_id'] for row in snapshot['source_materials']} == set(range(3, number * 2 + 1))
+
+
 def test_three_image_windows_keep_delta_scope_across_transcription_cache_refreshes(settings, monkeypatch):
+    save_settings(settings.database, {'pipeline': {'curator_summary_first': True}})
     from test_event_handoff import PNG
 
     save_settings(settings.database, {'pipeline': {'material_review_enabled': True}})
@@ -256,7 +290,8 @@ def test_three_image_windows_keep_delta_scope_across_transcription_cache_refresh
             cache_stamps.append(cache['updated_at'])
             assert cache['items'][0]['text'] == 'Synthetic blue cover image'
     assert annotation_scopes == writer_scopes == [[1, 2], [3, 4], [5, 6]]
-    assert cache_stamps == [f'2025-02-{number:02}T00:00:00Z' for number in (1, 2, 3)]
+    # Summary-only candidates no longer trigger another historical image read.
+    assert cache_stamps == ['2025-02-01T00:00:00Z'] * 3
     assert len(transcription_calls) == 1
 
 
@@ -264,6 +299,7 @@ def test_three_image_windows_keep_delta_scope_across_transcription_cache_refresh
                                     'source_ref_content', 'source_ref_role',
                                     'source_ref_created_at', 'source_ref_hash'])
 def test_untrusted_persisted_snapshot_requires_full_annotation_before_writer(settings, damage):
+    save_settings(settings.database, {'pipeline': {'curator_summary_first': True}})
     save_settings(settings.database, {'pipeline': {'material_review_enabled': True}})
     first_ids = _ingest_window(settings, 1)
     first_materials = [_material(first_ids[0], 'mixed'), _material(first_ids[1], 'omit')]
@@ -308,6 +344,14 @@ def test_untrusted_persisted_snapshot_requires_full_annotation_before_writer(set
         output = output_for(role, request)
         if role == 'event_curator':
             delta = _annotate(copy.deepcopy(output), new_materials)
+            if not request.get('context_read'):
+                from serein.extensions.pipeline_materials import snapshot_for
+                unseen = latest.normalize_event_curator_output(delta, request['component'])['events'][0]
+                assert unseen['unreviewed_source_message_ids'] == first_ids
+                partial=snapshot_for(unseen, request['component']['context_messages'])
+                assert partial['unreviewed_source_message_ids']==first_ids
+                assert partial['source_materials']==new_materials
+                return {'context_request': {'event_id': old['item_id'], 'reason': 'missing_prior_claim'}}
             with pytest.raises(ValueError, match='exactly cover'):
                 latest.normalize_event_curator_output(delta, request['component'])
             _annotate(output, complete)
@@ -337,8 +381,9 @@ def test_untrusted_persisted_snapshot_requires_full_annotation_before_writer(set
 
 
 @pytest.mark.parametrize('old_use, expected_rounds', [('main', 2), ('mixed', 2), ('omit', 1), ('background', 1)])
-def test_incremental_gate_matches_legacy_full_material_count(settings, old_use, expected_rounds):
-    save_settings(settings.database, {'pipeline': {'material_review_enabled': True}})
+@pytest.mark.parametrize('reduce_input', [False, True])
+def test_incremental_gate_matches_legacy_full_material_count(settings, old_use, expected_rounds, reduce_input):
+    save_settings(settings.database, {'pipeline': {'material_review_enabled': True, 'curator_summary_first': reduce_input}})
     first_ids = _ingest_window(settings, 1)
     first_materials = [_material(first_ids[0], old_use), _material(first_ids[1])]
 
@@ -361,6 +406,7 @@ def test_incremental_gate_matches_legacy_full_material_count(settings, old_use, 
             actual = apply_gate(latest.normalize_event_curator_output(copy.deepcopy(output), component), component)
             legacy_component = copy.deepcopy(component)
             legacy_component.pop('material_contract_version')
+            legacy_component.pop('curator_read_source_ids', None)
             legacy_output = _annotate(copy.deepcopy(output), first_materials + new_materials)
             expected = apply_gate(latest.normalize_event_curator_output(legacy_output, legacy_component), legacy_component)
             assert actual['admission_receipts'] == expected['admission_receipts']

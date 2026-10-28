@@ -52,12 +52,16 @@ def test_new_schema_has_self_use_required_fields_and_defaults(runtime):
                 'set_scene_status': {'scene_id', 'expected_updated_at', 'status'},
                 'read_diary': set(), 'write_diary': {'content'}, 'revise_diary': {'diary_id', 'content'},
                 'comment_diary': {'diary_id', 'content'}, 'delete_diary': {'diary_id'},
-                'annotate': {'memory_id', 'content'}}
+                'annotate': {'memory_id', 'content'}, 'read_preferences': set(),
+                'write_preference': {'subject', 'polarity', 'content', 'reason', 'keywords'},
+                'edit_preference': {'preference_id', 'expected_revision', 'subject', 'polarity', 'content', 'reason', 'keywords'},
+                'delete_preference': {'preference_id', 'expected_revision'}}
     for name, fields in required.items():
         schema = tools[name].inputSchema
         assert set(schema.get('required', [])) == fields
         assert 'operation_id' not in schema['properties']
-        assert 'expected_revision' not in schema['properties']
+        if name not in {'edit_preference', 'delete_preference'}:
+            assert 'expected_revision' not in schema['properties']
         assert schema['additionalProperties'] is False
     for name in ('write_scene', 'write_diary', 'comment_diary'):
         assert tools[name].annotations.idempotentHint is False
@@ -65,7 +69,7 @@ def test_new_schema_has_self_use_required_fields_and_defaults(runtime):
     assert favorites['limit']['default'] == 5
     assert favorites['include_archived']['default'] is False
     assert 'author' not in tools['write_diary'].inputSchema['properties']
-    for name in ('read_memory', 'recall_memory', 'find_arc', 'read_arc_materials', 'read_diary', 'read_favorites'):
+    for name in ('read_memory', 'recall_memory', 'find_arc', 'read_arc_materials', 'read_diary', 'read_favorites', 'read_preferences'):
         assert tools[name].outputSchema is None
 
 

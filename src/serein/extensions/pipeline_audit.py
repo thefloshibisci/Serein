@@ -302,7 +302,8 @@ def curator_receipt_errors(review: Any, plan: dict, component: dict) -> list[str
         if item.get('evidence_role') in (None, 'owned') and type(item.get('source_message_id')) is int:
             transcriptions.setdefault(item['source_message_id'], []).append(str(item.get('text') or ''))
     messages = {item['id']: {**item, 'evidence_texts': transcriptions.get(item['id'], [])}
-                for item in component.get('context_messages') or []}
+                for item in component.get('context_messages') or []
+                if 'curator_read_source_ids' not in component or item['id'] in component['curator_read_source_ids']}
     seen_pairs = set()
     for row in review['boundaries']:
         if not isinstance(row, dict) or set(row) != {'left_event_index', 'right_event_index', 'reason', 'evidence'}:

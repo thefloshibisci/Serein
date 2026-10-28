@@ -117,8 +117,9 @@ def test_protected_append_filters_writer_materials_to_new_owned_sources(settings
 
 
 @pytest.mark.parametrize('with_image', [False, True])
-def test_cross_window_event_extension_hands_correct_materials_to_writer(settings, with_image):
-    save_settings(settings.database, {'pipeline': {'material_review_enabled': True}})
+@pytest.mark.parametrize('reduce_input', [False, True])
+def test_cross_window_event_extension_hands_correct_materials_to_writer(settings, with_image, reduce_input):
+    save_settings(settings.database, {'pipeline': {'material_review_enabled': True, 'curator_summary_first': reduce_input}})
     seen = []
     curator_seen = []
     first_body = None
@@ -172,7 +173,9 @@ def test_cross_window_event_extension_hands_correct_materials_to_writer(settings
         assert len(transcription_calls) == 1
         assert request['images'] == []
         assert request['curator_image_transcriptions'] == []
-        transcript = curator_seen[-1]['curator_image_transcriptions'][0]
+        assert bool(curator_seen[-1].get('curator_image_transcriptions',[])) is (not reduce_input)
+        assert ('Synthetic cover image' in curator_seen[-1]['prompt']) is (not reduce_input)
+        transcript = curator_seen[0]['curator_image_transcriptions'][0]
         assert transcript['text'] == 'Synthetic cover image'
         assert transcript['source_message_id'] == 1
     materials = json.loads(request['prompt'].split('<curator_materials_json>\n')[1].split('\n</')[0])

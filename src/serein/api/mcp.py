@@ -97,6 +97,29 @@ def create_server(app: Application, *, private=False, http=False):
             return favorites_text(result, with_evidence=with_evidence)
         return read_favorites
 
+    def pipeline_text_tool(function):
+        async def pipeline_next(include_recent: bool = False, retry_repair: bool = False) -> list:
+            """Claim the next Event task as one JSON text; submit its result with pipeline_submit."""
+            from ..core.store import encode
+            from ..deployment import read_settings
+            from ..extensions.pipeline_images import agent_text_task
+            from mcp.types import TextContent, ImageContent
+            import base64
+            result=await function(include_recent=include_recent,retry_repair=retry_repair)
+            text=encode(agent_text_task(result))
+            size=len(encode({'content':[{'type':'text','text':text}],'isError':False}))
+            limit=result.get('delivery_limit_chars',read_settings(app.settings.database)['pipeline']['max_prompt_chars'])
+            if result.get('request') and size>limit:
+                raise ValueError(f'MCP 完整工具结果共 {size} 字符，超过 {limit} 字符上限；'
+                                 '包含文本封装与 JSON 转义，结果未截断。请减小每批材料后重建未完成计划。')
+            content=[TextContent(type='text',text=text)]
+            for image in result.get('request',{}).get('images',[]):
+                header,data=image['url'].split(',',1)
+                base64.b64decode(data,validate=True)
+                content.append(ImageContent(type='image',mimeType=header[5:].split(';')[0],data=data))
+            return content
+        return pipeline_next
+
     def read_memory(identifier: str, kind: Literal["scene", "event", "narrative", "diary", "darkroom", "upload", "shadow", "dream"] | None = None,
                     revision: int | None = None, with_evidence: bool = False) -> str:
         """Read a memory by its own ID from recall or /resume (typed Event/Scene IDs are accepted). Default reads return the memory body without bound evidence. Set with_evidence=True to return its body and all currently active bound original evidence in one call; do not collect separate original-message IDs first. For independent chat transcripts use source_message_search then source_message_read. Deleted/locked bodies stay hidden; historical revisions may not have evidence membership."""
@@ -232,11 +255,11 @@ def create_server(app: Application, *, private=False, http=False):
             if old:
                 legacy_server.add_tool(old.fn, name=name)
                 server.remove_tool(name)
-            annotation = read_only if name == 'read_diary' else ToolAnnotations(
-                readOnlyHint=False, destructiveHint=name in {'set_scene_status', 'delete_diary'},
+            annotation = read_only if name in {'read_diary', 'read_preferences'} else ToolAnnotations(
+                readOnlyHint=False, destructiveHint=name in {'set_scene_status', 'delete_diary', 'delete_preference'},
                 idempotentHint=False, openWorldHint=False)
             server.add_tool(fn, name=name, annotations=annotation,
-                            structured_output=False if name == 'read_diary' else None)
+                            structured_output=False if name in {'read_diary', 'read_preferences'} else None)
             server._tool_manager.get_tool(name).parameters['additionalProperties'] = False
             registered.add(name)
         authored_names = set(authored)
@@ -269,7 +292,7 @@ def create_server(app: Application, *, private=False, http=False):
         if not private and 'save_memory' in selected:
             selected.remove('save_memory')
             selected.update({'write_scene', 'edit_scene'})
-        optional_catalog = internal_tools | set(gated_tools) | {'window_shadow_read','dream_read','memo_create','memo_list','memo_update','window_shadow_write','source_message_search','source_message_read','source_message_upload','narrative_volume','read_favorites','promote_event_to_scene','list_event_mailbox','read_event_mailbox','save_event_mailbox_draft'}
+        optional_catalog = internal_tools | set(gated_tools) | {'window_shadow_read','dream_read','memo_create','memo_list','memo_update','window_shadow_write','source_message_search','source_message_read','source_message_upload','narrative_volume','read_favorites','promote_event_to_scene','list_event_mailbox','read_event_mailbox','save_event_mailbox_draft','read_preferences','write_preference','edit_preference','delete_preference'}
         if selected - available - optional_catalog:
             raise ValueError('Selected MCP tools are unavailable: '+', '.join(sorted(selected-available-optional_catalog)))
         for name in available-selected:
@@ -297,12 +320,13 @@ def create_server(app: Application, *, private=False, http=False):
             if name=='resume':
                 from ..extensions.handoff import resume_text_tool
                 exposed=resume_text_tool(function)
+            elif name=='pipeline_next':exposed=pipeline_text_tool(function)
             else:exposed = favorite_text_tool(function) if name == 'read_favorites' else function
             annotation=ToolAnnotations(readOnlyHint=True,destructiveHint=False,idempotentHint=True,openWorldHint=False) if name=='resume' else read_only if name in {'source_message_search','source_message_read','read_favorites','dream_read','window_shadow_read','list_event_mailbox','read_event_mailbox'} else None
             if name in candidate_tools:
                 annotation = read_only if name=='list_candidates' else write
             server.add_tool(exposed, name=name, annotations=annotation,
-                            structured_output=False if name in {'read_favorites','resume','dream_read','window_shadow_read'} else None)
+                            structured_output=False if name in {'read_favorites','resume','dream_read','window_shadow_read','pipeline_next'} else None)
             if name in {'resume','dream_read','window_shadow_read'}:server._tool_manager.get_tool(name).parameters['additionalProperties']=False
 
     async def list_tools():

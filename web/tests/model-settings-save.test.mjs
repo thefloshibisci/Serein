@@ -33,7 +33,7 @@ test('catalog saves tolerate incompatible pipeline fields and preserve pending c
       const body=JSON.parse(options.body);saves.push(body);
       assert.equal(body.expected_version,state.settings_version);
       // Reproduce an older server that returns fields it cannot accept in PATCH.
-      for(const key of Object.keys(body.pipeline||{}))assert(['execution_mode','max_prompt_chars','timeout_seconds'].includes(key));
+      for(const key of Object.keys(body.pipeline||{}))assert(['execution_mode','max_prompt_chars','timeout_seconds','curator_summary_first'].includes(key));
       if(rejectNext){rejectNext=false;return {ok:false,status:409,json:async()=>({detail:'synthetic save conflict'})};}
       for(const key of ['upstreams','models'])if(key in body)state[key]=body[key];
       for(const key of ['assignments','recall','upstream','pipeline','dream'])Object.assign(state[key],body[key]);
@@ -72,7 +72,7 @@ test('catalog saves tolerate incompatible pipeline fields and preserve pending c
     await type('上游名称','Synthetic');await type('API Base URL','https://synthetic.invalid/v1');
     await type('上游模型号','synthetic-model');await type('API Key','synthetic-key');
     // An unrelated invalid recall draft and a pending pipeline edit must not block catalog saving.
-    await app.act(async()=>{app.setPage('configuration');app.setThreshold('invalid');});
+    await app.act(async()=>{app.setPage('summary');app.setThreshold('invalid');});
     await app.act(async()=>{const select=field('自动 Event 执行方式');select.value='agent';select.dispatchEvent(new Event('change',{bubbles:true}));});
     await app.act(async()=>{app.setPage('models');});
     await click('保存上游与模型');
@@ -85,19 +85,26 @@ test('catalog saves tolerate incompatible pipeline fields and preserve pending c
     assert.equal(field('自动 Event 执行方式').value,'agent');
     assert.equal(field('最终筛选阈值').value,''); // invalid draft remains unsaved
 
-    await app.act(async()=>{app.setPage('configuration');app.setThreshold(null);});
+    await app.act(async()=>{app.setPage('summary');app.setThreshold(null);});
     rejectNext=true;
-    await click('保存配置');
+    await click('保存自动摘要设置');
     assert.equal(state.pipeline.execution_mode,'legacy');
-    await click('保存配置');
+    await click('保存自动摘要设置');
     assert.deepEqual(saves.at(-1).pipeline,{execution_mode:'agent'});
     assert.equal(state.pipeline.execution_mode,'agent');assert.equal(state.pipeline.auto_enabled,false);
-    await click('保存配置');
-    assert.equal('pipeline' in saves.at(-1),false); // successful save clears only the submitted draft
+    await click('保存自动摘要设置');
+    assert.deepEqual(saves.at(-1).pipeline,{}); // successful save clears only the submitted draft
     await type('模型读取超时（秒）','900');
-    await click('保存配置');
+    await click('保存自动摘要设置');
     assert.deepEqual(saves.at(-1).pipeline,{timeout_seconds:900});
     assert.equal(state.pipeline.timeout_seconds,900);
+    assert.equal(field('减小输入').checked,false);
+    assert.match(document.querySelector('#settings-content-summary').textContent,/可能漏掉旧细节/);
+    assert.equal(document.querySelector('#settings-content-configuration').textContent.includes('自动 Event 执行方式'),false);
+    await app.act(async()=>{field('减小输入').click();});
+    await click('保存自动摘要设置');
+    assert.deepEqual(saves.at(-1).pipeline,{curator_summary_first:true});
+    assert.equal(state.pipeline.curator_summary_first,true);
   }finally{
     if(root)await app.act(async()=>root.unmount());
     dom.window.close();delete globalThis.IS_REACT_ACT_ENVIRONMENT;

@@ -126,7 +126,8 @@ def test_pending_curator_removes_only_leading_duplicate_and_preserves_accepted_r
     p.submit(settings.database,task['job_id'],output_for(task['role'],task['request']))
     task=asyncio.run(p.advance(settings.database,include_recent=True))
     assert task['role']=='event_curator'
-    frozen=task['request']
+    with Store(settings.database,read_only=True) as store:
+        frozen=json.loads(store.conn.execute('SELECT request_json FROM pipeline_jobs WHERE id=?',(task['job_id'],)).fetchone()[0])
     header,separator,body=frozen['prompt'].partition('\n\n')
     # Keep an identical quotation later in the prompt. Only the generated
     # leading rules block is redundant; original material must not be edited.
@@ -137,13 +138,16 @@ def test_pending_curator_removes_only_leading_duplicate_and_preserves_accepted_r
     with Store(settings.database) as store:
         store.conn.execute('UPDATE pipeline_jobs SET request_json=? WHERE id=?',
                            (encode(frozen),task['job_id']))
-    limit=len(expected)+len(frozen['rules'])
+    expected_task={**task,'request':p.writer_task_view({**frozen,'prompt':expected})}
+    limit=len(encode(expected_task))
     save_settings(settings.database,{'pipeline':{'max_prompt_chars':limit}})
     resumed=asyncio.run(p.advance(settings.database,include_recent=True))
     assert resumed['job_id']==task['job_id']
     assert resumed['request']['rules']==frozen['rules']
     assert resumed['request']['prompt']==expected
-    assert resumed['request']['component']==frozen['component']
+    with Store(settings.database,read_only=True) as store:
+        assert json.loads(store.conn.execute('SELECT request_json FROM pipeline_jobs WHERE id=?',
+            (task['job_id'],)).fetchone()[0])['component']==frozen['component']
     p.submit(settings.database,resumed['job_id'],output_for('event_curator',resumed['request']))
     # An accepted old request is a receipt, even if it has redundant rules.
     with Store(settings.database) as store:

@@ -35,6 +35,7 @@ import {
 import { MarkdownProjection } from "../components/MarkdownProjection.jsx";
 import { SceneCueEditor } from "../components/SceneCueEditor.jsx";
 import { SceneEvidenceEditor } from "../components/SceneEvidenceEditor.jsx";
+import { PreferenceNotes } from "../components/PreferenceNotes.jsx";
 import { compareFactEventsByEnd, factEventTimeLabel } from "../utils/factEventTime.js";
 import { applyEventBatch, runEventBatch } from "../utils/eventBatch.js";
 import { formatSourceTime } from "../utils/sourceTime.js";
@@ -90,7 +91,7 @@ function sereinSourceIdForScene(scene) {
   return source ? source.id.slice("manual_source:".length) : "";
 }
 
-const memoryTypeLabels = { scene: "Scene", event: "事件", fact: "事实" };
+const memoryTypeLabels = { scene: "Scene", event: "事件", fact: "事实", preference: "喜好" };
 const factEventCacheKey = "serein.memory.fact-events.v2";
 const factEventCacheMaxAgeMs = 5 * 60 * 1000;
 let factEventListLoadInFlight = null;
@@ -481,7 +482,13 @@ export function MemoryPage() {
   }
   const initialFactEventCache = useMemo(readFactEventCache, []);
   const [sceneRecords, setSceneRecords] = useState(readMemoryScenes);
-  const [memoryType, setMemoryType] = useState("scene");
+  const [memoryType, setMemoryType] = useState(() => window.location.hash === "#preferences" ? "preference" : "scene");
+  useEffect(() => {
+    const sync = () => setMemoryType(current => window.location.hash === "#preferences"
+      ? "preference" : current === "preference" ? "scene" : current);
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
   const [favoriteIds,setFavoriteIds]=useState(()=>new Set());
   const [favoriteLoadState,setFavoriteLoadState]=useState('loading');
   const [favoriteError,setFavoriteError]=useState('');
@@ -556,7 +563,7 @@ export function MemoryPage() {
 
   useEffect(() => {
     const normalizedQuery = query.trim();
-    if (memoryType === "scene" || !normalizedQuery) {
+    if (memoryType === "scene" || memoryType === "preference" || !normalizedQuery) {
       setFactEventSearch({ type: "", query: "", items: [], state: "idle", error: "" });
       return undefined;
     }
@@ -966,6 +973,7 @@ export function MemoryPage() {
 
   const switchMemoryType = (type) => {
     setMemoryType(type);
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${type === "preference" ? "#preferences" : "#memory"}`);
     setView("all");
     setQuery("");
     setSelectedSceneId(null);
@@ -1083,6 +1091,11 @@ export function MemoryPage() {
   const selectedSceneIsEditing = selectedScene && editingSceneId === selectedScene.id;
   const detailOpen = Boolean(selectedScene || selectedFactEvent);
 
+  if (memoryType === "preference") return <PreferenceNotes
+    names={{ user: identityName("user"), ai: identityName("assistant"), shared: "我们" }}
+    onSwitchType={switchMemoryType}
+  />;
+
   return (
     <div className="memory-layout">
       <aside className="memory-filters" aria-label="记忆筛选" inert={eventAction.busy}>
@@ -1103,7 +1116,7 @@ export function MemoryPage() {
         </label>
 
         <div className="memory-type-switch" aria-label="记忆类型">
-          {["scene", "event"].map((type) => (
+          {["scene", "event", "preference"].map((type) => (
             <button
               className={memoryType === type ? "is-active" : ""}
               type="button"

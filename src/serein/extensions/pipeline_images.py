@@ -18,6 +18,16 @@ MAX_IMAGE_REDIRECTS = 3
 IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 20
 
 
+def agent_text_task(task):
+    """Image bytes travel as image blocks; never alter original prompt text."""
+    request=task.get('request')
+    if not isinstance(request,dict) or not request.get('images'):
+        return task
+    return {**task,'request':{**request,'images':[
+        {key:value for key,value in image.items() if key not in {'url','original_url'}}
+        for image in request['images']]}}
+
+
 class MissingOriginalImage(ValueError):
     """The attachment is gone, rather than a temporary download failure."""
 

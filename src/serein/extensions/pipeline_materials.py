@@ -96,8 +96,16 @@ def _valid_materials(materials, source_ids, messages):
     return True
 
 
+def _unreviewed_ids(record, source_ids):
+    values = record.get('unreviewed_source_message_ids', [])
+    if (not isinstance(values, list) or any(type(sid) is not int for sid in values)
+            or len(set(values)) != len(values) or not set(values).issubset(source_ids)):
+        return None
+    return values
+
+
 def snapshot_for(event, messages):
-    """Freeze a full per-Event material receipt; settlement binds the saved identity.
+    """Freeze confirmed choices and explicit unread IDs; settlement binds identity.
 
     The host adds event_id and event_fingerprint only after saving the Event. A
     constructor result alone cannot be reused as a trusted predecessor receipt.
@@ -112,14 +120,17 @@ def snapshot_for(event, messages):
         return None
     fingerprints = _source_fingerprints(source_ids, messages)
     materials = event.get('source_materials')
-    if fingerprints is None or not _valid_materials(materials, source_ids, messages):
+    unread = _unreviewed_ids(event, source_ids)
+    if (fingerprints is None or unread is None or not _valid_materials(materials,
+            [sid for sid in source_ids if sid not in unread], messages)):
         return None
     return {'schema': MATERIAL_CONTRACT_VERSION, 'event_ref': event['event_ref'],
-            'source_fingerprints': fingerprints, 'source_materials': deepcopy(materials)}
+            'source_fingerprints': fingerprints, 'source_materials': deepcopy(materials),
+            **({'unreviewed_source_message_ids': list(unread)} if unread else {})}
 
 
-def trusted_materials(base, messages):
-    """Return complete inherited decisions, or fail closed to full annotation."""
+def trusted_materials(base, messages, *, allow_partial=False):
+    """Return verified decisions; partial receipts require an explicit caller opt-in."""
     if not isinstance(base, dict):
         return None
     snapshot = base.get('material_snapshot')
@@ -149,7 +160,9 @@ def trusted_materials(base, messages):
             or saved != fingerprints):
         return None
     materials = snapshot.get('source_materials')
-    if not _valid_materials(materials, source_ids, messages):
+    unread = _unreviewed_ids(snapshot, source_ids)
+    if (unread is None or (unread and not allow_partial)
+            or not _valid_materials(materials, [sid for sid in source_ids if sid not in unread], messages)):
         return None
     return deepcopy(materials)
 
@@ -160,6 +173,17 @@ def annotation_contract(event, component):
     if owned_ids is None:
         raise ValueError('Material contract needs complete, unique Event source_bindings')
     contract = {'annotation_source_message_ids': owned_ids, 'inherited_materials': []}
+    if 'curator_read_source_ids' in component:
+        visible = set(component['curator_read_source_ids'])
+        inherited = []
+        if event.get('action') == 'extend' and len(event.get('base_event_ids') or []) == 1:
+            for base in component.get('base_event_candidates') or []:
+                if (base['event_id'] == event['base_event_ids'][0]
+                        or event['base_event_ids'][0] in (base.get('predecessor_event_ids') or [])):
+                    inherited = trusted_materials(base, component.get('context_messages') or [], allow_partial=True) or []
+        inherited = [row for row in inherited if row['source_message_id'] in set(owned_ids) - visible]
+        return {'annotation_source_message_ids': [sid for sid in owned_ids if sid in visible],
+                'inherited_materials': inherited}
     version = component.get('material_contract_version')
     if (not component.get('writer_material_review') or type(version) is not int
             or version != MATERIAL_CONTRACT_VERSION or event.get('action') != 'extend'):
@@ -236,7 +260,8 @@ def merge_review(review, output, component):
         by_id = {item['source_message_id']: item for item in
                  [*contract['inherited_materials'], *materials]}
         row['materials'] = [by_id[binding['source_message_id']]
-                            for binding in output['events'][index]['source_bindings']]
+                            for binding in output['events'][index]['source_bindings']
+                            if binding['source_message_id'] in by_id]
     missing_events = set(contracts) - seen_events
     if missing_events:
         raise ValueError(f'Curator material review is missing event_indexes={sorted(missing_events)}')
@@ -288,6 +313,13 @@ def attach(review, output, plan, component):
         if not isinstance(materials, list):
             raise ValueError('Every Event needs materials for each owned source')
         owned = {item['source_message_id'] for item in event['source_bindings']}
+        unread = set()
+        if 'curator_read_source_ids' in component:
+            contract = annotation_contract(event, component)
+            required = set(contract['annotation_source_message_ids']) | {
+                item['source_message_id'] for item in contract['inherited_materials']}
+            unread = owned - required
+            owned = required
         seen = set()
         for item in materials:
             if not isinstance(item, dict) or set(item) != {'source_message_id', 'use', 'reason', 'omit_quotes'}:
@@ -313,10 +345,14 @@ def attach(review, output, plan, component):
             raise ValueError('Materials must exactly cover owned sources once')
         if event['event_ref'] in accepted:
             accepted[event['event_ref']]['source_materials'] = materials
+            if unread:
+                accepted[event['event_ref']]['unreviewed_source_message_ids'] = sorted(unread)
 
 
 def substantive_ids(event):
     materials = event.get('source_materials')
     if materials is None:
         return event['source_message_ids']
-    return [item['source_message_id'] for item in materials if item['use'] in {'main', 'mixed'}]
+    # Not rereading inherited evidence is not a new decision to omit it.
+    return [*event.get('unreviewed_source_message_ids', []),
+            *[item['source_message_id'] for item in materials if item['use'] in {'main', 'mixed'}]]

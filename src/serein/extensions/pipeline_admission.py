@@ -112,6 +112,7 @@ def validate(review, output, component):
                 raise ValueError('Admission closure needs a source ID and verbatim quote')
             source_id, quote = closure['source_message_id'], closure['quote']
             if (type(source_id) is not int or source_id not in messages or source_id < max(owned)
+                    or ('curator_read_source_ids' in component and source_id not in component['curator_read_source_ids'])
                     or not isinstance(quote, str) or not quote.strip()
                     or quote not in str(messages[source_id].get('content') or '')
                     or messages[source_id].get('session_id') not in

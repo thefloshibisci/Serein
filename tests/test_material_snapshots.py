@@ -41,6 +41,23 @@ def fixture():
     return messages, old_event, base, event, component
 
 
+@pytest.mark.parametrize('unread', [None, [True], [1, 1], [99], [1, 2]])
+def test_partial_snapshot_rejects_invalid_unread_scope(unread):
+    messages, event, base, _, _ = fixture()
+    event['source_materials'] = [material(2, 'background')]
+    event['unreviewed_source_message_ids'] = [1]
+    snapshot = snapshot_for(event, messages)
+    assert snapshot is not None
+    snapshot.update(event_id=base['event_id'], event_fingerprint=base['fingerprint'])
+    base['material_snapshot'] = snapshot
+    assert trusted_materials(base, messages) is None
+    assert trusted_materials(base, messages, allow_partial=True) == event['source_materials']
+    event['unreviewed_source_message_ids'] = unread
+    snapshot['unreviewed_source_message_ids'] = unread
+    assert snapshot_for(event, messages) is None
+    assert trusted_materials(base, messages, allow_partial=True) is None
+
+
 def test_snapshot_is_full_sorted_deterministic_and_not_trusted_until_saved():
     messages, old_event, base, _, _ = fixture()
     snapshot = snapshot_for(old_event, messages)

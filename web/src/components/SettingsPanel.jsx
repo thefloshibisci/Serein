@@ -8,7 +8,7 @@ import { OriginalArchive } from "./OriginalArchive.jsx";
 import { LegacyMigration } from "./LegacyMigration.jsx";
 import { togetherCaption } from "../storage/togetherDate.js";
 
-const tabs = [["appearance", "外观"], ["features", "功能"], ["models", "模型"], ["configuration", "配置"], ["originals", "原文档案"], ["imports", "对话导入"], ["migration", "旧库迁移"]];
+const tabs = [["appearance", "外观"], ["features", "功能"], ["models", "模型"], ["configuration", "配置"], ["summary", "自动摘要管理"], ["originals", "原文档案"], ["imports", "对话导入"], ["migration", "旧库迁移"]];
 
 export function SettingsPanel({
   open,
@@ -66,10 +66,8 @@ export function SettingsPanel({
     window.addEventListener("serein:open-settings-tab", openTab);
     return () => window.removeEventListener("serein:open-settings-tab", openTab);
   }, [open]);
-  const [summaryRequest, setSummaryRequest] = useState(0);
   function openSummary() {
-    showTab("configuration");
-    setSummaryRequest(value => value + 1);
+    showTab("summary");
   }
   function navigateTabs(event, index) {
     const moves = { ArrowRight: (index + 1) % tabs.length, ArrowLeft: (index + tabs.length - 1) % tabs.length, Home: 0, End: tabs.length - 1 };
@@ -228,9 +226,9 @@ export function SettingsPanel({
           </section>
           </div>
           <div role="tabpanel" id="settings-content-features" aria-labelledby="settings-tab-features" aria-hidden={tab !== "features"} inert={tab !== "features"}>
-            {open && <FeatureSettings onOpenSummary={openSummary} onOpenEventGuide={onOpenEventGuide} />}
+            {open && <FeatureSettings onOpenSummary={openSummary} />}
           </div>
-          {open && <ModelSettings page={tab} summaryRequest={summaryRequest} recallThreshold={recallThreshold} setRecallThreshold={setRecallThreshold}
+          {open && <ModelSettings page={tab} onOpenEventGuide={onOpenEventGuide} recallThreshold={recallThreshold} setRecallThreshold={setRecallThreshold}
             candidateThresholdDraft={candidateThresholdDraft} setCandidateThresholdDraft={setCandidateThresholdDraft}
             passageDraft={passageDraft} setPassageDraft={setPassageDraft} onOpenPipeline={()=>showTab("imports")} onOpenCatalog={()=>showTab("models")} onOpenAssignments={()=>showTab("configuration")} />}
           <div role="tabpanel" id="settings-content-originals" aria-labelledby="settings-tab-originals" aria-hidden={tab !== "originals"} inert={tab !== "originals"}>

@@ -2,7 +2,6 @@
 import json
 import os
 import base64
-import re
 from mcp.types import TextContent, ImageContent
 from urllib.request import Request, urlopen
 from mcp.server.fastmcp import FastMCP
@@ -15,14 +14,19 @@ def call(name,body):
         headers={'Content-Type':'application/json','Authorization':'Bearer '+os.environ['SEREIN_AGENT_TOKEN']})
     with urlopen(request,timeout=600) as response:return json.load(response)
 
-@server.tool()
+@server.tool(structured_output=False)
 def pipeline_next(include_recent:bool=False)->list:
     """Get the next frozen Event task. Use include_recent=true only for an explicit immediate run."""
     result=call('pipeline_next',{'include_recent':include_recent})
     images=result.get('request',{}).get('images',[])
     # Supply actual MCP images, not base64 text the Agent has to interpret.
-    serialized=json.dumps(result,ensure_ascii=False)
-    serialized=re.sub(r'data:image/[^;\s]+;base64,[A-Za-z0-9+/=]+','[原图见工具图像输出]',serialized)
+    if images:
+        result={**result,'request':{**result['request'],'images':[
+            {key:value for key,value in image.items() if key not in {'url','original_url'}} for image in images]}}
+    serialized=json.dumps(result,ensure_ascii=False,separators=(',',':'))
+    size=len(json.dumps({'content':[{'type':'text','text':serialized}],'isError':False},ensure_ascii=False,separators=(',',':')))
+    if result.get('delivery_limit_chars') and size>result['delivery_limit_chars']:
+        raise ValueError(f'MCP 文本工具结果共 {size} 字符，超过 {result["delivery_limit_chars"]} 字符上限；结果未截断。')
     contents=[TextContent(type='text',text=serialized)]
     for item in images:
         header,data=item['url'].split(',',1)

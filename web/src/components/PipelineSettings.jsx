@@ -122,11 +122,11 @@ export function PipelineSettings({onOpenSummary}) {
     catch(error){setStatus(error.message);}finally{setBusy(false);}
   }
   return <section className="settings-group"><div className="settings-group__heading"><h3>原话整理</h3>
-    <p>归线 → 切分与转录 → Event 写作。在“配置”页选择执行方式、三阶段模型和整理参数。Scene 由聊天中的 agent 主动写。</p></div>
+    <p>归线 → 切分与转录 → Event 写作。在“自动摘要管理”页选择执行方式、三阶段模型和整理参数。Scene 由聊天中的 agent 主动写。</p></div>
     <ConversationImport onImported={()=>setStatus('原话已导入。点击继续整理，进入下一步。')} />
     {limits&&<p>{autoMessage}</p>}
     {work?.auto_boundary_originals>0&&<p>有 {work.auto_boundary_originals} 条原话在开启自动整理时被划到边界外。它们仍保存在原话档案中，点击“继续整理”不会处理这些原话。<button type="button" disabled={busy||running} onClick={()=>restoreDialog.current.showModal()}>恢复并整理这批原话</button></p>}
-    <button type="button" className="settings-link" onClick={onOpenSummary}>自动摘要配置</button>
+    <button type="button" className="settings-link" onClick={onOpenSummary}>自动摘要管理</button>
     {work&&<div aria-live="polite"><p>当前阶段：{stages[work.stage]||work.stage} · 本批已完成 {work.completed||0} 个步骤 · 已保存 {work.events??work.result?.events??0} 条 Event</p>
       {work.prompt_chars>0&&<p>本次提示词 {work.prompt_chars} 字符 · 超时 {work.timeout_seconds} 秒 · 第 {work.attempt||1} 次尝试</p>}
       {work.status==='interrupted'&&<p>任务已中断，可以继续。</p>}

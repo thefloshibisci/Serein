@@ -14,7 +14,6 @@ const features = {
   originals:['原话工具','按文字、日期、角色找原话，默认最多返回 10 条；按 ID 读全文和同会话前后文。上传工具可明确保存当前可见原话，无需经过聊天网关，不会自动完整备份。关闭后不注册这些工具。'],
   event_to_scene:['Event 升为 Scene','把明确选中的 Event 放入信箱，读过原话后编辑正文与召回入口，再手动升为 Scene；也可由主模型处理选中的草稿。默认关闭，已有记忆和草稿保留。'],
   memory_candidates:['记忆候选工具','允许模型提出、查看和审核 Scene 候选。关闭后隐藏 propose_memory、list_candidates、review_memory，已有候选保留。'],
-  pipeline_agent:['自动摘要 Agent 工具','允许外部 Agent 用 pipeline_next、pipeline_submit 领取任务并提交结果，同时提供 pipeline_rebuild 修复工具。与自动摘要开关独立；使用 Agent 前请在“配置”页阅读接入指南。'],
   favorites:['收藏工具','让模型读取、收藏或取消收藏 Event 和 Scene。读取默认每页 10 条；写入和状态工具可传 favorite。关闭不影响页面收藏。'],
   narrative_tools:['主模型读写叙事卷','注册叙事卷读写工具，让聊天主模型自己阅读、起草和保存。同时关闭自动 Narrative Writer；关闭此开关不会自动重启 Writer。'],
   narrative_nightly_organize:['夜间整理叙事卷','每天凌晨四点后，用“叙事卷找材料”模型把新增 Event、Scene 和可读日记接入旧 Arc，或建立空白 collecting Arc。没有新增材料不调用模型，也不会自动写正文。'],
@@ -27,21 +26,19 @@ const features = {
 const fallbackTimeZones = ['Asia/Shanghai','UTC','Asia/Tokyo','Asia/Singapore','Europe/London','Europe/Berlin','America/New_York','America/Chicago','America/Denver','America/Los_Angeles','Australia/Sydney'];
 const timeZones = [...new Set([...fallbackTimeZones,...(Intl.supportedValuesOf?.('timeZone')||[])])];
 
-export function FeatureSettings({onOpenSummary,onOpenEventGuide}) {
-  const [values,setValues]=useState(null),[resumeEntries,setResumeEntries]=useState({command_enabled:true,mcp_enabled:false}),[settingsVersion,setSettingsVersion]=useState(null),[clock,setClock]=useState({timezone:'Asia/Shanghai'}),[status,setStatus]=useState(''),[busy,setBusy]=useState(false),[autoEnabled,setAutoEnabled]=useState(false);
-  useEffect(()=>{let active=true;instanceSettings().then(value=>{if(active){setValues(value.features);setResumeEntries({command_enabled:value.resume.command_enabled,mcp_enabled:value.resume.mcp_enabled});setSettingsVersion(value.settings_version);setClock(value.clock);setAutoEnabled(value.pipeline.auto_enabled!==false);}})
+export function FeatureSettings({onOpenSummary}) {
+  const [values,setValues]=useState(null),[resumeEntries,setResumeEntries]=useState({command_enabled:true,mcp_enabled:false}),[settingsVersion,setSettingsVersion]=useState(null),[clock,setClock]=useState({timezone:'Asia/Shanghai'}),[status,setStatus]=useState(''),[busy,setBusy]=useState(false);
+  useEffect(()=>{let active=true;instanceSettings().then(value=>{if(active){setValues(value.features);setResumeEntries({command_enabled:value.resume.command_enabled,mcp_enabled:value.resume.mcp_enabled});setSettingsVersion(value.settings_version);setClock(value.clock);}})
     .catch(error=>{if(active)setStatus(error.message);});return()=>{active=false;};},[]);
+  useEffect(()=>{const saved=event=>setSettingsVersion(event.detail.settings_version);window.addEventListener('serein:settings-saved',saved);return()=>window.removeEventListener('serein:settings-saved',saved);},[]);
   async function save(event) {
     event.preventDefault();setBusy(true);
-    try {const result=await instanceSettings({expected_version:settingsVersion,features:values,resume:resumeEntries,clock,pipeline:{auto_enabled:autoEnabled}});setValues(result.features);setResumeEntries({command_enabled:result.resume.command_enabled,mcp_enabled:result.resume.mcp_enabled});setSettingsVersion(result.settings_version);setClock(result.clock);setStatus('已保存并生效。已有内容会保留。');}
+    try {const result=await instanceSettings({expected_version:settingsVersion,features:Object.fromEntries(Object.entries(values).filter(([key])=>key!=='pipeline_agent')),resume:resumeEntries,clock});setValues(result.features);setResumeEntries({command_enabled:result.resume.command_enabled,mcp_enabled:result.resume.mcp_enabled});setSettingsVersion(result.settings_version);setClock(result.clock);setStatus('已保存并生效。已有内容会保留。');}
     catch(error){setStatus(error.message);}finally{setBusy(false);}
   }
   return <section className="settings-group"><div className="settings-group__heading"><h3>可选功能</h3><p>按需开启，保存后生效。</p></div>
     {values&&<form onSubmit={save}>
-      <div className="settings-toggle"><span><strong id="automatic-summary-label">自动摘要</strong><small>自动把新聊天归线、整理为 Event，会按待处理材料调用模型；每次从关闭改为开启时，从保存后的新原话开始，不补跑此前积压。</small>
-        <button type="button" className="settings-link" onClick={onOpenSummary}>自动摘要配置</button>{' · '}
-        <button type="button" className="settings-link" onClick={onOpenEventGuide}>了解模型调用与费用</button></span>
-        <input type="checkbox" role="switch" aria-labelledby="automatic-summary-label" disabled={busy} checked={autoEnabled} onChange={event=>setAutoEnabled(event.target.checked)}/></div>
+      <p><button type="button" className="settings-link" onClick={onOpenSummary}>前往自动摘要管理</button></p>
       {Object.entries(features).map(([key,[label,help]])=><label className="settings-toggle" key={key}>
       <span><strong>{label}</strong><small>{help}</small></span><input type="checkbox" role="switch" aria-label={label} disabled={busy} checked={!!values[key]}
         onChange={event=>setValues(current=>({...current,[key]:event.target.checked,

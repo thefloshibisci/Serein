@@ -119,6 +119,11 @@ def recall_text(result: dict[str, Any], *, with_evidence: bool) -> str:
                 lines.extend(comment_lines(obj))
                 lines.extend(source_lines(obj.get("evidence") or [], with_evidence=with_evidence))
                 lines.append("[/memory_details]")
+        status = str(result.get("status") or "no_match")
+        if status == "use_narrative_reader":
+            lines.append("This request needs a Narrative lookup. Use find_arc(query=...) first.")
+        elif status == "use_evidence_reader":
+            lines.append("This request needs an exact memory read. Use read_memory(identifier=..., with_evidence=true).")
         return "\n".join(lines)
     status = str(result.get("status") or "no_match")
     if status == "use_narrative_reader":

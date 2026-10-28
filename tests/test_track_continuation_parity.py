@@ -180,6 +180,56 @@ def test_individual_message_routes_and_bridge_ownership(settings):
     assert second_roles[3] == 'bridge'
 
 
+@pytest.mark.parametrize('writer_sufficient',[True,False])
+def test_foreign_bridge_only_track_skips_curator_and_writer(settings,writer_sufficient):
+    raw_archive(settings).ingest([
+        {'source_event_id':str(i),'session_id':'one',
+         'role':'user' if i==1 else 'assistant','text':f'Synthetic bridge {i}',
+         'created_at':f'2025-01-01T00:0{i-1}:00Z'} for i in (1,2)
+    ],source='test')
+    task=asyncio.run(p.advance(settings.database,include_recent=True))
+    p.submit(settings.database,task['job_id'],{
+        'message_assignments':[
+            {'source_message_id':i,'primary_track_ref':'new:1','context_track_refs':['new:2'],
+             'routing_role':'bridge'} for i in (1,2)],
+        'track_updates':[
+            {'track_ref':ref,'subject':ref,'throughline':'Synthetic bridge','status':'active'}
+            for ref in ('new:1','new:2')],
+    })
+    calls=[]
+    async def runner(role,request):
+        calls.append(role)
+        output=output_for(role,request)
+        if role=='event_writer' and not writer_sufficient:
+            output.update(evidence_sufficient=False,recallable=False,title='',event_draft='',kept_details=[])
+            output['claim_groups']=[];output['sentence_evidence']=[]
+            output['self_review']['owned_evidence_sufficient']=False
+        return output
+    result=asyncio.run(p.advance(settings.database,include_recent=True,runner=runner))
+    assert len(result['bridge_only_skips'])==1
+    audit=result['bridge_only_skips'][0]
+    assert audit['primary_track_id'] and audit['unit_roots']==[1,2]
+    assert audit['source_message_ids']==[1,2] and audit['reason']=='foreign_bridge_only'
+    assert calls==['event_curator','event_writer']
+    with Store(settings.database,read_only=True) as store:
+        curator_jobs=store.conn.execute(
+            "SELECT count(*) FROM pipeline_jobs WHERE role LIKE 'event_curator:%'").fetchone()[0]
+        assert curator_jobs==1
+        persisted=json.loads(store.conn.execute(
+            'SELECT result_json FROM pipeline_batches WHERE id=?',(task['request']['batch_id'],)).fetchone()[0])
+        assert persisted['bridge_only_skips']==result['bridge_only_skips']
+        if writer_sufficient:
+            assert result['events']==1 and result['processed_originals']==2 and result['pending']==0
+            assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==2
+            assert store.conn.execute('SELECT count(*) FROM fact_events').fetchone()[0]==1
+            assert store.conn.execute('SELECT count(*) FROM fact_event_sources').fetchone()[0]==2
+        else:
+            assert result['events']==0 and result['processed_originals']==0 and result['pending']==2
+            assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==0
+            assert store.conn.execute('SELECT count(*) FROM fact_events').fetchone()[0]==0
+            assert store.conn.execute('SELECT count(*) FROM fact_event_sources').fetchone()[0]==0
+
+
 def _two_track_bridge_batch(settings):
     raw_archive(settings).ingest([
         {'source_event_id': str(i), 'session_id': 'one',
@@ -314,6 +364,33 @@ def test_protected_append_requires_explicit_opt_in_and_new_stable_source(setting
     assert set(with_opt_in['events'][0]['source_message_ids']) == {4, 10}
 
 
+def test_foreign_corridor_skip_cannot_settle_bridge_when_primary_writer_is_insufficient(settings):
+    batch,data,first,second,first_component,second_component=_two_track_bridge_batch(settings)
+    first_plan=latest.normalize_event_curator_output({
+        'events':[{'action':'create','primary_track_id':first,
+                   'base_event_ids':[],'owned_unit_roots':[1,3]}],
+        'skip_unit_roots':[],'defer_unit_roots':[],
+        'decision_review':{'events':[{'event_index':0,'reason':'Synthetic first activity'}],
+                           'boundaries':[],'dispositions':[]},
+    },first_component)
+    second_plan=latest.normalize_event_curator_output({
+        'events':[{'action':'create','primary_track_id':second,
+                   'base_event_ids':[],'owned_unit_roots':[2,4]}],
+        'skip_unit_roots':[3],'defer_unit_roots':[],
+        'decision_review':{'events':[{'event_index':0,'reason':'Synthetic second activity'}],
+            'boundaries':[],'dispositions':[{'disposition':'skip','unit_roots':[3],
+                'reason':'Foreign bridge is not needed on this side','parked_source_message_ids':[]}]},
+    },second_component)
+    insufficient={'evidence_sufficient':False}
+    result=p.settle(settings.database,batch,data,data['routing_result'],[
+        (first_component,first_plan,[(first_plan['events'][0],insufficient)]),
+        (second_component,second_plan,[(second_plan['events'][0],insufficient)]),
+    ])
+    assert result['events']==0 and result['processed_originals']==0 and result['pending']==4
+    with Store(settings.database,read_only=True) as store:
+        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==0
+
+
 def test_bridge_settlement_beats_other_corridor_skip(settings):
     batch, data, first, second, first_component, second_component = _two_track_bridge_batch(settings)
     first_plan = latest.normalize_event_curator_output({
@@ -358,7 +435,11 @@ def test_track_anchor_continuation_and_parked_unused_state(settings):
         tracks.persist(store.conn, [unused], scope)
     ingest(settings, 2)
     task = asyncio.run(p.advance(settings.database, include_recent=True))
-    active = {c['track_id']: c for c in task['request']['active_tracks']}
+    # Agent delivery keeps the full cards in the prompt, without a second copy
+    # of their evidence in the structured transport fields.
+    cards_json = task['request']['prompt'].split('<active_tracks_json>\n', 1)[1].split('\n</active_tracks_json>', 1)[0]
+    active = {c['track_id']: c for c in json.loads(cards_json)}
+    assert all('recent_turns' not in c for c in task['request']['active_tracks'])
     assert active[key]['recent_turns'][0]['message_id'] == 2
     assert all(c['status'] == 'parked' for c in active.values())
     asyncio.run(p.advance(settings.database, include_recent=True, runner=synthetic_runner))

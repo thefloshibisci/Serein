@@ -23,7 +23,9 @@ def routes(settings, auth):
         if metadata is not None:
             fields['observation']=metadata
         payload=encode(fields)
-        with Store(settings.database) as store,store.transaction():
+        # Reserve the writer before reading the existing receipt. A deferred
+        # read-to-write upgrade fails immediately if a background writer is busy.
+        with Store(settings.database) as store,store.transaction(immediate=True):
             old=store.conn.execute('SELECT * FROM host_deliveries WHERE receipt_id=?',(body['receipt_id'],)).fetchone()
             if old and old['payload']!=payload:
                 previous=json.loads(old['payload'])

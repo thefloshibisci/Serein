@@ -31,6 +31,10 @@ Scene、日记和批注工具按自用版的名称、参数和默认值提供。
 | 日记评论 | `comment_diary(diary_id, content, author='ai')` |
 | 删除日记 | `delete_diary(diary_id)`；软删除，保留历史 |
 | 批注 | `annotate(memory_id, content, author='', role='assistant', annotation_id='')`；作者省略时使用实例 AI 名称，不改原文或证据 |
+| 读取喜好 | `read_preferences(query='', subject='', limit=50, offset=0)`；按正文、原因、关键词或 ID 逐字搜索，可筛 user / ai / shared |
+| 新建喜好 | `write_preference(subject, polarity, content, reason, keywords)`；polarity 为 like / dislike，正文最多 50 字 |
+| 修改喜好 | `edit_preference(preference_id, expected_revision, subject, polarity, content, reason, keywords)` |
+| 删除喜好 | `delete_preference(preference_id, expected_revision)` |
 
 以上工具不要求模型填写 `operation_id` 或数字版本号。Scene 编辑使用 `read_memory` 文本中的 `updated_at`，在事务内检查冲突。日记修改在事务内读取和更新当前版本，保持自用版调用方式；不提供调用方跨请求的旧版本校验，写前应先读。锁定日记不可读正文、不可修订、评论或删除。日记没有收藏。
 
@@ -39,6 +43,8 @@ Scene 和日记的新建调用会独立创建内容；内部随机操作编号�
 公开版附加的 `set_memory_state` 保留状态、浮现资格和收藏管理；Event 仅允许修改收藏。Scene 提案的 `propose_memory` / `review_memory` 与 Event 升 Scene 的独立可选工具仍保留自身的版本和回执契约。`save_memory` 已移除，旧白名单中的该名称映射到 `write_scene` / `edit_scene`。叙事卷仍由 `narrative_volume` 的 read → preview → save 流程书写，Event 正文由原话整理流水线维护。
 
 已提交写入的索引同步由规范写入路径、后台 Index Worker 和维护脚本负责，不向聊天模型提供手动重试工具。
+
+喜好使用 `personal_records` 的 `preference` scope，不绑定记忆 ID，也不进入向量索引。主体只保存角色，不保存显示名；网页显示名跟随当前实例的人物设置。任意一个已填写关键词在当前消息中逐字出现时，命中项会写入返回的 `preferences` 字段和独立 `[preferences]` 上下文；这一通道不受 Event／Scene 路由跳过或 `max_notes=0` 影响。编辑和删除必须使用读取结果中的当前 revision，冲突不会覆盖较新的内容。
 
 ## 日记与暗房
 

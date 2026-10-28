@@ -5,7 +5,7 @@ from uuid import uuid4
 from .store import Store, Conflict, encode, now
 from .reader import Reader
 
-SCOPES = {'favorite', 'annotation', 'recall_review', 'recall_simulation'}
+SCOPES = {'favorite', 'annotation', 'recall_review', 'recall_simulation', 'preference'}
 
 
 class Personal:
@@ -18,11 +18,16 @@ class Personal:
                 'payload_json': None}
 
     @staticmethod
-    def validate(scope, key, value, document_id):
+    def validate(scope, key, value, document_id, *, deleted=False):
         if scope not in SCOPES or not isinstance(key,str) or not 1 <= len(key) <= 240:
             raise ValueError('Invalid personal record identity')
         if not isinstance(value,dict) or len(encode(value)) > 150000:
             raise ValueError('Invalid personal record value')
+        if scope == 'preference':
+            from .preferences import validate
+            if document_id is not None:
+                raise ValueError('喜好不绑定记忆 ID')
+            return validate(value, deleting=deleted)
         if scope == 'favorite':
             if type(value.get('favorite')) is not bool or key != document_id:
                 raise ValueError('Favorite requires its document ID and a boolean')
@@ -49,7 +54,7 @@ class Personal:
     @staticmethod
     def save_in_store(store, scope, key, value, *, document_id=None, expected_revision=0, deleted=False):
         """Save using the caller's transaction, including memory-write receipts."""
-        value=Personal.validate(scope,key,value,document_id)
+        value=Personal.validate(scope,key,value,document_id,deleted=deleted)
         if scope in ('favorite','annotation'):
             doc=store.read(document_id)
             if not doc or doc['lifecycle']=='deleted' or doc['kind'] not in ('scene','event','narrative'):

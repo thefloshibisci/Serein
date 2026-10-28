@@ -82,3 +82,42 @@ def test_unapproved_fields_are_not_stored(client):
     payload['observation']['candidates'][0]['body']='secret'
     assert client.post('/v1/host/deliveries', json=payload).status_code == 200
     assert 'secret' not in client.get('/v1/host/deliveries').text
+
+
+@pytest.mark.parametrize('journal_mode', ['delete', 'wal'])
+def test_receipt_waits_for_an_existing_writer(tmp_path, journal_mode):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from fastapi import FastAPI
+    from serein.api.host import routes
+    from serein.core.store import Store, encode
+
+    settings = Settings(tmp_path/'serein.db', tmp_path/'index.sqlite', writable=True)
+    initialize(settings)
+    app = FastAPI()
+    app.include_router(routes(settings, []))
+    with Store(settings.database) as store:
+        store.conn.execute('PRAGMA journal_mode='+journal_mode)
+    locked, release = Event(), Event()
+    other = {'receipt_id':'other', 'window_id':'other', 'delivered_ids':[]}
+
+    def background_write():
+        with Store(settings.database) as store, store.transaction(immediate=True):
+            store.conn.execute('INSERT INTO host_deliveries(receipt_id,payload) VALUES (?,?)',
+                               (other['receipt_id'], encode(other)))
+            locked.set()
+            release.wait(.5)
+
+    with ThreadPoolExecutor(max_workers=1) as pool, TestClient(app) as client:
+        writer = pool.submit(background_write)
+        assert locked.wait(5)
+        try:
+            response = client.post('/v1/host/deliveries', json=receipt())
+        finally:
+            release.set()
+            writer.result(timeout=5)
+        assert response.status_code == 200
+        # Both acknowledgements survive; retrying the host receipt is idempotent.
+        assert client.post('/v1/host/deliveries', json=receipt()).status_code == 200
+        assert {r['receipt_id'] for r in client.get('/v1/host/deliveries').json()['items']} == {
+            'other', receipt()['receipt_id']}

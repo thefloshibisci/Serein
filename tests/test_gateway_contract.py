@@ -71,7 +71,7 @@ def test_self_use_catalog_excludes_evidence_and_window_narrative_authoring():
                 'narrative_revision_inbox', 'review_narrative_revision', 'publish_narrative',
                 'close_window', 'revise_window_shadow')
     tools = [{'name': name} for name in (*SELF_USE_TOOLS, *excluded)]
-    assert len(self_use_catalog(tools)) == 14
+    assert len(self_use_catalog(tools)) == 19
     assert not set(excluded) & {row['name'] for row in self_use_catalog(tools)}
 
 @pytest.fixture

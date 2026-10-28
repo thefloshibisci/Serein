@@ -12,7 +12,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from ..core.store import Store, digest, encode, now
-from .germany.fact_events import FactEventStore, FactEventSettlementBlockedError, _normalized_search_text
+from .germany.fact_events import FactEventStore, FactEventSettlementBlockedError, _normalized_search_text, _normalize_item
 
 
 _settling = ContextVar('event_settlement', default=False)
@@ -88,6 +88,51 @@ class Events(FactEventStore):
         conn.execute('PRAGMA foreign_keys=ON')
         conn.project = self._initialized
         return conn
+
+    def edit(self, event_id, expected_updated_at, *, title=None, content=None):
+        """Create a corrected Event version under the existing SQLite write lock."""
+        if not isinstance(event_id, str) or not event_id.strip():
+            raise ValueError('event_id is required')
+        key = event_id.strip().removeprefix('event:')
+        if not isinstance(expected_updated_at, str) or not expected_updated_at.strip():
+            raise ValueError('Read the Event updated_at before editing')
+        if title is None and content is None:
+            raise ValueError('Specify a changed title or content')
+        if any(value is not None and (not isinstance(value, str) or not value.strip())
+               for value in (title, content)):
+            raise ValueError('Title and content must be nonempty text')
+        with closing(self._connect()) as conn, conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT * FROM fact_events WHERE item_id=?', (key,)).fetchone()
+            if row is None or row['item_type'] != 'event' or row['status'] == 'tombstoned':
+                return {'status': 'not_found', 'event_id': key}
+            if row['status'] == 'superseded' or row['updated_at'] != expected_updated_at:
+                return {'status': 'conflict', 'event_id': key, 'updated_at': row['updated_at']}
+            if row['status'] != 'active':
+                return {'status': 'invalid', 'event_id': key, 'reason': 'Event is not active'}
+            store = Store.__new__(Store)
+            store.conn = conn
+            document = store.read(key)
+            if document and document['metadata'].get('source_record_immutable'):
+                raise ValueError('Immutable source record')
+            current = self._row_payload(conn, row, include_sources=True)
+            candidate = _normalize_item({'type': 'event',
+                'title': current['title'] if title is None else title,
+                'body': current['body'] if content is None else content,
+                'importance': current['importance'], 'recallable': current['recallable'],
+                'fact_type': current.get('fact_type', ''),
+                'atomic_question': current.get('atomic_question', ''),
+                'supersedes_item_id': key, 'source_refs': current['source_refs']})
+            if candidate['fingerprint'] == current['fingerprint']:
+                return {'status': 'unchanged', 'event_id': key,
+                        'updated_at': current['updated_at']}
+            written = self._write_one(conn, candidate, now=now())
+            if written['status'] != 'inserted':
+                raise ValueError(written.get('error') or 'Revision did not create a new Event')
+            updated = conn.execute('SELECT item_id,updated_at FROM fact_events WHERE item_id=?',
+                                   (written['item_id'],)).fetchone()
+            return {'status': 'superseded', 'previous_event_id': key,
+                    'event_id': updated['item_id'], 'updated_at': updated['updated_at']}
 
     def settle(self, operation_id, raw_items, *, before_commit=None):
         check_marker = _settlement_check.set(before_commit)

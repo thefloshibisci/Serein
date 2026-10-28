@@ -23,7 +23,10 @@ def test_null_context_requests_save_and_resume_without_rereading(settings,monkey
             assert 'context_request: null' in request['prompt']
             assert 'context_request' in request['rules']
             result['context_request']=None
-            p.validate({**request,'context_read':True},result)
+            with Store(settings.database,read_only=True) as store:
+                full=json.loads(store.conn.execute('SELECT request_json FROM pipeline_jobs WHERE batch_id=? AND output_json IS NULL ORDER BY rowid DESC LIMIT 1',
+                    (request['batch_id'],)).fetchone()[0])
+            p.validate({**full,'context_read':True},result)
             with pytest.raises(ValueError):p.validate(request,{'context_request':None})
         return result
     if mode=='api':
@@ -65,9 +68,9 @@ def test_nonnull_context_requests_keep_scope_shape_and_single_read_limits(settin
 @pytest.mark.parametrize('role',['event_curator','event_writer'])
 def test_null_final_result_after_one_context_read(settings,monkeypatch,role):
     ingest(settings);reads=[];original=p.extend_context
-    def reread(database,component,query):
+    def reread(database,component,query,**kwargs):
         reads.append(query)
-        return original(database,component,query)
+        return original(database,component,query,**kwargs)
     monkeypatch.setattr(p,'extend_context',reread)
     async def runner(stage,request):
         if stage==role and not request.get('context_read'):
@@ -106,8 +109,12 @@ def test_three_stage_image_chain_preserves_bytes_transcription_and_raw_sources(s
             assert request['images']==[] and request['pretranscribed']
         if role=='event_writer':
             assert request['images']==[] and request['image_input_mode']=='transcriptions_only'
-            assert request['curator_image_transcriptions']==[{'source_message_id':1,'position':1,'sha256':sha,
+            transcriptions=json.loads(request['prompt'].split('<curator_image_transcriptions>\n',1)[1].split('\n</curator_image_transcriptions>',1)[0])
+            assert transcriptions==[{'source_message_id':1,'position':1,'sha256':sha,
                 'evidence_role':'owned','text':'Visible book title','unreadable':False}]
+            if mode=='agent':
+                assert 'text' not in request['curator_image_transcriptions'][0]
+                assert json.dumps(request,ensure_ascii=False).count('Visible book title')==1
         return output_for(role,request)
     async def complete(model,payload):
         assert mode=='api','Agent mode must not call the API'

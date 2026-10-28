@@ -54,6 +54,9 @@ def routes(services,auth):
             use_passages=body.get('use_passages'),body_char_limit=char_limit,
             delivered_menu_keys=body.get('delivered_menu_keys',[]),recall_ablation=ablation,
             deadline_at=deadline, **({'threshold_override':threshold} if threshold is not None else {})) if maximum else {'cards':[],'context':'','selected_refs':[]}
+        if not maximum:
+            from ..core.preferences import Preferences, surface
+            result = surface(result, Preferences(services._settings.database).match(query))
         cards=result['cards']
         context=GatewayService._clip_text(result['context'],max(160,min(12000,int(body.get('max_context_chars',4200)))))
         route=result.get('routing',{})
@@ -68,6 +71,7 @@ def routes(services,auth):
         typed={key:value for key,value in result.items() if key not in ('context','full_additional_context','additional_context','pools','cards')}
         return {'ok':True,'query':query,'session_id':str(body.get('session_id') or 'hook'),
             'cards':cards,'notes':cards,'recalled_ids':result['selected_refs'],
+            'preferences':result.get('preferences',[]),
             'additional_context':GatewayService._render_hook_recall_full_additional_context(context),
             'debug':{'mode':'full_gateway','semantic_recall_debug':semantic,'typed_event_scene_live':typed,
                      'recalled_bucket_ids':result['selected_refs'],'records_injections':False},'injected':False}

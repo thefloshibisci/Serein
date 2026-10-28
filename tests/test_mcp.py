@@ -128,7 +128,7 @@ def test_stdio_mcp_write_read_recall_and_retry(tmp_path):
 def test_read_only_mcp_has_no_writing_tools(tmp_path):
     server = create_server(Application(Settings(tmp_path / "not-opened.db")))
     names = {tool.name for tool in asyncio.run(server.list_tools())}
-    assert names == {"read_memory", "recall_memory", "find_arc", "read_arc_materials", "read_diary"}
+    assert names == {"read_memory", "recall_memory", "find_arc", "read_arc_materials", "read_diary", "read_preferences"}
 
 
 @pytest.mark.parametrize('selected', [['save_memory'], ['write_scene'], ['edit_scene']])

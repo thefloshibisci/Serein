@@ -23,7 +23,7 @@ const taskLinks = {
   reranker:{href:"https://cloud.siliconflow.cn/i/NCXr2PLP",label:"硅基流动（邀请链接）"},
 };
 
-export function ModelSettings({page,summaryRequest=0,onOpenPipeline,onOpenCatalog,onOpenAssignments,
+export function ModelSettings({page,onOpenEventGuide,onOpenPipeline,onOpenCatalog,onOpenAssignments,
   recallThreshold,setRecallThreshold,candidateThresholdDraft,setCandidateThresholdDraft,
   passageDraft,setPassageDraft}) {
   const [config,setConfig]=useState(null);
@@ -40,21 +40,15 @@ export function ModelSettings({page,summaryRequest=0,onOpenPipeline,onOpenCatalo
   const validThreshold=threshold!=='' && Number.isFinite(Number(threshold)) && Number(threshold)>=0 && Number(threshold)<=1;
   const validCandidateThresholds=[bodyCandidateThreshold,cueCandidateThreshold].every(value=>
     value!=='' && Number.isFinite(Number(value)) && Number(value)>=0 && Number(value)<=1);
-  const summaryConfig=useRef(null);
   const upstreamForm=useRef(null);
-  const ready=!!config;
-  useEffect(()=>{
-    if(!summaryRequest||!summaryConfig.current)return;
-    summaryConfig.current.open=true;
-    summaryConfig.current.querySelector('summary').focus();
-    summaryConfig.current.scrollIntoView({block:'start'});
-  },[summaryRequest,ready]);
+  const [agentDraft,setAgentDraft]=useState(null);
+  const [eventAssignments,setEventAssignments]=useState({});
   const [status,setStatus]=useState("");
   const [busy,setBusy]=useState(false);
   useEffect(()=>{
     let active=true;
     instanceSettings().then(value=>{if(active)setConfig(value);}).catch(error=>{if(active)setStatus(error.message);});
-    const saved=event=>setConfig(current=>current?{...current,settings_version:event.detail.settings_version,recall:event.detail.recall,features:event.detail.features,pipeline:{...current.pipeline,auto_enabled:event.detail.pipeline.auto_enabled}}:current);
+    const saved=event=>setConfig(current=>current?{...current,settings_version:event.detail.settings_version,recall:event.detail.recall,features:event.detail.features,pipeline:current.pipeline}:current);
     window.addEventListener('serein:settings-saved',saved);
     return()=>{active=false;window.removeEventListener('serein:settings-saved',saved);};
   },[]);
@@ -100,8 +94,8 @@ export function ModelSettings({page,summaryRequest=0,onOpenPipeline,onOpenCatalo
       });
       const upstreams=upstreamsForSave(config.upstreams || [],upstreamForm.current);
       if(catalogOnly){
-        const result=await instanceSettings({expected_version:config.settings_version,models,upstreams,assignments:config.assignments});
-        setConfig(current=>({...current,settings_version:result.settings_version,models:result.models,upstreams:result.upstreams,assignments:result.assignments,
+        const result=await instanceSettings({expected_version:config.settings_version,models,upstreams,assignments:Object.fromEntries(Object.entries(config.assignments).filter(([key])=>!(key in eventAssignments)))});
+        setConfig(current=>({...current,settings_version:result.settings_version,models:result.models,upstreams:result.upstreams,assignments:{...result.assignments,...eventAssignments},
           memory_ready:result.memory_ready,index_status:result.index_status,upstream:{...current.upstream,memory_enabled:result.upstream.memory_enabled}}));
         setStatus("上游与模型已保存。");
         return;
@@ -114,14 +108,29 @@ export function ModelSettings({page,summaryRequest=0,onOpenPipeline,onOpenCatalo
         throw new Error('长文起切字数需填写 1 到 100000 之间的整数。');
       for(const [value,max,label] of [[embeddingBatchSize,64,'向量每批条数'],[embeddingConcurrency,4,'向量请求并发数']])
         if(value===''||!Number.isInteger(Number(value))||Number(value)<1||Number(value)>max)throw new Error(`${label}需填写 1 到 ${max} 之间的整数。`);
-      const result=await instanceSettings({expected_version:config.settings_version,models,upstreams,assignments:config.assignments,...(Object.keys(pipelineDraft).length?{pipeline:pipelineDraft}:{}),dream:config.dream,
+      const result=await instanceSettings({expected_version:config.settings_version,models,upstreams,assignments:Object.fromEntries(Object.entries(config.assignments).filter(([key])=>!taskGroups.find(group=>group.key==="events").tasks.includes(key))),dream:config.dream,
         recall:{...passageDraft,...Object.fromEntries(Object.entries(indexDraft).map(([key,value])=>[key,key==='index_catch_up'?value:Number(value)])),...('passage_min_chars' in passageDraft?{passage_min_chars:Number(passageMinChars)}:{}),
           ...(recallThreshold!==null?{direct_threshold:Number(threshold)}:{}),
           ...Object.fromEntries(Object.entries(candidateThresholdDraft).map(([key,value])=>[key,Number(value)]))},upstream:{
         writer_enabled:config.upstream.writer_enabled,memory_enabled:config.upstream.memory_enabled,operit_enabled:config.upstream.operit_enabled}});
-      setConfig(result);setPipelineDraft({});setIndexDraft({});setRecallThreshold(null);setCandidateThresholdDraft({});setPassageDraft({});setStatus("设置已保存。");
+      setConfig(current=>({...result,pipeline:current.pipeline,assignments:{...result.assignments,...eventAssignments}}));setIndexDraft({});setRecallThreshold(null);setCandidateThresholdDraft({});setPassageDraft({});setStatus("设置已保存。");
     } catch(error){setStatus(error.message);}
     finally{setBusy(false);}
+  }
+  function eventOption(key,value) {
+    setEventAssignments(current=>({...current,[key]:value}));
+    setConfig(current=>({...current,assignments:{...current.assignments,[key]:value}}));
+  }
+  async function saveSummary(event) {
+    event.preventDefault();setBusy(true);setStatus('');
+    try {
+      const result=await instanceSettings({expected_version:config.settings_version,
+        pipeline:pipelineDraft,assignments:eventAssignments,
+        ...(agentDraft!==null?{features:{pipeline_agent:agentDraft}}:{})});
+      setConfig(current=>({...current,settings_version:result.settings_version,pipeline:result.pipeline,features:result.features,
+        assignments:{...current.assignments,...Object.fromEntries(taskGroups.find(group=>group.key==='events').tasks.map(key=>[key,result.assignments[key]||'']))}}));
+      setPipelineDraft({});setEventAssignments({});setAgentDraft(null);setStatus('自动摘要设置已保存。');
+    } catch(error){setStatus(error.message);}finally{setBusy(false);}
   }
   async function recoverIndex() {
     if(busy || !window.confirm('恢复将授权最多三次索引尝试，可能产生 embedding 费用。请先修正错误；若上次操作中断，请核对提供方用量。'))return;
@@ -160,7 +169,7 @@ export function ModelSettings({page,summaryRequest=0,onOpenPipeline,onOpenCatalo
       <section className="settings-group" aria-label="各功能使用的模型">
         {config&&<form onSubmit={save}>
       <div className="settings-group__heading model-assignments-heading"><h3>功能使用的模型</h3><p>已选为向量或重排的模型不出现在聊天模型选项中，各功能可在此选择已配置的模型。留空的可选任务保持关闭。</p></div>
-      <div className="model-assignment-groups">{taskGroups.map(group=><section className="model-assignment-group" key={group.key} aria-labelledby={`model-group-${group.key}`}>
+      <div className="model-assignment-groups">{taskGroups.filter(group=>group.key!=="events").map(group=><section className="model-assignment-group" key={group.key} aria-labelledby={`model-group-${group.key}`}>
         <div className="model-assignment-group__heading"><h4 id={`model-group-${group.key}`}>{group.title}</h4><p>{group.help}</p></div>
         <div className="model-assignments">{group.tasks.map(key=>{const link=taskLinks[key];return <div className="settings-field model-assignment" key={key}>
           <span><label htmlFor={`task-model-${key}`}>{tasks[key]}</label>{link&&<> · <a className="settings-link model-assignment__link" href={link.href} target="_blank" rel="noreferrer">{link.label}</a></>}</span>
@@ -168,7 +177,6 @@ export function ModelSettings({page,summaryRequest=0,onOpenPipeline,onOpenCatalo
             <option value="">未选择</option>{taskModelOptions(availableModels,config.assignments,key).map(model=><option key={model.id} value={model.id}>{model.upstream_name}/{model.label || model.model || "新模型"}</option>)}
           </select></div>})}</div>
       </section>)}</div>
-      <p className="model-connection-help">Event Writer 要核对原话、人物、因果和修订，再写出自然正文；建议为“原话 · Event 写作”选择理解和写作能力较强的模型。</p>
       <p className="model-connection-help">“打标”为事件和 Scene 补充主域大标签、提取有原文出处的实体，也为长记忆已有的 cues 绑定 passage。已有主域和正文保持不变；实体别名只留作建议。主域与短描述在地下室的“主域边界”管理。</p>
       <p className="model-connection-help">“Event · Arc 归档”为可选任务：先按 Event 正文中的关键词缩小已有 Arc，再让模型判断是否归入。它不读取聊天原话或叙事卷正文，不创建新 Arc；留空即关闭。</p>
       {config.assignments.dreams&&<><label className="settings-field"><span>每日做梦概率（%）</span>
@@ -206,34 +214,7 @@ export function ModelSettings({page,summaryRequest=0,onOpenPipeline,onOpenCatalo
         candidateDraft={candidateThresholdDraft} setCandidateDraft={setCandidateThresholdDraft} disabled={busy}
         onSaved={result=>setConfig(current=>({...current,settings_version:result.settings_version,recall:result.recall}))}/>
       <label className="settings-toggle"><span><strong>整理 Operit 注入上下文</strong><small>识别系统前缀、附件和工作区，保留工具续轮的稳定上下文。</small></span><input type="checkbox" role="switch" checked={config.upstream.operit_enabled} onChange={event=>option("operit_enabled",event.target.checked)} /></label>
-    <details className="settings-disclosure" ref={summaryConfig}><summary>自动摘要配置</summary><p>有时间按 20 分钟沉默切块；无时间按 20 轮完整问答切块。每块再受字符量限制，保留完整问答和原始编号。时间切块只控制输入，不直接决定 Event 边界。</p>
-      <p>自动摘要可能有遗漏或误解，重要内容请对照原始对话核对。</p>
-      <label className="settings-field"><span>自动 Event 执行方式</span><select value={config.pipeline.execution_mode||'legacy'} onChange={event=>pipelineOption('execution_mode',event.target.value)}>
-        {(!config.pipeline.execution_mode||config.pipeline.execution_mode==='legacy')&&<option value="legacy">沿用旧配置（各阶段分别执行）</option>}<option value="api">API</option><option value="agent">Agent</option></select></label>
-      <p>{config.pipeline.execution_mode==='agent'?'通过已认证的 Agent 执行器领取任务。阶段模型选择作为执行提示，执行器需按提示使用相应模型；仅切换此选项不会启动本机 CLI。':'在本页为归线、图片转录、切分、Event 写作分别选模型。图片逐张转录后交给切分和 Writer；图片模型留空时，用切分模型执行转录，该模型仍需视觉能力。图片转录 API 需支持图片和 JSON；Writer 只读文字与转录，不需要视觉能力。'}</p>
-      {Object.entries({max_prompt_chars:['完整提示词字符上限',8000,4000000],timeout_seconds:['模型读取超时（秒）',30,1800],event_writer_concurrency:['Event Writer 首轮并发数',1,8],track_lookback_days:['归线 Track 回看天数',1,365]}).map(([key,[label,min,max]])=>
-        <label className="settings-field" key={key}><span>{label}</span><input type="number" min={min} max={max} value={config.pipeline[key] ?? (key==='track_lookback_days'?3:'')} onChange={event=>pipelineOption(key,Number(event.target.value))}/></label>)}
-      {[
-        ['joint_review_enabled','跨线联合审阅','有明确桥接时，让 Curator 一次核对相连的少量 Track；合并 Event 仍须逐字证据。'],
-        ['material_review_enabled','逐条材料取舍','让 Curator 标明每条 owned 原话的写作用途，再传给 Writer；来源绑定仍完整保留。'],
-        ['round_gate_enabled','普通交流轮次门槛','至少两轮完整交流才进入 Writer；未结束的短段等待后续原话，明确结束的短段跳过。'],
-        ['append_protected_enabled','受保护 Event 后续追加','若旧 Event 只因叙事卷或 Scene 引用受保护，后续新经历可追加为新版本；旧正文、标题和召回设置保持原样。'],
-      ].map(([key,label,help])=><label className="settings-toggle" key={key}><span><strong>{label}</strong><small>{help}</small></span>
-        <input type="checkbox" role="switch" checked={config.pipeline[key]===true}
-          onChange={event=>pipelineOption(key,event.target.checked)}/></label>)}
-      <small>“完整提示词字符上限”是最终模型调用保护，可按所用模型上下文提高到 4000000；修改后下一次继续当前批次即可生效。</small>
-      <small>只并发 Curator 已冻结计划后的第一轮 Event Writer；Router、Curator、补读与最终结算保持串行。Agent 模式仍一次领取一个 Writer 任务。默认 1。</small>
-      <small>默认回看 3 天（72 小时）：归线读取这段时间内实际归入过原话的 Track，不依赖聊天窗口。旧 Event 不按时间过期；同一 Track 超过 8 条 active leaves 时只 defer 该 Track，避免截断候选后误写。天数修改对新批次生效，已冻结任务保持原材料。</small>
-      <label className="settings-toggle"><span><strong>精简归线候选（实验）</strong><small>候选卡不附旧原话，本轮原话和最近上下文保留。可减少输入量；省略指代较多时可能影响续接判断。</small></span><input type="checkbox" role="switch" checked={config.pipeline.router_compact_cards ?? false} onChange={event=>pipelineOption('router_compact_cards',event.target.checked)}/></label>
-      <label className="settings-toggle"><span><strong>检索归线候选（实验）</strong><small>默认关闭，完整带入回看范围内的旧卡。开启后，近线完整带入，较早的卡由程序检索补充；可能漏接或改变分线。</small></span><input type="checkbox" role="switch" checked={config.pipeline.track_candidates_enabled ?? false} onChange={event=>pipelineOption('track_candidates_enabled',event.target.checked)}/></label>
-      {config.pipeline.track_candidates_enabled && <>
-        <label className="settings-field"><span>直接带入最近活动的 Track</span><select value={config.pipeline.track_direct_hours ?? 12} onChange={event=>pipelineOption('track_direct_hours',Number(event.target.value))}>{[12,24,48,72].map(hours=><option key={hours} value={hours}>最近 {hours} 小时</option>)}</select></label>
-        <label className="settings-field"><span>额外检索候选上限（默认 8 张）</span><input type="number" min="1" max="50" value={config.pipeline.track_candidate_limit ?? 8} onChange={event=>pipelineOption('track_candidate_limit',Number(event.target.value))}/></label>
-        <small>使用整批新原文和附近前文，搜索旧卡的标题、续接线索及近期原文；程序排除已直接带入的卡并去重。只筛选本次输入，卡片和原文仍完整保存。对新批次生效，已冻结任务保留原输入。</small>
-      </>}
-      <button type="button" className="settings-link" onClick={onOpenPipeline}>查看整理进度与导入原话</button>
-    </details>
-          <AgentGuide label="配置 Agent 整理 Event" />
+
           <AgentGuide initial="writer" label="配置 Agent 撰写叙事卷" />
           <div className="settings-actions"><button disabled={busy} type="submit">{busy?"处理中…":"保存配置"}</button>
             <button disabled={busy || !config.assignments.embedding || (config.index_status && config.index_status.status !== "ready")} type="button" onClick={prepare}>建立 / 补齐检索索引</button></div>
@@ -252,6 +233,57 @@ export function ModelSettings({page,summaryRequest=0,onOpenPipeline,onOpenCatalo
         </form>}
         <p role="status">{status}</p>
       </section>
+    </div>
+    <div role="tabpanel" id="settings-content-summary" aria-labelledby="settings-tab-summary" aria-hidden={page!=="summary"} inert={page!=="summary"}>
+      <section className="settings-group" aria-label="自动摘要管理"><div className="settings-group__heading"><h3>自动摘要管理</h3><p>开关、模型、输入范围与执行方式在这里统一保存。</p></div>
+      <button type="button" className="settings-link" onClick={onOpenEventGuide}>了解模型调用与费用</button>
+      <p className="model-connection-help">Event Writer 要核对原话、人物、因果和修订，再写出自然正文；建议为“原话 · Event 写作”选择理解和写作能力较强的模型。</p>
+      {config&&<form onSubmit={saveSummary}><fieldset className="model-settings-fields" disabled={busy}>
+      <label className="settings-toggle"><span><strong>自动摘要</strong><small>自动把新聊天整理为 Event。每次从关闭改为开启时，从保存后的新原话开始，不补跑此前积压。</small></span><input type="checkbox" role="switch" checked={config.pipeline.auto_enabled!==false} onChange={event=>pipelineOption('auto_enabled',event.target.checked)}/></label>
+      <label className="settings-toggle"><span><strong>减小输入</strong><small>仅向切分模型提供旧 Event 正文，需要时再补读原话。可能漏掉旧细节，影响续接判断或材料取舍；不能保证模型会主动补读。默认关闭，保存后用于新批次。</small></span><input type="checkbox" role="switch" checked={config.pipeline.curator_summary_first??false} onChange={event=>pipelineOption('curator_summary_first',event.target.checked)}/></label>
+      <label className="settings-toggle"><span><strong>自动摘要 Agent 工具</strong><small>允许外部 Agent 领取任务、提交结果和重建计划；与自动摘要开关独立。</small></span><input type="checkbox" role="switch" checked={agentDraft??!!config.features.pipeline_agent} onChange={event=>setAgentDraft(event.target.checked)}/></label>
+      <div className="model-assignment-groups">{taskGroups.filter(group=>group.key==="events").map(group=><section className="model-assignment-group" key={group.key} aria-labelledby={`model-group-${group.key}`}>
+        <div className="model-assignment-group__heading"><h4 id={`model-group-${group.key}`}>阶段模型</h4><p>{group.help}</p></div>
+        <div className="model-assignments">{group.tasks.map(key=>{const link=taskLinks[key];return <div className="settings-field model-assignment" key={key}>
+          <span><label htmlFor={`task-model-${key}`}>{tasks[key]}</label>{link&&<> · <a className="settings-link model-assignment__link" href={link.href} target="_blank" rel="noreferrer">{link.label}</a></>}</span>
+          <select id={`task-model-${key}`} aria-label={tasks[key]} value={config.assignments[key] || ""} onChange={event=>eventOption(key,event.target.value)}>
+            <option value="">未选择</option>{taskModelOptions(availableModels,config.assignments,key).map(model=><option key={model.id} value={model.id}>{model.upstream_name}/{model.label || model.model || "新模型"}</option>)}
+          </select></div>})}</div>
+      </section>)}</div>
+    <section className="model-assignment-group summary-runtime-settings" aria-labelledby="summary-runtime-title">
+      <div className="model-assignment-group__heading"><h4 id="summary-runtime-title">运行与输入</h4></div>
+      <div className="summary-settings-notes"><p>有时间按 20 分钟沉默切块；无时间按 20 轮完整问答切块。每块再受字符量限制，保留完整问答和原始编号。时间切块只控制输入，不直接决定 Event 边界。</p>
+      <p>自动摘要可能有遗漏或误解，重要内容请对照原始对话核对。</p>
+      <p>“完整提示词字符上限”是最终模型调用保护，可按所用模型上下文提高到 4000000；修改后下一次继续当前批次即可生效。</p>
+      <p>只并发 Curator 已冻结计划后的第一轮 Event Writer；Router、Curator、补读与最终结算保持串行。Agent 模式仍一次领取一个 Writer 任务。默认 1。</p>
+      <p>默认回看 3 天（72 小时）：归线读取这段时间内实际归入过原话的 Track，不依赖聊天窗口。旧 Event 不按时间过期；同一 Track 超过 8 条 active leaves 时只 defer 该 Track，避免截断候选后误写。天数修改对新批次生效，已冻结任务保持原材料。</p></div>
+      <label className="settings-field"><span>自动 Event 执行方式</span><select value={config.pipeline.execution_mode||'legacy'} onChange={event=>pipelineOption('execution_mode',event.target.value)}>
+        {(!config.pipeline.execution_mode||config.pipeline.execution_mode==='legacy')&&<option value="legacy">沿用旧配置（各阶段分别执行）</option>}<option value="api">API</option><option value="agent">Agent</option></select></label>
+      <p>{config.pipeline.execution_mode==='agent'?'通过已认证的 Agent 执行器领取任务。阶段模型选择作为执行提示，执行器需按提示使用相应模型；仅切换此选项不会启动本机 CLI。':'在本页为归线、图片转录、切分、Event 写作分别选模型。图片逐张转录后交给切分和 Writer；图片模型留空时，用切分模型执行转录，该模型仍需视觉能力。图片转录 API 需支持图片和 JSON；Writer 只读文字与转录，不需要视觉能力。'}</p>
+      {Object.entries({max_prompt_chars:['完整提示词字符上限',8000,4000000],timeout_seconds:['模型读取超时（秒）',30,1800],event_writer_concurrency:['Event Writer 首轮并发数',1,8],track_lookback_days:['归线 Track 回看天数',1,365]}).map(([key,[label,min,max]])=>
+        <label className="settings-field" key={key}><span>{label}</span><input type="number" min={min} max={max} value={config.pipeline[key] ?? (key==='track_lookback_days'?3:'')} onChange={event=>pipelineOption(key,Number(event.target.value))}/></label>)}
+      <div className="summary-option-group"><h5>审阅与写入</h5>{[
+        ['joint_review_enabled','跨线联合审阅','有明确桥接时，让 Curator 一次核对相连的少量 Track；合并 Event 仍须逐字证据。'],
+        ['material_review_enabled','逐条材料取舍','让 Curator 标明每条 owned 原话的写作用途，再传给 Writer；来源绑定仍完整保留。'],
+        ['round_gate_enabled','普通交流轮次门槛','至少两轮完整交流才进入 Writer；未结束的短段等待后续原话，明确结束的短段跳过。'],
+        ['append_protected_enabled','受保护 Event 后续追加','若旧 Event 只因叙事卷或 Scene 引用受保护，后续新经历可追加为新版本；旧正文、标题和召回设置保持原样。'],
+      ].map(([key,label,help])=><label className="settings-toggle" key={key}><span><strong>{label}</strong><small>{help}</small></span>
+        <input type="checkbox" role="switch" checked={config.pipeline[key]===true}
+          onChange={event=>pipelineOption(key,event.target.checked)}/></label>)}</div>
+      <div className="summary-option-group"><h5>归线候选实验</h5>
+      <label className="settings-toggle"><span><strong>精简归线候选（实验）</strong><small>候选卡不附旧原话，本轮原话和最近上下文保留。可减少输入量；省略指代较多时可能影响续接判断。</small></span><input type="checkbox" role="switch" checked={config.pipeline.router_compact_cards ?? false} onChange={event=>pipelineOption('router_compact_cards',event.target.checked)}/></label>
+      <label className="settings-toggle"><span><strong>检索归线候选（实验）</strong><small>默认关闭，完整带入回看范围内的旧卡。开启后，近线完整带入，较早的卡由程序检索补充；可能漏接或改变分线。</small></span><input type="checkbox" role="switch" checked={config.pipeline.track_candidates_enabled ?? false} onChange={event=>pipelineOption('track_candidates_enabled',event.target.checked)}/></label>
+      {config.pipeline.track_candidates_enabled && <>
+        <label className="settings-field"><span>直接带入最近活动的 Track</span><select value={config.pipeline.track_direct_hours ?? 12} onChange={event=>pipelineOption('track_direct_hours',Number(event.target.value))}>{[12,24,48,72].map(hours=><option key={hours} value={hours}>最近 {hours} 小时</option>)}</select></label>
+        <label className="settings-field"><span>额外检索候选上限（默认 8 张）</span><input type="number" min="1" max="50" value={config.pipeline.track_candidate_limit ?? 8} onChange={event=>pipelineOption('track_candidate_limit',Number(event.target.value))}/></label>
+        <small>使用整批新原文和附近前文，搜索旧卡的标题、续接线索及近期原文；程序排除已直接带入的卡并去重。只筛选本次输入，卡片和原文仍完整保存。对新批次生效，已冻结任务保留原输入。</small>
+      </>}
+      </div>
+      <button type="button" className="settings-link" onClick={onOpenPipeline}>查看整理进度与导入原话</button>
+    </section>
+          <AgentGuide label="配置 Agent 整理 Event" />
+      <div className="settings-actions"><button disabled={busy} type="submit">{busy?'处理中…':'保存自动摘要设置'}</button></div>
+      </fieldset></form>}<p role="status">{status}</p></section>
     </div>
   </>;
 }

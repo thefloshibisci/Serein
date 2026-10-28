@@ -3,7 +3,7 @@ import copy
 
 import pytest
 
-from serein.extensions import pipeline_latest as latest
+from serein.extensions import pipeline as pipeline, pipeline_latest as latest
 from serein.extensions.pipeline_materials import retains_boundary_quote
 
 
@@ -147,6 +147,88 @@ def test_prompts_explain_opt_in_bridge_evidence_and_default_exclusive_evidence()
     component, _ = case()
     enabled = latest.build_event_track_curator_prompt('2025-01-01', component)
     assert '不要删改完整 bridge ownership' in enabled and '引文不得跨越省略片段拼接' in enabled
+    assert 'activity_role 由 host 生成' in enabled
+    assert 'stable units 全是其他 Track 给它的 bridge' in enabled
     component['writer_material_review'] = False
     disabled = latest.build_event_track_curator_prompt('2025-01-01', component)
     assert '边界证据须从左右各自独占的 owned 原文逐字引用' in disabled
+
+
+def foreign_bridge_component():
+    messages = [
+        {'id': 1, 'session_id': 1, 'role': 'user', 'content': 'Synthetic bridge question.',
+         'created_at': '2025-01-01T00:00:00Z'},
+        {'id': 2, 'session_id': 1, 'role': 'assistant', 'content': 'Synthetic bridge answer.',
+         'created_at': '2025-01-01T00:01:00Z'},
+    ]
+    return {
+        'messages': messages, 'context_messages': messages, 'track_ids': ['b'],
+        'track_cards': [{'track_id': 'b'}], 'context_session_ids': [1],
+        'memberships': [{'unit_root_message_id': 1, 'source_message_ids': [1, 2],
+                         'session_id': 1, 'track_id': 'a', 'routing_role': 'bridge'}],
+        'context_edges': [{'unit_root_message_id': 1, 'track_id': 'b', 'relation': 'bridge'}],
+        'continuity_pairs': [], 'parked_context_source_ids': [], 'base_event_candidates': [],
+        'writer_material_review': False,
+    }
+
+
+def test_foreign_bridge_only_corridor_must_skip_instead_of_creating_event():
+    component = foreign_bridge_component()
+    create = {
+        'events': [{'action': 'create', 'base_event_ids': [], 'primary_track_id': 'b',
+                    'owned_unit_roots': [1]}],
+        'skip_unit_roots': [], 'defer_unit_roots': [],
+    }
+    with pytest.raises(ValueError) as caught:
+        latest._expand_compact_event_curator_output(create, component)
+    error = str(caught.value)
+    assert "Event #1 has no generated primary_activity" in error
+    assert "owned_unit_roots=[1]" in error
+    assert "unit_primary_track': 'a'" in error
+    assert "primary_track_id='b'" in error
+    assert 'foreign bridge units must skip/defer' in error
+
+    skipped = latest.normalize_event_curator_output({
+        'events': [], 'skip_unit_roots': [1], 'defer_unit_roots': [],
+        'decision_review': {'events': [], 'boundaries': [], 'dispositions': [{
+            'disposition': 'skip', 'unit_roots': [1],
+            'reason': 'This side has only a foreign bridge unit.',
+            'parked_source_message_ids': [],
+        }]},
+    }, component)
+    assert skipped['events'] == []
+    assert skipped['skip_source_message_ids'] == [1, 2]
+
+
+def test_host_shortcuts_only_bridge_corridors_without_a_primary_or_defer_path():
+    component = foreign_bridge_component()
+    plan = pipeline.bridge_only_skip_plan(component)
+    assert plan['events'] == []
+    assert plan['skip_source_message_ids'] == []
+    assert plan['host_bridge_only_skips'] == [{
+        'primary_track_id': 'b', 'unit_roots': [1], 'source_message_ids': [1, 2],
+        'reason': 'foreign_bridge_only'}]
+
+    inherited = copy.deepcopy(component)
+    inherited['base_event_candidates'] = [{
+        'event_id': 'old-b', 'source_message_ids': [101],
+        'source_activity_roles': {'101': 'primary_activity'},
+    }]
+    assert pipeline.bridge_only_skip_plan(inherited) is None
+
+    legacy_inherited = copy.deepcopy(inherited)
+    legacy_inherited['base_event_candidates'][0].pop('source_activity_roles')
+    assert pipeline.bridge_only_skip_plan(legacy_inherited) is None
+
+    bridge_inherited = copy.deepcopy(inherited)
+    bridge_inherited['base_event_candidates'][0]['source_activity_roles']['101'] = 'bridge'
+    assert pipeline.bridge_only_skip_plan(bridge_inherited)['skip_source_message_ids'] == []
+
+    parked = copy.deepcopy(component)
+    parked['parked_context_source_ids'] = [99]
+    assert pipeline.bridge_only_skip_plan(parked) is None
+
+    local = copy.deepcopy(component)
+    local['memberships'][0].update(track_id='b', routing_role='primary_activity')
+    local['context_edges'] = []
+    assert pipeline.bridge_only_skip_plan(local) is None
