@@ -1,16 +1,17 @@
 import { EventMailboxPage } from "./pages/EventMailboxPage.jsx";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { UsageGuide } from "./components/UsageGuide.jsx";
 import { Sidebar } from "./components/Sidebar.jsx";
 import { AwakePage } from "./pages/AwakePage.jsx";
 import { MemoryPage } from "./pages/MemoryPage.jsx";
-import { NarrativePage } from "./pages/NarrativePage.jsx";
-import { DiaryPage } from "./pages/DiaryPage.jsx";
-import { BasementPage } from "./pages/BasementPage.jsx";
 import { GardenPage } from "./pages/GardenPage.jsx";
 import "./garden-page.css";
 import { PersonaPage, MemosPage } from "./pages/CompanionPages.jsx";
 import { ResumePage } from "./pages/ResumePage.jsx";
+
+const NarrativePage = lazy(() => import('./pages/NarrativePage.jsx').then(module => ({default: module.NarrativePage})));
+const DiaryPage = lazy(() => import('./pages/DiaryPage.jsx').then(module => ({default: module.DiaryPage})));
+const BasementPage = lazy(() => import('./pages/BasementPage.jsx').then(module => ({default: module.BasementPage})));
 
 const availableAreas = new Set(["沉淀", "醒来", "记忆", "叙事卷", "日记", "地下室", "花园", "设置", "心绪", "备忘", "使用说明", "换窗"]);
 const areaHashes = {
@@ -46,6 +47,10 @@ const readAreaFromHash = () => {
 export function App() {
   const root = useRef(null);
   const [activeArea, setActiveArea] = useState(readAreaFromHash);
+  const [visitedAreas, setVisitedAreas] = useState(() => new Set([readAreaFromHash()]));
+  useEffect(() => {
+    setVisitedAreas(previous => previous.has(activeArea) ? previous : new Set([...previous, activeArea]));
+  }, [activeArea]);
   const [helpPage, setHelpPage] = useState(null);
   const [, refreshIdentity] = useState(0);
   useEffect(() => {
@@ -184,7 +189,9 @@ export function App() {
       </section>
 
       <section className="narrative-page" aria-label="叙事卷" hidden={activeArea !== "叙事卷"}>
-        <NarrativePage />
+        <Suspense fallback={<p role="status">正在打开叙事卷…</p>}>
+          {(activeArea === '叙事卷' || visitedAreas.has('叙事卷')) && <NarrativePage />}
+        </Suspense>
         <Sidebar
           activeArea={activeArea}
           onNavigate={navigateTo}
@@ -194,7 +201,9 @@ export function App() {
       </section>
 
       <section className="diary-page" aria-label="日记" hidden={activeArea !== "日记"}>
-        <DiaryPage />
+        <Suspense fallback={<p role="status">正在打开日记…</p>}>
+          {(activeArea === '日记' || visitedAreas.has('日记')) && <DiaryPage />}
+        </Suspense>
         <Sidebar
           activeArea={activeArea}
           onNavigate={navigateTo}
@@ -204,7 +213,9 @@ export function App() {
       </section>
 
       <section className="basement-page" aria-label="地下室" hidden={activeArea !== "地下室"}>
-        <BasementPage />
+        <Suspense fallback={<p role="status">正在打开地下室…</p>}>
+          {(activeArea === '地下室' || visitedAreas.has('地下室')) && <BasementPage />}
+        </Suspense>
         <Sidebar
           activeArea={activeArea}
           onNavigate={navigateTo}

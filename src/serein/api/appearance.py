@@ -2,6 +2,7 @@
 import base64
 import binascii
 import json
+import hashlib
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -37,12 +38,28 @@ def routes(settings, auth):
     router = APIRouter(dependencies=auth)
 
     @router.get('/v1/appearance/images')
-    def read(response: Response):
+    def read(response: Response, metadata: bool = False):
         response.headers['Cache-Control'] = 'no-store'
         with Store(settings.database, read_only=True) as store:
             rows = store.conn.execute('SELECT name,value_json FROM background_state WHERE name IN (?,?,?)',
                                       [PREFIX + key for key in KEYS]).fetchall()
-        return {'images': {row['name'][len(PREFIX):]: json.loads(row['value_json']) for row in rows}}
+        images = {row['name'][len(PREFIX):]: json.loads(row['value_json']) for row in rows}
+        if metadata:
+            images = {key: hashlib.sha256(value.encode()).hexdigest() for key, value in images.items()}
+        return {'images': images}
+
+    @router.get('/v1/appearance/images/{key}')
+    def read_one(key: Literal['user', 'assistant', 'hero'], response: Response, version: str = ''):
+        response.headers['Cache-Control'] = 'no-store'
+        with Store(settings.database, read_only=True) as store:
+            row = store.conn.execute('SELECT value_json FROM background_state WHERE name=?', (PREFIX + key,)).fetchone()
+        if row is None:
+            raise HTTPException(404, 'Image not found')
+        value = json.loads(row['value_json'])
+        digest = hashlib.sha256(value.encode()).hexdigest()
+        if version and version != digest:
+            raise HTTPException(404, 'Image version no longer available')
+        return {'data_url': value, 'version': digest}
 
     @router.put('/v1/appearance/images/{key}')
     async def save(key: Literal['user', 'assistant', 'hero'], request: Request, response: Response):

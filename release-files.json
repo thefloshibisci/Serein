@@ -513,6 +513,8 @@
   "web/tests/gateway.test.mjs",
   "web/tests/host-observation.test.mjs",
   "web/tests/settings-panel-order.test.mjs",
+  "web/tests/appearance-delivery.test.mjs",
+  "web/tests/slow-network-ui.test.mjs",
   "web/tests/memo-date.test.mjs",
   "web/tests/create-uuid.test.mjs",
   "web/tests/memory-preparation.test.mjs",

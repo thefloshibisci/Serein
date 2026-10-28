@@ -107,3 +107,52 @@ test('failure keeps the visible rows and both cursors for a safe retry', async (
   assert.equal(value.loading, false);
   feed.dispose();
 });
+
+test('late personal reviews recover older evidence without replacing the live window or cursor', async () => {
+  let reviews = {};
+  const {feed, calls} = setup([page([row(30)], {has_more:true}),
+    page([row(31)], {reviewed_items:[row(2)], next_after_id:31}), page([])], {reviews:()=>reviews});
+  await feed.refresh('hook');
+  reviews = {'hook-2':{verdict:'useful'}};
+  await feed.refreshReviewed('hook');
+  assert.deepEqual(calls[1].reviewIds, [2]);
+  assert.deepEqual(feed.snapshot().hook.rows.map(r=>r.id), [30]);
+  assert.deepEqual(feed.snapshot().hook.buffered.map(r=>r.id), [31]);
+  assert.deepEqual(feed.snapshot().hook.reviewed.map(r=>r.id), [2]);
+  assert.equal(feed.snapshot().hook.nextBeforeId, 30);
+  assert.equal(feed.snapshot().hook.afterId, 31);
+  await feed.refresh('hook');
+  assert.deepEqual(calls[2].reviewIds, []);
+  feed.dispose();
+});
+
+test('review hydration during an in-flight initial page is reconciled afterwards', async () => {
+  let reviews = {}, resolve;
+  const calls = [];
+  const feed = createObservationFeed({onChange(){},reviews:()=>reviews,request:async (_, options)=>{
+    calls.push(options);
+    return calls.length === 1 ? new Promise(done=>{resolve=done;}) : page([], {reviewed_items:[row(1)]});
+  }});
+  const first = feed.refresh('gateway');
+  reviews = {'1':{verdict:'useful'}};
+  const hydration = feed.refreshReviewed('gateway');
+  resolve(page([row(20)]));
+  await Promise.all([first, hydration]);
+  assert.deepEqual(calls.map(call=>call.reviewIds), [[],[1]]);
+  assert.deepEqual(feed.snapshot().gateway.reviewed.map(r=>r.id), [1]);
+  feed.dispose();
+});
+
+test('a full pending window cannot starve late reviews and resumes pending checks afterwards', async()=>{
+  let reviews={};
+  const pending=Array.from({length:500},(_,n)=>row(n+10,'upstream_pending'));
+  const {feed,calls}=setup([page(pending),page([], {reviewed_items:[row(1)]}),page([])],{reviews:()=>reviews});
+  await feed.refresh('hook');reviews={'hook-1':{}};
+  await feed.refreshReviewed('hook');
+  assert.equal(calls[1].reviewIds.length,500);
+  assert.equal(calls[1].reviewIds[0],1);
+  await feed.refresh('hook');
+  assert.equal(calls[2].reviewIds.length,500);
+  assert.equal(calls[2].reviewIds[0],10);
+  feed.dispose();
+});

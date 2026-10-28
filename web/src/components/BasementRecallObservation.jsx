@@ -216,7 +216,6 @@ export function BasementRecallObservation() {
   const draftRevisionRef = useRef(0);
   const rootRef = useRef(null);
   const bottomRef = useRef(null);
-  const [reviewsReady, setReviewsReady] = useState(false);
   const [source, setSource] = useState("gateway");
   const [filter, setFilter] = useState("all");
   const [reviews, setReviews] = useState(readRecallObservationReviews);
@@ -226,7 +225,7 @@ export function BasementRecallObservation() {
   const [manualSimulations, setManualSimulations] = useState(readRecallSimulationTrainingLabels);
 
   const { feeds, refresh: load, loadEarlier, reveal } = useRecallObservationFeed({
-    source, reviews, ready: reviewsReady, rootRef, bottomRef,
+    source, reviews, ready: true, rootRef, bottomRef,
   });
   const datasets = useMemo(() => ({ hook: feeds.hook.rows, gateway: feeds.gateway.rows }), [feeds]);
   const errors = useMemo(() => Object.fromEntries(Object.entries(feeds).filter(([, feed]) => feed.error).map(([key, feed]) => [key, feed.error])), [feeds]);
@@ -235,8 +234,7 @@ export function BasementRecallObservation() {
   }])), [feeds]);
   const pageLoading = { hook: feeds.hook.loadingEarlier, gateway: feeds.gateway.loadingEarlier };
   const refreshing = feeds[source].loading;
-  const status = !reviewsReady || (!feeds.hook.loaded && !feeds.gateway.loaded && !Object.keys(errors).length)
-    ? 'loading' : feeds.hook.loaded || feeds.gateway.loaded ? 'done' : 'error';
+  const status = feeds[source].loaded ? 'done' : errors[source] ? 'error' : 'loading';
 
   useEffect(() => {
     let cancelled = false;
@@ -248,7 +246,7 @@ export function BasementRecallObservation() {
         window.localStorage.setItem('serein.basement.recall-observation-review.v1', JSON.stringify(Object.fromEntries(rows.map(row => [row.key, row.value]))));
         setManualSimulations(readRecallSimulationTrainingLabels());
       } catch (error) { if (!cancelled) setExportNotice(error.message); }
-      if (!cancelled) { setReviews(readRecallObservationReviews()); setReviewsReady(true); }
+      if (!cancelled) setReviews(readRecallObservationReviews());
     })();
     return () => { cancelled = true; };
   }, []);
@@ -561,7 +559,7 @@ export function BasementRecallObservation() {
       {status === "error" && (
         <div className="basement-error" role="alert">
           <WarningCircle size={19} aria-hidden="true" />
-          <div><strong>两个观测入口都没有读到</strong><p>{Object.values(errors).join(" / ")}</p></div>
+          <div><strong>{sourceLabels[source]}暂时不可用</strong><p>{errors[source]}</p></div>
         </div>
       )}
 
