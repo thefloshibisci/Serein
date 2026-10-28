@@ -29,7 +29,7 @@ import {
 } from "../storage/recallObservationPagination.js";
 import { readRecallSimulationTrainingLabels } from "../storage/recallSimulationTraining.js";
 import { initializePersonal, loadPersonalScope } from "../storage/personalStore.js";
-import { resolveBridgeObservationOutcome, resolveGatewayObservationOutcome, gatewayRequestLabel } from "../recallObservationOutcome.js";
+import { resolveBridgeObservationOutcome, resolveGatewayObservationOutcome, gatewayRequestLabel, hostObservationDetails } from "../recallObservationOutcome.js";
 
 const snapshotRouteLabels = Object.fromEntries(
   semanticRouteSnapshot.routes.map((route) => [route.name, route.label || route.name]),
@@ -181,6 +181,7 @@ function normalizeBridgeObservation(row, routeActions = snapshotRouteActions) {
     trigger,
     hookOutcome,
     messageId: row?.id,
+    ...hostObservationDetails(row),
   };
 }
 
@@ -540,7 +541,7 @@ export function BasementRecallObservation() {
             {label}<span>{count}</span>
           </button>
         ))}
-        <p>{source === "hook" ? "这里显示 Hook 的完成记录；按实际结果区分已注入、未命中与跳过，不代表客户端已显示回复。" : "当前来源每次加载 20 条，页面可见时自动更新；失败和中断不计成功交付，迁入的旧记录标为历史记录。"}</p>
+        <p>{source === "hook" ? "这里显示 APP 及其他 Hook 客户端上报的召回结果；候选记忆与确认交付分别展示，失败和中断不计成功交付。" : "当前来源每次加载 20 条，页面可见时自动更新；失败和中断不计成功交付，迁入的旧记录标为历史记录。"}</p>
       </div>
 
       {feeds[source].buffered.length > 0 && (
@@ -585,7 +586,8 @@ export function BasementRecallObservation() {
         <div className="observation-list">
           {filteredItems.map((item) => {
             const review = reviews[item.id] || {};
-            const preparationOnly = item.source === 'gateway' && ['failed','pending'].includes(item.outcome);
+            const preparationOnly = ['failed','pending'].includes(item.outcome) ||
+              (item.source === 'hook' && item.outcome === 'skip' && item.prepared?.length > 0);
             const memories = preparationOnly ? item.prepared : item.injected;
             const showDraft = ["false_positive", "missed"].includes(review.verdict);
             const form = draftForms[item.id] || { routeName: "", role: "typical" };

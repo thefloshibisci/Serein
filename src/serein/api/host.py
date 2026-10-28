@@ -3,6 +3,7 @@ import json
 from fastapi import APIRouter, HTTPException, Query
 from ..core.store import Store, encode, Conflict
 from ..compat.raw_archive import raw_archive
+from .host_observation import observation, project_observation
 
 
 def routes(settings, auth):
@@ -17,13 +18,24 @@ def routes(settings, auth):
             raise HTTPException(400,'receipt_id, window_id and actually delivered_ids are required')
         if len(body['delivered_ids'])>500 or any(not isinstance(k,str) for k in body['delivered_ids']):
             raise HTTPException(400,'Invalid delivery IDs')
-        payload=encode({k:body[k] for k in ('receipt_id','window_id','delivered_ids')})
+        metadata=observation(body)
+        fields={k:body[k] for k in ('receipt_id','window_id','delivered_ids')}
+        if metadata is not None:
+            fields['observation']=metadata
+        payload=encode(fields)
         with Store(settings.database) as store,store.transaction():
             old=store.conn.execute('SELECT * FROM host_deliveries WHERE receipt_id=?',(body['receipt_id'],)).fetchone()
             if old and old['payload']!=payload:
-                raise Conflict('Delivery receipt already records a different acknowledgement')
+                previous=json.loads(old['payload'])
+                # An older service may have accepted only the legacy fields. Enrich that exact
+                # receipt once; never change its delivery IDs or replace existing diagnostics.
+                if metadata is not None and 'observation' not in previous and previous == {k:body[k] for k in ('receipt_id','window_id','delivered_ids')}:
+                    store.conn.execute('UPDATE host_deliveries SET payload=? WHERE receipt_id=?',(payload,body['receipt_id']))
+                else:
+                    raise Conflict('Delivery receipt already records a different acknowledgement')
             store.conn.execute('INSERT OR IGNORE INTO host_deliveries(receipt_id,payload) VALUES (?,?)',(body['receipt_id'],payload))
-        return {'status':'recorded','reported_by':'host','delivered_ids':body['delivered_ids']}
+        return {'status':'recorded','reported_by':'host','delivered_ids':body['delivered_ids'],
+                'receipt_id':body['receipt_id'], **({'observation_version':1} if metadata is not None else {})}
 
     @router.get('/v1/host/deliveries')
     def history(limit:int=Query(80,ge=1,le=200),before_id:int=0,
@@ -44,7 +56,8 @@ def routes(settings, auth):
             return {'id':row['id'],**payload,'reported_by':payload.get('reported_by','host'),
                 'gateway_memory_injected_ids':payload['delivered_ids'],
                 'hook_memory_outcome':'injected' if payload['delivered_ids'] else 'no_match',
-                'gateway_memory_trigger':'host_acknowledgement','session_id':payload['window_id']}
+                'gateway_memory_trigger':'host_acknowledgement','session_id':payload['window_id'],
+                **project_observation(payload)}
         items=[serialize(row) for row in rows[:limit]]
         next_id=items[-1]['id'] if items else 0
         return {'status':'ok','items':items,'has_more':len(rows)>limit,'next_before_id':next_id,
