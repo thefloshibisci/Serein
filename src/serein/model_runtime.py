@@ -102,12 +102,15 @@ def identity_headers(model, *, window_id=''):
     host = (urlsplit(str(model.get('base_url') or '')).hostname or '').lower()
     if host == 'opencode.ai' or host.endswith('.opencode.ai'):
         if window_id:
-            session = str(window_id)
+            # Window IDs may contain Unicode and are allowed up to 200 characters.
+            # Hash the full identity so headers are ASCII-safe without merging
+            # distinct windows that share a long prefix or exposing their names.
+            session = 'serein-window-' + hashlib.sha256(str(window_id).encode('utf-8')).hexdigest()
         else:
             # Background tasks have no chat window; keep one stable id per upstream model.
             seed = (str(model.get('base_url') or '') + '|' + str(model.get('model') or '')).encode()
             session = 'serein-task-' + hashlib.sha256(seed).hexdigest()[:16]
-        headers['x-opencode-session'] = session[:128]
+        headers['x-opencode-session'] = session
     return headers
 
 

@@ -366,6 +366,7 @@
   "tests/test_pipeline_scenes.py",
   "tests/test_public_edition.py",
   "tests/test_host_observation.py",
+  "tests/test_identity_headers.py",
   "tests/test_public_features.py",
   "tests/test_public_recall_migration.py",
   "tests/test_appearance_images.py",
