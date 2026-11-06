@@ -12,6 +12,7 @@
 | ChatGPT：含 `mapping`、`current_node` 的会话对象或数组 | 只导入当前分支；多分支且缺少 `current_node` 时拒绝猜测 |
 | SillyTavern（酒馆）：JSONL 首行聊天元数据，后续每行一条消息 | 按 `is_user` 区分双方，读取当前 `mes` 正文和 `send_date` 时间；一份导出是一段会话 |
 | DeepSeek / 通用 `messages` JSON | 读取 `role`、`content`，支持会话对象数组或 `conversations` 包装 |
+| OrangeChat `orangechat-chat-history` v1 | 按 `messageNodes.selectIndex` 读取当前分支 text，保留助手、会话与手机消息编号 |
 | `events` JSON、消息对象数组、每行一条消息的 JSONL | 使用显式 `session_id` / `conversation_id` 区分会话 |
 | Markdown / TXT | 识别 `User:`、`AI:`、`用户：`、`助手：` 等角色前缀，以及设置页中的双方名字；无前缀视为一条用户文本 |
 
@@ -28,6 +29,8 @@
 聊天文件导入完成后，可选择“立即从头摘要（后台）”：解除该文件的历史边界并提交后台整理任务，无需开启自动摘要。复用现有整理队列，也会处理其他已开放的待整理原话；模型未配置时等待配置或 Agent。原话不再次导入，已完成的摘要不会重做，可能产生模型费用。也可选择“暂不处理，并推游标到最后一句”：保存该文件的跳过边界，原文保留，不移动全库游标或跳过其他聊天。之后仍可点击从头摘要。不会自动生成 Scene，也不会替其他文件解除边界。
 
 ## Operit 记忆库
+
+OrangeChat 导入沿用手机实时上传的稳定编号，并按明确的助手 ID 与消息 ID 识别旧迁移记录；不同助手不会合并。旧归档的空白规范化不算正文冲突，其他差异报告冲突且不覆盖原话。缺少 finishedAt 的助手文字只归档，不作为已完成回复参与自动整理。推理、工具输出、未选中的备选回复及附件路径不进入原话正文。旧手机无时区时间按上海时区解释，显式时区优先。
 
 支持含 `exportDate`、`memories`、`links` 的 Operit JSON 备份，示例见 [Operit 备份](../examples/operit-memory-file.json)。导入内容保存在当前实例的 Scene、原文与索引存储中。
 

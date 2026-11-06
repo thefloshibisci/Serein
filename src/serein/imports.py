@@ -10,6 +10,8 @@ from pathlib import Path
 from .core.store import Store, Conflict, digest, encode, now
 from .deployment import identity
 from .compat.germany.raw_events import RawEventStore
+from .compat.germany.raw_events import strip_raw_client_context
+from .source_time import source_datetime
 
 DEFAULT_BATCH_SIZE=25
 LARGE_BATCH_SIZE=250
@@ -71,6 +73,59 @@ def chatgpt_messages(conversation):
     return list(reversed(chain))
 
 
+def orangechat_file(data,filename,source_hash):
+    """Import selected visible dialogue with the same IDs as the mobile outbox."""
+    if data.get('version')!=1 or not isinstance(data.get('conversations'),list):
+        raise ValueError('Unsupported OrangeChat export version or conversations')
+    entries=[];seen={};skipped=0;unfinished=0;alternatives=0
+    for conversation in data['conversations']:
+        if not isinstance(conversation,dict):raise ValueError('Invalid OrangeChat conversation')
+        assistant=conversation.get('assistantId');cid=conversation.get('id')
+        if not all(isinstance(v,str) and v.strip() for v in (assistant,cid)):
+            raise ValueError('OrangeChat assistantId and conversation id are required')
+        nodes=conversation.get('messageNodes')
+        if not isinstance(nodes,list):raise ValueError('OrangeChat messageNodes must be a list')
+        for node in nodes:
+            messages=node.get('messages') if isinstance(node,dict) else None
+            selected=node.get('selectIndex') if isinstance(node,dict) else None
+            if not isinstance(messages,list) or type(selected) is not int or not 0<=selected<len(messages):
+                raise ValueError('OrangeChat selected branch is missing or invalid')
+            message=messages[selected];alternatives+=len(messages)-1
+            if not isinstance(message,dict):raise ValueError('Invalid OrangeChat message')
+            role=message.get('role');parts=message.get('parts')
+            if not isinstance(parts,list):raise ValueError('OrangeChat message parts must be a list')
+            text='\n'.join(p['text'] for p in parts if isinstance(p,dict) and p.get('type')=='text' and isinstance(p.get('text'),str) and p['text'])
+            if role not in ('user','assistant') or not text.strip():skipped+=1;continue
+            mid=message.get('id');created=message.get('createdAt')
+            if not isinstance(mid,str) or not mid.strip() or not isinstance(created,str):
+                raise ValueError('OrangeChat message id and createdAt are required')
+            normalized_time=source_datetime(created,'orangechat').isoformat()
+            identity=(assistant,mid)
+            signature=(role,text,normalized_time)
+            if identity in seen:
+                if seen[identity]!=signature:raise ValueError('Same OrangeChat message ID has conflicting exported content')
+                continue
+            seen[identity]=signature
+            incomplete=role=='assistant' and not message.get('finishedAt')
+            unfinished+=incomplete
+            session=f'orangechat:{assistant}:{cid}'
+            # Do not copy reasoning, tool output, configuration or attachment paths.
+            original={k:message.get(k) for k in ('id','role','createdAt','finishedAt')}
+            original['parts']=[{'type':'text','text':p['text']} for p in parts if isinstance(p,dict) and p.get('type')=='text' and isinstance(p.get('text'),str)]
+            entries.append({'source':'orangechat','client':'orangechat','source_event_id':f'{session}:{mid}',
+                'session_id':session,'conversation_id':cid,'role':role,'text':text,'created_at':normalized_time,
+                'metadata':{'assistant_id':assistant,'message_id':mid,'original_message_id':mid,
+                    'original_timestamp':created,'timestamp_source':'export','original_timezone':'Asia/Shanghai' if datetime.fromisoformat(created.replace('Z','+00:00')).tzinfo is None else 'explicit',
+                    'original_message':original,'node_id':node.get('id'),
+                    'conversation_title':conversation.get('title',''),'source_file':Path(filename).name,
+                    'import_format':'orangechat','import_incomplete':incomplete}})
+    warnings=[]
+    if skipped:warnings.append(f'{skipped} 条系统、工具或无文字消息未作为原话导入。')
+    if alternatives:warnings.append(f'{alternatives} 条未选中的备选回复未导入。')
+    if unfinished:warnings.append(f'{unfinished} 条助手消息缺少完成标记：只归档，不作为完整回复参与自动整理。')
+    return {'format':'orangechat','entries':entries,'warnings':warnings,'source_hash':source_hash}
+
+
 def parse_file(content,filename,names,mode='auto',stamp=None):
     stamp=stamp or now();source_hash=digest(content);warnings=[]
     extension=Path(filename).suffix.lower()
@@ -84,6 +139,9 @@ def parse_file(content,filename,names,mode='auto',stamp=None):
     elif extension in ('.md','.txt',''):
         data={'messages':markdown_messages(content,names)}
     else:raise ValueError('支持 .json、.jsonl、.md、.txt 文件')
+    if isinstance(data,dict) and data.get('format')=='orangechat-chat-history':
+        if mode=='operit':raise ValueError('这是 OrangeChat 对话备份，不是 Operit 记忆库')
+        return orangechat_file(data,filename,source_hash)
     is_operit=isinstance(data,dict) and isinstance(data.get('memories'),list) and (
         'exportDate' in data or 'links' in data or any(isinstance(row,dict) and 'uuid' in row for row in data['memories']))
     if mode=='operit' and not is_operit:raise ValueError('文件不是 Operit 记忆备份')
@@ -384,15 +442,39 @@ def import_originals(store,archive,batch,identifier,start,errors,counts):
         for old in store.conn.execute('SELECT source,source_event_id,text,role FROM raw_events '
                 f"WHERE source=? AND source_event_id != '' AND source_event_id IN ({placeholders})",(source,*keys)):
             existing[(old['source'],old['source_event_id'])]=old
+    # Older migrations used node IDs and a different source. Match only explicit
+    # assistant + message identity, never fuzzy text or another assistant's words.
+    mobile_ids={json.loads(event['metadata_json']).get('message_id') for _,event in normalized
+                if json.loads(event['metadata_json']).get('import_format')=='orangechat'}
+    mobile_existing={}
+    if mobile_ids:
+        placeholders=','.join('?' for _ in mobile_ids)
+        for old in store.conn.execute('SELECT id,source,source_event_id,text,role,metadata_json FROM raw_events '
+                f"WHERE COALESCE(json_extract(metadata_json,'$.message_id'),json_extract(metadata_json,'$.original_message_id')) IN ({placeholders})",tuple(mobile_ids)):
+            meta=json.loads(old['metadata_json'])
+            key=(meta.get('assistant_id'),meta.get('message_id') or meta.get('original_message_id'))
+            mobile_existing.setdefault(key,[]).append(old)
     for offset,event in normalized:
         key=(event['source'],event['source_event_id']);old=existing.get(key)
-        if old and (old['text']!=event['text'] or old['role']!=event['role']):
+        meta=json.loads(event['metadata_json']);mobile=meta.get('import_format')=='orangechat'
+        mobile_key=(meta.get('assistant_id'),meta.get('message_id'))
+        candidates=mobile_existing.get(mobile_key,[]) if mobile else []
+        if candidates:
+            old=next((r for r in candidates if r['role']==event['role'] and strip_raw_client_context(r['text'])==strip_raw_client_context(event['text'])),candidates[0])
+        same=old is not None and old['role']==event['role'] and (old['text']==event['text'] or
+            (mobile and strip_raw_client_context(old['text'])==strip_raw_client_context(event['text'])))
+        if old is not None and not same:
             errors.append({'entry':start+offset+1,'message':'同一原始消息 ID 的内容不同，未覆盖已存原话'})
             continue
         if old:status='duplicate'
         else:
-            status,_=archive._insert_event_on_connection(store.conn,event)
-            if status=='inserted':existing[key]=event
+            status,raw_id=archive._insert_event_on_connection(store.conn,event)
+            if status=='inserted':
+                existing[key]=event
+                if mobile:mobile_existing.setdefault(mobile_key,[]).append(event)
+                if mobile and meta.get('import_incomplete'):
+                    store.conn.execute("INSERT OR IGNORE INTO raw_processing VALUES (?,?,'archived_only')",
+                        (raw_id,'incomplete-import:'+identifier))
         counts[status]+=1
 
 

@@ -13,6 +13,73 @@ from serein.import_tagging import process
 
 NAMES={'user_name':'Nori','ai_name':'Atlas'}
 
+
+def frozen_messages(settings,task):
+    with Store(settings.database,read_only=True) as store:
+        row=store.conn.execute('SELECT request_json FROM pipeline_jobs WHERE id=?',(task['job_id'],)).fetchone()
+        return json.loads(row[0])['messages']
+
+
+def orangechat_export():
+    def message(mid,role,text,finished=None):
+        return {'id':mid,'role':role,'createdAt':'2025-01-01T12:00:00',
+                'finishedAt':finished,'parts':[{'type':'reasoning','text':'private reasoning'},
+                    {'type':'text','text':text},{'type':'tool','content':'tool output'}]}
+    return {'format':'orangechat-chat-history','version':1,'conversations':[
+        {'id':'chat','assistantId':'assistant-a','title':'Synthetic conversation','messageNodes':[
+            {'id':'node-u','selectIndex':0,'messages':[message('u','user','  hello\n')]},
+            {'id':'node-a','selectIndex':1,'messages':[message('old','assistant','Unselected'),
+                message('a','assistant','  chosen\n','2025-01-01T12:01:00')]},
+            {'id':'node-partial','selectIndex':0,'messages':[message('partial','assistant','partial reply')]}]}]}
+
+
+def test_orangechat_selected_text_identity_time_and_incomplete():
+    data=orangechat_export();parsed=parse_file(json.dumps(data),'orange.json',NAMES)
+    assert parsed['format']=='orangechat'
+    assert [r['text'] for r in parsed['entries']]==['  hello\n','  chosen\n','partial reply']
+    assert parsed['entries'][1]['source_event_id']=='orangechat:assistant-a:chat:a'
+    assert parsed['entries'][1]['created_at']=='2025-01-01T04:00:00+00:00'
+    assert parsed['entries'][2]['metadata']['import_incomplete'] is True
+    assert 'private reasoning' not in json.dumps(parsed) and 'tool output' not in json.dumps(parsed)
+    assert any('备选' in w for w in parsed['warnings'])
+    data['conversations'][0]['messageNodes'][0]['selectIndex']=99
+    with pytest.raises(ValueError,match='selected branch'):parse_file(json.dumps(data),'orange.json',NAMES)
+
+
+def test_orangechat_live_legacy_dedup_and_conflict(settings):
+    from serein.compat.raw_archive import raw_archive
+    from serein.imports import release_imported_originals
+    data=orangechat_export();parsed=parse_file(json.dumps(data),'orange.json',NAMES)
+    archive=raw_archive(settings)
+    live={**parsed['entries'][0],'metadata':{'assistant_id':'assistant-a','message_id':'u'}}
+    archive.ingest([live])
+    archive.ingest([{'source':'legacy-import','source_event_id':'node-a','role':'assistant',
+        'text':'chosen','created_at':'2025-01-01T12:00:00+08:00','session_id':'chat',
+        'metadata':{'assistant_id':'assistant-a','original_message_id':'a'}}])
+    first=stage(settings.database,json.dumps(data),'orange.json','conversation',False)
+    result=advance_import(settings,first['id'])
+    assert (result['inserted'],result['duplicate'],result['failed'])==(1,2,0)
+    release_imported_originals(settings.database,first['id'])
+    with Store(settings.database) as store:
+        row=store.conn.execute("SELECT id FROM raw_events WHERE source_event_id='orangechat:assistant-a:chat:partial'").fetchone()
+        assert store.conn.execute('SELECT outcome FROM raw_processing WHERE raw_id=?',(row['id'],)).fetchone()[0]=='archived_only'
+    data['conversations'][0]['messageNodes'][1]['messages'][1]['parts'][1]['text']='Changed visible reply'
+    conflict=stage(settings.database,json.dumps(data),'changed.json','conversation',False)
+    result=advance_import(settings,conflict['id'])
+    assert (result['inserted'],result['duplicate'],result['failed'])==(0,2,1)
+    data['conversations'][0]['assistantId']='assistant-b'
+    other=stage(settings.database,json.dumps(data),'other.json','conversation',False)
+    assert advance_import(settings,other['id'])['inserted']==3
+
+
+def test_orangechat_cloned_messages_and_conflicting_ids():
+    data=orangechat_export();clone=json.loads(json.dumps(data['conversations'][0]));clone['id']='cloned-chat'
+    data['conversations'].append(clone)
+    assert len(parse_file(json.dumps(data),'clones.json',NAMES)['entries'])==3
+    clone['messageNodes'][0]['messages'][0]['parts'][1]['text']='Conflicting copy'
+    with pytest.raises(ValueError,match='conflicting exported content'):
+        parse_file(json.dumps(data),'clones.json',NAMES)
+
 @pytest.fixture
 def settings(tmp_path):
     value=Settings(tmp_path/'memory.db',tmp_path/'index.db',writable=True)
@@ -123,7 +190,7 @@ def test_sillytavern_preview_batch_resume_and_explicit_summary(settings):
     release_imported_originals(settings.database,preview['id'])
     task=asyncio.run(advance(settings.database,include_recent=True))
     assert task['role']=='track_router'
-    assert [row['content'] for row in task['request']['messages']]==[row['mes'] for row in rows]
+    assert [row['content'] for row in frozen_messages(settings,task)]==[row['mes'] for row in rows]
 
 
 def test_sillytavern_legacy_header_missing_dates_and_timestamp_collisions():
@@ -449,7 +516,7 @@ def test_import_history_uses_compact_boundary_without_consuming_live_chat(settin
          'created_at':'2026-09-26T12:01:00Z'}],source='live')
     task=asyncio.run(advance(settings.database,include_recent=True))
     assert task['role']=='track_router'
-    assert {item['content'] for item in task['request']['messages']}=={'new question','new answer'}
+    assert {item['content'] for item in frozen_messages(settings,task)}=={'new question','new answer'}
 
 def test_completed_import_can_be_released_into_event_pipeline(settings):
     client=TestClient(create_app(settings,token='test',live=True),headers={'Authorization':'Bearer test'})
@@ -465,7 +532,7 @@ def test_completed_import_can_be_released_into_event_pipeline(settings):
     assert next(row for row in after if row['id']==preview['id'])['event_boundary_active'] is False
     task=asyncio.run(advance(settings.database,include_recent=True))
     assert task['role']=='track_router'
-    assert {row['content'] for row in task['request']['messages']}=={'  original 0\n','  original 1\n'}
+    assert {row['content'] for row in frozen_messages(settings,task)}=={'  original 0\n','  original 1\n'}
     again=client.post('/v1/imports/'+preview['id']+'/include-in-events',json={})
     assert again.status_code==200 and again.json()['released'] is False
 
@@ -502,7 +569,7 @@ def test_import_summary_choice_runs_without_automatic_switch(settings):
     assert again['task']['run_id']==task['run_id']
     result=asyncio.run(work(settings,'pipeline',task['arguments']))
     assert result['role']=='track_router'
-    assert {row['content'] for row in result['request']['messages']}=={'  original 0\n','  original 1\n'}
+    assert {row['content'] for row in frozen_messages(settings,result)}=={'  original 0\n','  original 1\n'}
     from serein.imports import release_imported_originals
     with pytest.raises(ValueError,match='不能再跳过'):
         release_imported_originals(settings.database,preview['id'],skip=True)
@@ -574,7 +641,7 @@ def test_skip_only_affects_selected_import_and_not_live_originals(settings):
         {'source_event_id':'new-live-answer','session_id':'live','role':'assistant',
          'text':'Synthetic live answer','created_at':'2026-09-26T12:01:00Z'}],source='live')
     task=asyncio.run(advance(settings.database,include_recent=True))
-    assert [row['content'] for row in task['request']['messages']]==['Synthetic live message','Synthetic live answer']
+    assert [row['content'] for row in frozen_messages(settings,task)]==['Synthetic live message','Synthetic live answer']
     with Store(settings.database,read_only=True) as store:
         assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==6
         assert store.conn.execute('SELECT count(*) FROM pipeline_import_boundaries WHERE released=0').fetchone()[0]==2
