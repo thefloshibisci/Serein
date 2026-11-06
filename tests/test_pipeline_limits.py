@@ -423,7 +423,9 @@ def test_timeout_durable_diagnostic_and_prompt_budget_before_model(settings,monk
         assert store.conn.execute('SELECT error FROM pipeline_attempts').fetchone()[0]
     # Programmatic low limit tests the final serialized-request guard.
     save_settings(settings.database,{'pipeline':{'max_prompt_chars':1}})
-    with pytest.raises(ValueError,match='提示词'):asyncio.run(p.advance(settings.database,include_recent=True))
+    paused=asyncio.run(p.advance(settings.database,include_recent=True))
+    assert paused['status']=='paused' and paused['repair_kind']=='prompt_budget'
+    assert '提示词' in paused['reason']
     assert len(called)==1
 
 

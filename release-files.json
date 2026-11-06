@@ -358,6 +358,7 @@
   "tests/test_personal.py",
   "tests/test_preferences.py",
   "tests/test_pipeline_limits.py",
+  "tests/test_pipeline_prompt_budget_recovery.py",
   "tests/test_incremental_material_handoff.py",
   "tests/test_incremental_material_repair.py",
   "tests/test_material_snapshots.py",

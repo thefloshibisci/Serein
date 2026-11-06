@@ -1298,12 +1298,21 @@ async def job(database,batch,request,key,runner):
     prompt_chars=len(request['prompt'])+len(request['rules'])
     progress(prompt_chars=prompt_chars,timeout_seconds=policy['timeout_seconds'])
     if prompt_chars>policy['max_prompt_chars']:
-        raise ValueError(
+        reason=(
             f"当前 {request['role']} 提示词共 {prompt_chars} 字符，超过 {policy['max_prompt_chars']} 字符上限；"
             "可直接提高“完整提示词字符上限”后继续当前批次。若希望缩小材料，请降低“每批原话字符上限”后再次继续，"
             "可进一步拆分的未结算批次会按新值重批；单个完整回复包不会被截断，而会独占一批。"
             "原话未截断，已完成阶段保留。"
         )
+        # A local budget rejection is recoverable without invalidating route
+        # evidence. Keep accepted frames and expose the existing retry action.
+        detail={'status':'paused','batch_id':batch['id'],'job_id':identifier,
+                'role':request['role'],'reason':reason,'repair_kind':'prompt_budget',
+                'prompt_chars':prompt_chars,'max_prompt_chars':policy['max_prompt_chars']}
+        with Store(database) as store:
+            store.conn.execute("UPDATE pipeline_batches SET status='paused_failure',result_json=? WHERE id=?",
+                               (encode(detail),batch['id']))
+        raise PausedBatch(reason)
     if request.get('missing_images'):raise ValueError('绑定图片缺少可读取的原图，请补齐图片材料后重建任务；原话仍保留')
     if request['role']=='event_writer' and request.get('images'):
         raise ValueError('Event Writer 只接收图片转录，不接收原图')
