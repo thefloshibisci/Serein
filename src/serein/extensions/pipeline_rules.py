@@ -4,6 +4,7 @@ See docs/public-feature-contracts.md for provenance and host differences.
 import re
 from datetime import datetime, timedelta
 from typing import Any
+from ..source_time import message_datetime
 TRACK_ROUTING_ROLES = {"origin", "primary_activity", "landing", "bridge", "routine"}
 TRACK_EVENT_POLICIES = {"default", "rolling_engineering"}
 
@@ -19,10 +20,10 @@ def flushable_dialogue_units(messages, *, now):
         units = dialogue_units(rows)
         last = -1
         for index, unit in enumerate(units):
-            times = [datetime.fromisoformat(m['created_at'].replace('Z', '+00:00')) for m in unit]
+            times = [message_datetime(m) for m in unit]
             end = max(times)
             if index + 1 < len(units):
-                following = min(datetime.fromisoformat(m['created_at'].replace('Z', '+00:00'))
+                following = min(message_datetime(m)
                                 for m in units[index + 1])
                 paused = following - end >= silence
             else:

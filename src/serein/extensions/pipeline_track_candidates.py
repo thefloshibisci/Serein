@@ -3,6 +3,7 @@ import math
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from ..source_time import source_datetime
 
 STOPWORDS = set('的 了 是 我 你 他 她 我们 你们 这个 那个 一个 这样 那样 然后 但是 就 也 都 啊 嗯 吧 呢 吗 好 可以 老公 哥哥 宝宝 哦 噢 哦哦 哦哦哦 噢噢 噢噢噢 嗯嗯 哈哈 哈哈哈 就是说 感觉'.split())
 
@@ -14,10 +15,9 @@ def tokens(text):
             and not re.fullmatch(r'[哦噢嗯]{2,}|哈{2,}', word)]
 
 
-def stamp(value):
+def stamp(value, source=''):
     try:
-        result = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-        return (result if result.tzinfo else result.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+        return source_datetime(value, source)
     except (ValueError, TypeError):
         return None
 
@@ -25,12 +25,16 @@ def stamp(value):
 def select(cards, messages, recent, policy):
     if not policy.get('track_candidates_enabled', False):
         return list(cards)
-    anchors = [value for message in messages if (value := stamp(message.get('created_at'))) is not None]
+    sources = {message.get('source') or message.get('source_system', '') for message in messages}
+    source = next(iter(sources)) if len(sources) == 1 else ''
+    anchors = [value for message in messages if (value := stamp(message.get('created_at'),
+               message.get('source') or message.get('source_system', ''))) is not None]
     if not anchors:
         return list(cards)
     cutoff = max(anchors) - timedelta(hours=policy.get('track_direct_hours', 12))
     activity = {card['track_id']: max((value for turn in card.get('recent_turns', [])
-                if (value := stamp(turn.get('created_at'))) is not None), default=None) for card in cards}
+                if (value := stamp(turn.get('created_at'), turn.get('source') or turn.get('source_system') or source))
+                is not None), default=None) for card in cards}
     # Missing activity cannot safely prove a card belongs outside the direct window.
     direct = {key for key, value in activity.items() if value is None or value >= cutoff}
     older = [card for card in cards if card['track_id'] not in direct]

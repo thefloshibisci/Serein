@@ -623,5 +623,7 @@
   "web/tests/darkroom-ink.test.mjs",
   "src/serein/source_management.py",
   "web/src/components/OriginalArchive.jsx",
-  "web/src/components/original-archive.css"
+  "web/src/components/original-archive.css",
+  "src/serein/source_time.py",
+  "tests/test_pipeline_source_time.py"
 ]

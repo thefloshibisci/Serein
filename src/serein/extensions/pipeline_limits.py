@@ -1,13 +1,14 @@
 """Transport-sized chunks preserve complete reply envelopes and original IDs."""
 from datetime import datetime, timedelta, timezone
 from .pipeline_rules import dialogue_units
+from ..source_time import message_datetime
 
 DEFAULTS={'max_input_chars':40000,'max_prompt_chars':200000,'timeout_seconds':600}
 
 
 def settlement_window(unit):
     """The first 03:00 UTC+8 watermark containing the WHOLE envelope."""
-    end=max(datetime.fromisoformat(m['created_at'].replace('Z','+00:00')) for m in unit)
+    end=max(message_datetime(m) for m in unit)
     end=end.astimezone(timezone(timedelta(hours=8)))
     boundary=end.replace(hour=3,minute=0,second=0,microsecond=0)
     return boundary if end<=boundary else boundary+timedelta(days=1)
@@ -29,7 +30,7 @@ def blocks(messages, max_chars=40000):
     result=[];current=[];chars=0;turns=0;previous=None
     for unit in dialogue_units(messages):
         known=all(m.get('metadata',{}).get('timestamp_source')!='import_time' for m in unit)
-        start=datetime.fromisoformat(unit[0]['created_at'].replace('Z','+00:00')) if known else None
+        start=message_datetime(unit[0]) if known else None
         size=sum(len(m.get('content',m.get('text',''))) for m in unit)
         silence=start is not None and previous is not None and (start-previous).total_seconds()>=1200
         if size>max_chars:
@@ -40,12 +41,12 @@ def blocks(messages, max_chars=40000):
             if current:
                 result.append(current);current=[];chars=0;turns=0
             result.append(list(unit))
-            previous=datetime.fromisoformat(unit[-1]['created_at'].replace('Z','+00:00')) if known else None
+            previous=message_datetime(unit[-1]) if known else None
             continue
         if current and (silence or turns>=20 or chars+size>max_chars):
             result.append(current);current=[];chars=0;turns=0
         current.extend(unit);chars+=size;turns+=1
-        previous=datetime.fromisoformat(unit[-1]['created_at'].replace('Z','+00:00')) if known else None
+        previous=message_datetime(unit[-1]) if known else None
     if current:result.append(current)
     return result
 

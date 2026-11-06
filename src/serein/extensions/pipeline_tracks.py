@@ -3,6 +3,7 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from ..core.store import digest, encode
+from ..source_time import source_datetime, message_datetime, source_julianday
 from . import pipeline_latest as latest
 
 
@@ -19,16 +20,16 @@ def next_ordinal(scope, cards):
 def assert_before(store, cards, before_id):
     """Pre-routing cards must precede both the raw ID and the source clock."""
     from . import pipeline as p
-    current=store.conn.execute('SELECT created_at FROM raw_events WHERE id=?',(before_id,)).fetchone()
+    current=store.conn.execute('SELECT created_at,source FROM raw_events WHERE id=?',(before_id,)).fetchone()
     if current is None:raise p.RoutingRecoveryError('Pre-routing source anchor is missing')
-    reference=datetime.fromisoformat(current[0].replace('Z','+00:00'))
+    reference=source_datetime(current[0],current[1])
     for card in cards:
         anchors=card.get('recent_source_message_ids')
         if not isinstance(anchors,list) or not anchors:
             raise p.RoutingRecoveryError('Pre-routing Track has no proved source anchors: '+card['track_id'])
         for key in anchors:
-            row=store.conn.execute('SELECT created_at FROM raw_events WHERE id=?',(key,)).fetchone() if type(key) is int else None
-            if row is None or key>=before_id or datetime.fromisoformat(row[0].replace('Z','+00:00'))>reference:
+            row=store.conn.execute('SELECT created_at,source FROM raw_events WHERE id=?',(key,)).fetchone() if type(key) is int else None
+            if row is None or key>=before_id or source_datetime(row[0],row[1])>reference:
                 raise p.RoutingRecoveryError('Pre-routing Track contains future source material: '+card['track_id'])
 
 
@@ -43,9 +44,7 @@ def load_tracks(store, source, session, before_id, message, *, lookback_days=3):
     current=store.conn.execute('SELECT created_at,metadata_json FROM raw_events WHERE id=? AND source=?',
                                (before_id,source)).fetchone()
     if current is None:raise ValueError('Track routing anchor is missing')
-    reference=datetime.fromisoformat(current['created_at'].replace('Z','+00:00'))
-    if reference.tzinfo is None:reference=reference.replace(tzinfo=timezone.utc)
-    reference=reference.astimezone(timezone.utc)
+    reference=source_datetime(current['created_at'],source)
     lower=reference-timedelta(days=lookback_days)
     metadata=json.loads(current['metadata_json'] or '{}')
     boundary=(metadata.get('runtime',''),metadata.get('workspace_root',''))
@@ -60,14 +59,14 @@ def load_tracks(store, source, session, before_id, message, *, lookback_days=3):
         "json_extract(old.result_json,'$.recovery_downgrade.confirmed_by')='REBUILD_PIPELINE_BATCH'",
         (scope,before_id)).fetchone()[0] or 0
     anchors={}
+    clock=source_julianday('r')
     rows=store.conn.execute('SELECT r.*,p.route_json FROM pipeline_routes p JOIN raw_events r ON r.id=p.raw_id '
-        'WHERE r.source=? AND r.id<? AND julianday(r.created_at)>=julianday(?) '
-        'AND julianday(r.created_at)<=julianday(?) ORDER BY r.id DESC',
+        f'WHERE r.source=? AND r.id<? AND ({clock})>=julianday(?) '
+        f'AND ({clock})<=julianday(?) ORDER BY r.id DESC',
         (source,before_id,lower.isoformat(),reference.isoformat()))
     for row in rows:
         if row['id'] < cutoff:continue
-        stamp=datetime.fromisoformat(row['created_at'].replace('Z','+00:00'))
-        if stamp.tzinfo is None:stamp=stamp.replace(tzinfo=timezone.utc)
+        stamp=source_datetime(row['created_at'],source)
         if not lower<=stamp.astimezone(timezone.utc)<=reference:continue
         meta=json.loads(row['metadata_json'] or '{}')
         if (meta.get('runtime',''),meta.get('workspace_root',''))!=boundary:continue
@@ -99,7 +98,7 @@ def load_tracks(store, source, session, before_id, message, *, lookback_days=3):
             if producer:
                 for frame in _frames(store.conn.execute('PRAGMA database_list').fetchone()[2],dict(producer)):
                     if max(m['id'] for m in frame['messages'])>=before_id:continue
-                    if any(datetime.fromisoformat(m['created_at'].replace('Z','+00:00'))>reference for m in frame['messages']):continue
+                    if any(message_datetime(m)>reference for m in frame['messages']):continue
                     if original['id'] not in {m['id'] for m in frame['messages']}:continue
                     historical=next((c for c in frame['tracks'] if c['track_id']==card['track_id']),None)
                     if historical:break

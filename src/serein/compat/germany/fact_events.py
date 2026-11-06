@@ -2112,7 +2112,7 @@ def _normalize_item(raw: Any) -> dict[str, Any]:
     keys = [_source_key(ref) for ref in refs]
     if len(set(keys)) != len(keys):
         raise ValueError("duplicate source refs are not allowed")
-    refs.sort(key=lambda ref: (_parse_timestamp(ref["created_at"]), _source_key(ref)))
+    refs.sort(key=lambda ref: (_parse_timestamp(ref["created_at"], ref.get('source_system', '')), _source_key(ref)))
     bounds = _source_bounds(refs)
 
     origin_id = _optional_identifier(raw.get("origin_id"), "origin_id", 200)
@@ -2213,7 +2213,11 @@ def _legacy_fact_looks_like_meal(body: str) -> bool:
 
 
 def _source_bounds(refs: list[dict[str, Any]]) -> dict[str, str]:
-    values = [(_parse_timestamp(ref["created_at"]), str(ref["created_at"])) for ref in refs]
+    values = []
+    for ref in refs:
+        stamp = _parse_timestamp(ref["created_at"], ref.get('source_system', ''))
+        rendered = stamp.isoformat() if ref.get('source_system') == 'orangechat' else str(ref["created_at"])
+        values.append((stamp, rendered))
     values.sort(key=lambda item: item[0])
     start_dt, start_raw = values[0]
     end_dt, end_raw = values[-1]
@@ -2229,10 +2233,11 @@ def _source_bounds(refs: list[dict[str, Any]]) -> dict[str, str]:
     }
 
 
-def _parse_timestamp(value: Any) -> datetime:
+def _parse_timestamp(value: Any, source: str = '') -> datetime:
     text = _required_text(value, "source created_at", 128)
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        from ...source_time import source_datetime
+        parsed = source_datetime(text, source)
     except ValueError as exc:
         raise ValueError("source created_at must be an ISO timestamp") from exc
     if parsed.tzinfo is None:

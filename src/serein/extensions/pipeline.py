@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from ..core.store import Store, Conflict, encode, digest, now
 from ..deployment import identity, task_model, read_settings
+from ..source_time import message_datetime, source_julianday
 from .pipeline_limits import blocks, routing_blocks, settlement_window, allowed_ids
 from ..compat.events import Events, reference_blockers
 from ..compat.germany.fact_events import FactEventStore, FactEventSettlementBlockedError
@@ -29,6 +30,7 @@ _RUNTIME_CONTRACT_FILES = (
     'pipeline.py', 'pipeline_latest.py', 'pipeline_audit.py', 'pipeline_images.py',
     'pipeline_rules.py', 'pipeline_continuity.py', 'pipeline_materials.py',
     'pipeline_admission.py', 'pipeline_recovery.py', 'pipeline_limits.py', 'pipeline_tracks.py',
+    'pipeline_track_candidates.py',
 )
 
 
@@ -37,6 +39,7 @@ def runtime_revision():
     root=Path(__file__).parent
     code={name:digest((root/name).read_bytes()) for name in _RUNTIME_CONTRACT_FILES}
     code['../image_transcription.py']=digest((root.parent/'image_transcription.py').read_bytes())
+    code['../source_time.py']=digest((root.parent/'source_time.py').read_bytes())
     rules_root=root.parent/'resources'/'agents'
     role_rules={role:digest((rules_root/role/'AGENTS.md').read_bytes()) for role in ROLES}
     return digest(encode({'contract':CONTRACT,'code':code,'rules':role_rules}))
@@ -236,7 +239,7 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
             rows=[task_message(row) for row in store.conn.execute('SELECT r.* FROM raw_events r WHERE source=? AND session_id=? AND NOT EXISTS (SELECT 1 FROM raw_processing p WHERE p.raw_id=r.id)'+complete_upload+import_boundary+' ORDER BY r.id',(source,session))]
             # Evaluate the watermark against full envelopes before filtering rows.
             eligible=[m for unit in dialogue_units(rows)
-                      if max(datetime.fromisoformat(m['created_at'].replace('Z','+00:00')) for m in unit)<=watermark
+                      if max(message_datetime(m) for m in unit)<=watermark
                       for m in unit]
             chunks=routing_blocks(eligible,policy['max_input_chars'])
             for chunk_index,eligible in enumerate(chunks):
@@ -248,7 +251,7 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
                 # Reply envelopes determine completion / parked tails, while the latest
                 # Router supplies individual messages as Curator ownership atoms.
                 for unit in dialogue_units(eligible):
-                    ready=dialogue_unit_is_complete(unit) and (include_recent or datetime.fromisoformat(unit[-1]['created_at'].replace('Z','+00:00'))<=cutoff)
+                    ready=dialogue_unit_is_complete(unit) and (include_recent or message_datetime(unit[-1])<=cutoff)
                     (stable if ready else parked).extend(unit)
                 if not stable:continue
                 scope=digest(encode([source,session]))[:20]
@@ -270,7 +273,7 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
                     except RoutingRecoveryError as error:
                         tracks=[];ordinal=track_state.next_ordinal(scope,[{'track_id':row[0]} for row in store.conn.execute('SELECT id FROM pipeline_tracks')])
                         routing_error=str(error)
-                recent=[task_message(row) for row in store.conn.execute('SELECT * FROM raw_events WHERE source=? AND session_id=? AND id<? AND julianday(created_at)<=julianday(?) ORDER BY id DESC LIMIT 6',(source,session,eligible[0]['id'],eligible[0]['created_at']))][::-1]
+                recent=recent_originals(store,source,session,eligible[0])
                 data={'contract':CONTRACT,'runtime_revision':runtime_revision(),'input_policy':policy,'messages':stable,'parked':parked,'routing_messages':eligible,'tracks':tracks,'next_track_ordinal':ordinal,'scope':scope,'source':source,'recent':recent,'day':watermark.date().isoformat(),'settlement_watermark':watermark.isoformat()}
                 if routing_error:data['routing_evidence_error']=routing_error
                 key='pipeline:'+digest(encode(data))
@@ -490,8 +493,15 @@ def _router_prefix(data,request,cursor):
 
 def router_recent(prior,messages):
     first=messages[0]
-    limit=datetime.fromisoformat(first['created_at'])
-    return [m for m in prior if m['id']<first['id'] and datetime.fromisoformat(m['created_at'])<=limit][-6:]
+    limit=message_datetime(first)
+    return [m for m in prior if m['id']<first['id'] and message_datetime(m)<=limit][-6:]
+
+
+def recent_originals(store,source,session,first):
+    clock=source_julianday()
+    return [task_message(row) for row in store.conn.execute(
+        f'SELECT * FROM raw_events WHERE source=? AND session_id=? AND id<? AND ({clock})<=julianday(?) ORDER BY id DESC LIMIT 6',
+        (source,session,first['id'],message_datetime(first).isoformat()))][::-1]
 
 
 def assert_router_state(data,request,cards,ordinal,prior):
@@ -1955,7 +1965,7 @@ async def _flush_routes_frozen(database):
                 except RoutingRecoveryError as error:
                     tracks=[];ordinal=track_state.next_ordinal(scope,[{'track_id':row[0]} for row in store.conn.execute('SELECT id FROM pipeline_tracks')])
                     routing_error=str(error)
-            recent=[task_message(r) for r in store.conn.execute('SELECT * FROM raw_events WHERE source=? AND session_id=? AND id<? AND julianday(created_at)<=julianday(?) ORDER BY id DESC LIMIT 6',(source,session,messages[0]['id'],messages[0]['created_at']))][::-1]
+            recent=recent_originals(store,source,session,messages[0])
             data={'contract':CONTRACT,'runtime_revision':runtime_revision(),'input_policy':config['policy'],'routing_messages':messages,'tracks':tracks,'next_track_ordinal':ordinal,'scope':scope,'recent':recent,'day':current.astimezone(TZ).date().isoformat()}
             if routing_error:data['routing_evidence_error']=routing_error
             key='route:'+digest(encode(data));batch={'id':key,'scope':scope,'input_json':encode(data)}

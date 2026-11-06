@@ -24,6 +24,8 @@
 
 ## 来源与正文
 
+OrangeChat 新上传的原话时间使用明确的 UTC 时间（带 `Z`）。旧版无时区的 OrangeChat 时间按 Asia/Shanghai 解释；其他旧来源保留原有 UTC 约定。显式时区始终优先。这个兼容规则只用于归线、静默窗口、排序和 Event 时间计算，不改写已保存的原文时间、正文或去重编号。旧版记录没有保存设备时区，若当时设备不在上海时区，无法仅凭该记录恢复准确时刻。
+
 “自动摘要配置 → 精简归线候选（实验）”对应 `pipeline.router_compact_cards`，默认关闭。开启后，Router 的候选卡不附 `recent_turns`，仍保留完整 Track 编号、事项、续接说明、活跃状态、任务进度和 Event 策略。本轮原话与当前会话最近六条上下文照常提供；存储的候选原话仍参与候选检索、时间判断与后续来源读取，不删除或改写。此选项随新批次的输入配置保存，不重写已有任务。它不增加模型调用，也不证明归线质量改善；需要依赖候选原话消解省略指代时可保持关闭。
 
 Curator 的 `decision_review` 记录每条拟议 Event 的活动依据、同一 Track 相邻 Event 边界两侧各自独占的逐字原文，以及 skip/defer 的完整处置理由。直接 defer 必须指向本轮真实 parked 原文 ID。host 在既有 exact-cover、bridge 和受保护前版校验之外核对回执；默认暂缓受保护来源。Writer 可额外返回 `claim_groups` 与 `sentence_evidence`；返回时 host 核对其中的 owned 来源、逐字引文和正文对应关系，收据随 writer detail 保存，不改变正式 Event 的字段。未返回收据时，由冻结的 ownership 限定 Writer 可用材料，host 不声称已逐句证明正文语义。重要内容仍需对照原话人工复核。
