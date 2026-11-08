@@ -1,5 +1,6 @@
 import asyncio
 import json
+import pytest
 
 from test_public_features import settings, output_for
 from serein.compat.raw_archive import raw_archive
@@ -8,7 +9,9 @@ from serein.deployment import save_settings
 from serein.extensions import pipeline as p
 
 
-def test_daytime_prompt_budget_pause_preserves_prefix_and_resumes(settings, monkeypatch):
+@pytest.mark.parametrize('retry_unchanged_budget', [False, True])
+def test_daytime_prompt_budget_pause_preserves_prefix_and_resumes(settings, monkeypatch, retry_unchanged_budget):
+    initial_budget = 40000
     rows = []
     for n in range(5):
         for offset, role in enumerate(('user', 'assistant')):
@@ -18,14 +21,14 @@ def test_daytime_prompt_budget_pause_preserves_prefix_and_resumes(settings, monk
     raw_archive(settings).ingest(rows, source='test')
     save_settings(settings.database, {'models': [{'id': 'local', 'model': 'synthetic',
         'base_url': 'http://127.0.0.1:9/v1'}], 'assignments': {'track_router': 'local'},
-        'pipeline': {'max_prompt_chars': 40000}})
+        'pipeline': {'max_prompt_chars': initial_budget}})
     original_request = p.request_for
     calls = []
 
     def request_for(database, batch, role, **kwargs):
         request = original_request(database, batch, role, **kwargs)
         if role == 'track_router' and request['messages'][0]['id'] == 3:
-            request['prompt'] = 'x' * 45000
+            request['prompt'] = 'x' * (initial_budget + 5000)
         return request
 
     async def complete(model, payload):
@@ -40,16 +43,24 @@ def test_daytime_prompt_budget_pause_preserves_prefix_and_resumes(settings, monk
     asyncio.run(p.flush_routes(settings.database))
     with Store(settings.database, read_only=True) as store:
         batch = dict(store.conn.execute('SELECT * FROM pipeline_batches').fetchone())
-        assert batch['status'] == 'paused_failure'
+        assert batch['status'] == 'waiting_materials'
         detail = json.loads(batch['result_json'])
-        assert detail['repair_kind'] == 'prompt_budget'
-        assert '40000' in detail['reason']
+        assert detail['status'] == 'retained'
+        assert str(initial_budget) in detail['reason']
         accepted = dict(store.conn.execute('SELECT * FROM pipeline_jobs WHERE output_json IS NOT NULL').fetchone())
-        assert store.conn.execute('SELECT count(*) FROM pipeline_attempts').fetchone()[0] == 1
+        assert store.conn.execute('SELECT count(*) FROM pipeline_attempts').fetchone()[0] == 2
+        assert store.conn.execute('SELECT error FROM pipeline_attempts ORDER BY id DESC LIMIT 1').fetchone()[0] == detail['reason']
         assert store.conn.execute('SELECT count(*) FROM pipeline_routes').fetchone()[0] == 0
     assert len(calls) == 1
     asyncio.run(p.flush_routes(settings.database))
     assert len(calls) == 1
+    if retry_unchanged_budget:
+        p.retry_batch(settings.database, batch['id'])
+        asyncio.run(p.flush_routes(settings.database))
+        with Store(settings.database, read_only=True) as store:
+            assert store.conn.execute('SELECT status FROM pipeline_batches WHERE id=?', (batch['id'],)).fetchone()[0] == 'waiting_materials'
+            assert dict(store.conn.execute('SELECT * FROM pipeline_jobs WHERE id=?', (accepted['id'],)).fetchone()) == accepted
+        assert len(calls) == 1
     save_settings(settings.database, {'pipeline': {'max_prompt_chars': 200000}})
     p.retry_batch(settings.database, batch['id'])
     asyncio.run(p.flush_routes(settings.database))

@@ -2095,6 +2095,15 @@ async def _publish_routes(database,batch,data,runner=None):
         store.conn.execute("UPDATE pipeline_pending_materials SET status='resolved_routing',updated_at=? WHERE batch_id=? AND status IN ('open','running')",(now(),batch['id']))
 
 
+def retain_routing_prompt_limit(database,batch,error):
+    # Match the foreground pending-material contract. A local budget limit
+    # does not invalidate already accepted Router frames or their evidence.
+    with Store(database,read_only=True) as store:
+        row=store.conn.execute('SELECT id FROM pipeline_jobs WHERE batch_id=? AND output_json IS NULL ORDER BY rowid DESC LIMIT 1',(batch['id'],)).fetchone()
+    if row:record_attempt(database,row['id'],'',str(error))
+    return pending_materials.park(database,batch,error)
+
+
 async def _flush_routes_frozen(database):
     """Daytime routing uses durable jobs, complete units and settlement windows."""
     config=snapshot(database,'routing')
@@ -2119,6 +2128,7 @@ async def _flush_routes_frozen(database):
         detail=json.loads(batch['result_json'] or '{}')
         if batch['status']=='retry_wait' and current<datetime.fromisoformat(detail['next_retry_at']):continue
         try:await _publish_routes(database,batch,json.loads(batch['input_json']))
+        except PromptLimitError as error:retain_routing_prompt_limit(database,batch,error)
         except RoutingRecoveryError as error:mark_needs_repair(database,batch,error)
         except PausedBatch as error:pending_materials.park(database,batch,error)
         except AwaitAgent:pass
@@ -2160,6 +2170,7 @@ async def _flush_routes_frozen(database):
             mark_needs_repair(database,batch,RoutingRecoveryError('Partially cached dialogue unit; review the complete frozen envelope.'))
             continue
         try:await _publish_routes(database,batch,data)
+        except PromptLimitError as error:retain_routing_prompt_limit(database,batch,error)
         except RoutingRecoveryError as error:mark_needs_repair(database,batch,error)
         except PausedBatch as error:pending_materials.park(database,batch,error)
         except AwaitAgent:pass
