@@ -39,11 +39,11 @@ jobs:
       - run: python -m compileall -q src .github/deploy
       - run: npm ci --ignore-scripts
         working-directory: web
+      - run: npm run build
+        working-directory: web
       - run: npm test
         working-directory: web
       - run: node tests/resume-page.dom.mjs
-        working-directory: web
-      - run: npm run build
         working-directory: web
       - run: python scripts/release.py /tmp/serein-public.zip
       - name: Build exact tested revision
