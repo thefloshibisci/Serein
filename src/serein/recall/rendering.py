@@ -13,7 +13,9 @@ def _arcs(reader, hits, arc_key=None):
         return by_owner, menus
     rows = reader.store.conn.execute("SELECT id FROM documents WHERE kind='narrative' AND lifecycle='active' ORDER BY id")
     for row in rows:
-        obj = reader.read(row['id'], with_evidence=False)
+        obj = reader.read(row['id'], with_evidence=False, with_related=False)
+        if not obj['readable']:
+            continue
         doc = obj['document']
         meta = doc['metadata'].get('legacy_registry', doc['metadata'])
         key = meta.get('arc_key')
@@ -27,7 +29,7 @@ def _arcs(reader, hits, arc_key=None):
                 continue
         members, offset = [], 0
         while True:
-            page = reader.materials(row['id'], offset=offset, limit=100)
+            page = reader.materials(row['id'], offset=offset, limit=100, with_related=False)
             members.extend(page['items'])
             if page['next_offset'] is None:
                 break

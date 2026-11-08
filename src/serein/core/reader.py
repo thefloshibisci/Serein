@@ -188,10 +188,11 @@ class Reader:
         return references
 
     def materials(self, identifier, *, revision=None, include_mentions=False, with_evidence=False,
-                  offset=0, limit=20, at=None):
+                  offset=0, limit=20, at=None, with_related=True):
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("offset must be nonnegative and limit must be 1..100")
-        owner = self.read(identifier, kind="narrative", revision=revision, with_evidence=False, at=at)
+        owner = self.read(identifier, kind="narrative", revision=revision, with_evidence=False, at=at,
+                          with_related=with_related)
         if not owner["readable"]:
             return {"narrative_id": owner["id"], "status": owner["status"], "items": [], "total": 0, "next_offset": None}
         document = owner["document"]
@@ -225,7 +226,8 @@ class Reader:
             # Keep a source alias when reading: it can bind an exact historical
             # snapshot and must not be replaced with an unrestricted numeric ID.
             requested = next((i for i in group["requested_ids"] if i.startswith("diary_source_")), group["requested_ids"][0])
-            result = self.read(requested, kind=group["kind"], with_evidence=with_evidence, at=at)
+            result = self.read(requested, kind=group["kind"], with_evidence=with_evidence, at=at,
+                               with_related=with_related)
             items.append({**group, "selection": "selected", "object": result})
         return {"narrative_id": owner["id"], "revision": number, "status": owner["status"], "items": items,
                 "total": len(ordered), "offset": offset,

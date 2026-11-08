@@ -37,6 +37,9 @@ jobs:
           tests/test_pipeline_prompt_budget_recovery.py tests/test_pipeline_batch_recovery.py tests/test_pipeline_pending.py
           tests/test_release_boundaries.py
           tests/test_background_recall_refresh.py
+          tests/test_arc_menu_lean_reads.py tests/test_refresh_event_eligibility.py
+          tests/test_snapshot_vector_efficiency.py tests/test_surface_selection.py
+          tests/test_recall_candidate_budget.py tests/test_passages_entities.py
       - run: python -m compileall -q src .github/deploy
       - run: npm ci --ignore-scripts
         working-directory: web

@@ -67,6 +67,14 @@ def _cosine(left, right):
     return sum(a * b for a, b in zip(left, right)) / right_norm
 
 
+def _rows_for_ids(conn, statement, identifiers):
+    """Read vector payloads only for this query's current eligible owners."""
+    identifiers = tuple(identifiers)
+    for start in range(0, len(identifiers), 400):
+        batch = identifiers[start:start + 400]
+        yield from conn.execute(statement.format(','.join('?' for _ in batch)), batch)
+
+
 class Snapshot:
     def __init__(self, search, query, policy, embedding, cutoff, use_passages, settings):
         self.search, self.query = search, query
@@ -159,7 +167,8 @@ class Snapshot:
                 meta.get('date') or meta.get('created') or doc['created_at'] or meta.get('updated_at') or '')
             self.catalog[doc['id']] = {'owner_kind': doc['kind'], 'title': doc['title'], 'body': body,
                 'memory_date': str(day), 'recallable': obj['surface_state']['can_surface']}
-        for row in search.conn.execute('SELECT id,embedding FROM vectors'):
+        for row in _rows_for_ids(search.conn,
+                'SELECT id,embedding FROM vectors WHERE id IN ({})', self.catalog):
             if row['id'] in self.catalog:
                 try:
                     stored_vector = _decode_vector(row['embedding'])
@@ -169,7 +178,8 @@ class Snapshot:
                 if len(stored_vector) == len(vector):
                     self.whole[row['id']] = round(sum(a*b for a,b in zip(vector,stored_vector)),4)
         if use_passages and search.has_passages:
-            for row in search.conn.execute('SELECT * FROM passages WHERE embedding IS NOT NULL'):
+            for row in _rows_for_ids(search.conn,
+                    'SELECT * FROM passages WHERE document_id IN ({}) AND embedding IS NOT NULL', stamps):
                 if row['document_id'] not in stamps or row['stamp'] != stamps[row['document_id']]:
                     continue
                 try:

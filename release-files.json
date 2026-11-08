@@ -651,5 +651,8 @@
   "tests/test_ob_self.py",
   "src/serein/extensions/handoff_dates.py",
   "tests/test_resume_event_dates.py",
-  "docs/github-deployment.md"
+  "docs/github-deployment.md",
+  "tests/test_arc_menu_lean_reads.py",
+  "tests/test_refresh_event_eligibility.py",
+  "tests/test_snapshot_vector_efficiency.py"
 ]

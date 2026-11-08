@@ -70,13 +70,22 @@ def _prepare_refresh(settings, *, dry_run=False):
     """Keep full-corpus SQLite reads and lexical writes off the HTTP loop."""
     from .policy import RecallPolicy
     from ..configured_models import recall_settings
+    from ..core.feelings import access_status
     passages_enabled = RecallPolicy.from_config(recall_settings(settings)).passages_enabled
     scenes, events, passages = [], [], {}
     with Search(settings.database,settings.index) as search:
         for row in search.conn.execute("SELECT * FROM documents WHERE kind IN ('scene','event')"):
-            obj=search.reader.read(row['id'],with_evidence=False,with_related=False)
-            if not obj['readable'] or obj['document']['lifecycle']!='active':continue
-            doc=obj['document']
+            doc=search.reader.store.read(row['id'])
+            if not doc or doc['lifecycle']!='active' or access_status(search.reader.store,doc)!='available':
+                continue
+            # Event lexical eligibility never used surface_state. Computing it
+            # here repeats coverage queries for every Event on every refresh.
+            if doc['kind']=='scene':
+                obj=search.reader.read(row['id'],with_evidence=False,with_related=False)
+                if not obj['readable'] or obj['document']['lifecycle']!='active':continue
+                doc=obj['document']
+            elif doc['kind']!='event':
+                continue
             if content_stamp(doc)!=row['stamp']:continue
             if doc['kind']=='event':
                 events.append({**doc['metadata'],'item_id':doc['id'],'item_type':'event',
