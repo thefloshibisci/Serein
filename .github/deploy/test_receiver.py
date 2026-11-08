@@ -3,10 +3,12 @@ import copy
 import importlib.util
 import io
 import json
+import queue
 from pathlib import Path
 import sys
 import tarfile
 import types
+import urllib.error
 
 import pytest
 
@@ -74,7 +76,7 @@ def deployment(tmp_path,monkeypatch):
     doc['services']['unrelated']={'image':'unchanged'}
     path.write_text(json.dumps(doc))
     monkeypatch.setattr(r,'PRODUCTION',production);monkeypatch.setattr(r,'COMPOSE',path);monkeypatch.setattr(r,'MAINTENANCE',gate)
-    monkeypatch.setattr(r,'latest_commit',lambda:COMMIT)
+    monkeypatch.setattr(r,'latest_commit',lambda _:COMMIT)
     monkeypatch.setattr(r,'inspect_containers',lambda _: {'unrelated':{'Id':'same'}})
     monkeypatch.setattr(r,'wait_ready',lambda _:None)
     images={name:'nanzhi/'+name+':github-'+COMMIT for name in r.SERVICES}
@@ -97,7 +99,7 @@ def test_rehearsal_isolates_data_network_and_jobs(deployment):
 
 def test_stale_build_never_stops_production(deployment,monkeypatch):
     doc,images,job,path,gate=deployment;before=path.read_bytes();phases=[]
-    monkeypatch.setattr(r,'latest_commit',lambda:'b'*40)
+    monkeypatch.setattr(r,'latest_commit',lambda _:'b'*40)
     monkeypatch.setattr(r,'call',lambda *_a,**_k:pytest.fail('must not invoke docker'))
     r.promote(doc,images,job,phases.append)
     assert phases==['skipped_main_advanced'] and path.read_bytes()==before and not gate.exists()
@@ -139,3 +141,54 @@ def test_external_writable_mount_is_refused(deployment):
     doc,*_=deployment
     doc['services']['serein']['volumes'][0]['source']='/unexpected'
     with pytest.raises(ValueError,match='mount'):r.writable_sources(doc)
+
+
+@pytest.mark.parametrize('head', [COMMIT, 'b'*40])
+def test_cutover_confirmation_is_bound_to_nonce_and_commit(monkeypatch,capsys,head):
+    monkeypatch.setattr(r.os,'urandom',lambda _:b'1'*16)
+    confirmations=queue.Queue();monkeypatch.setattr(r,'CONFIRMATIONS',confirmations)
+    item={'action':'main_confirmation','commit':COMMIT,'nonce':(b'1'*16).hex(),'head':head}
+    parsed=r.metadata(io.BytesIO((json.dumps(item)+'\n').encode()))
+    confirmations.put(parsed)
+    assert r.latest_commit(COMMIT)==head
+    request=json.loads(capsys.readouterr().out)
+    assert request=={'action':'confirm_main','commit':COMMIT,'nonce':item['nonce']}
+    confirmations.put(dict(parsed,nonce='f'*32))
+    with pytest.raises(ValueError,match='mismatch'):r.latest_commit(COMMIT)
+
+
+def test_runner_answers_cutover_challenge_without_sending_github_token(tmp_path,monkeypatch):
+    spec=importlib.util.spec_from_file_location('deployment_client',Path(__file__).with_name('client.py'))
+    client=importlib.util.module_from_spec(spec);spec.loader.exec_module(client)
+    image=tmp_path/'image.tar.gz';image.write_bytes(b'synthetic-image')
+    nonce='1'*32
+    for name,value in {'GH_TOKEN':'synthetic-github-secret','NANZHI_DEPLOY_KEY':'synthetic-ssh-key',
+                       'GITHUB_REPOSITORY':r.REPOSITORY,'GITHUB_RUN_ID':'123'}.items():
+        monkeypatch.setenv(name,value)
+    monkeypatch.setattr(sys,'argv',['client.py','serein',COMMIT,str(image)])
+    calls=[]
+    def github(args,**kwargs):
+        calls.append(args)
+        if args[-1]=='.object.sha':return COMMIT+'\n'
+        return json.dumps({'artifacts':[{'name':'nanzhi-image-'+COMMIT,'expired':False,
+              'archive_download_url':'https://api.github.com/repos/'+r.REPOSITORY+'/actions/artifacts/1/zip','size_in_bytes':42}]})
+    monkeypatch.setattr(client.subprocess,'check_output',github)
+    class Opener:
+        def open(self,*args,**kwargs):
+            raise urllib.error.HTTPError('https://api.github.com',302,'redirect',{'Location':'https://test.blob.core.windows.net/artifact'},None)
+    monkeypatch.setattr(client.urllib.request,'build_opener',lambda *_:Opener())
+    class Process:
+        def __init__(self,*args,**kwargs):
+            self.stdin=io.BytesIO()
+            self.stdout=io.BytesIO((json.dumps({'action':'confirm_main','commit':COMMIT,'nonce':nonce})+'\n'+json.dumps({'phase':'deployed'})+'\n').encode())
+        def __enter__(self):return self
+        def __exit__(self,*_):pass
+        def wait(self,**_):return 0
+        def kill(self):pass
+    process=Process();monkeypatch.setattr(client.subprocess,'Popen',lambda *_a,**_k:process)
+    client.main()
+    sent=[json.loads(line) for line in process.stdin.getvalue().splitlines()]
+    assert sent[0]['action']=='deploy_url'
+    assert sent[1]=={'action':'main_confirmation','commit':COMMIT,'nonce':nonce,'head':COMMIT}
+    assert b'synthetic-github-secret' not in process.stdin.getvalue()
+    assert sum(args[-1]=='.object.sha' for args in calls)==2

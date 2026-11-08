@@ -2,12 +2,14 @@
 import hashlib
 import json
 import os
+import queue
 from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -67,16 +69,26 @@ def main():
             '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=6',
             '-o', 'ConnectTimeout=20', 'nanzhi-deploy@49.234.39.128',
         ]
-        with subprocess.Popen(cmd, stdin=subprocess.PIPE) as proc:
+        with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as proc:
             stop_refresh = threading.Event()
+            input_lock = threading.Lock()
+            output = queue.Queue()
+            def send(value):
+                with input_lock:
+                    proc.stdin.write((json.dumps(value) + '\n').encode())
+                    proc.stdin.flush()
+            def read_output():
+                for line in proc.stdout:
+                    output.put(line)
+                output.put(None)
+            threading.Thread(target=read_output, daemon=True).start()
             def refresh_url():
                 # Artifact URLs expire in ten minutes. Refresh the same artifact
                 # without transmitting the GitHub credential to the server.
                 while not stop_refresh.wait(180):
                     try:
                         renewed = dict(header, url=signed_location())
-                        proc.stdin.write((json.dumps(renewed) + '\n').encode())
-                        proc.stdin.flush()
+                        send(renewed)
                     except (BrokenPipeError, ValueError):
                         return
                     except Exception:
@@ -84,9 +96,28 @@ def main():
                         if stop_refresh.wait(15):
                             return
             try:
-                proc.stdin.write((json.dumps(header) + '\n').encode())
-                proc.stdin.flush()
+                send(header)
                 threading.Thread(target=refresh_url, daemon=True).start()
+                deadline = time.monotonic() + 2460
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('Deployment confirmation deadline exceeded')
+                    try:
+                        line = output.get(timeout=5)
+                    except queue.Empty:
+                        continue
+                    if line is None:
+                        break
+                    response = json.loads(line)
+                    if response.get('action') == 'confirm_main':
+                        if response.get('commit') != commit or not re.fullmatch('[0-9a-f]{32}', str(response.get('nonce'))):
+                            raise ValueError('Unexpected deployment confirmation')
+                        current = subprocess.check_output(['gh', 'api', 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/ref/heads/main', '--jq', '.object.sha'], text=True, timeout=30).strip()
+                        if not re.fullmatch('[0-9a-f]{40}', current):
+                            raise ValueError('Invalid GitHub main revision')
+                        send({'action':'main_confirmation','commit':commit,'nonce':response['nonce'],'head':current})
+                    else:
+                        print(json.dumps(response), flush=True)
                 status = proc.wait(timeout=2460)
             except BaseException:
                 proc.kill()

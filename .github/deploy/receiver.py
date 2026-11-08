@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import queue
 from pathlib import Path
 import re
 import shutil
@@ -27,6 +28,7 @@ SERVICES = ('serein-memory', 'serein')
 REPOSITORY = 'thefloshibisci/Serein'
 MAINTENANCE = Path('/var/lib/nanzhi-deploy-gates/serein.maintenance')
 MAX_ARCHIVE = 2 * 1024**3
+CONFIRMATIONS = queue.Queue()
 
 
 def call(args, timeout=180, **kwargs):
@@ -43,6 +45,13 @@ def metadata(stream):
         raise ValueError('invalid_header_length')
     item = json.loads(line)
     if item == {'action': 'check'}:
+        return item
+    if item.get('action') == 'main_confirmation':
+        if (set(item) != {'action','commit','nonce','head'}
+                or not re.fullmatch('[0-9a-f]{40}', str(item.get('commit')))
+                or not re.fullmatch('[0-9a-f]{40}', str(item.get('head')))
+                or not re.fullmatch('[0-9a-f]{32}', str(item.get('nonce')))):
+            raise ValueError('invalid_main_confirmation')
         return item
     fields = {'action', 'commit', 'bytes', 'sha256'}
     if item.get('action') == 'deploy_url':
@@ -329,17 +338,25 @@ def rehearsal(doc, images, job):
         call(compose(path, 'down', '--timeout', '60'), timeout=150)
 
 
-def latest_commit():
-    request = urllib.request.Request('https://api.github.com/repos/' + REPOSITORY + '/git/ref/heads/main',
-                                     headers={'User-Agent': 'serein-deploy', 'Cache-Control': 'no-cache'})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)['object']['sha']
+def latest_commit(commit):
+    # The runner can reach GitHub's authenticated API. Ask over the same
+    # service-scoped SSH connection immediately before cutover; no GitHub
+    # credential or unreliable server-to-GitHub API call is needed here.
+    nonce = os.urandom(16).hex()
+    print(json.dumps({'action':'confirm_main','commit':commit,'nonce':nonce}), flush=True)
+    try:
+        response = CONFIRMATIONS.get(timeout=60)
+    except queue.Empty:
+        raise RuntimeError('main_confirmation_timeout') from None
+    if response['commit'] != commit or response['nonce'] != nonce:
+        raise ValueError('main_confirmation_mismatch')
+    return response['head']
 
 
 def promote(doc, images, job, record):
     # Refuse stale builds at the actual cutover, after any slow download/test.
     commit = next(iter(images.values())).split(':github-')[1]
-    if latest_commit() != commit:
+    if latest_commit(commit) != commit:
         record('skipped_main_advanced')
         return
     if MAINTENANCE.exists():
@@ -424,12 +441,17 @@ def main():
     if item['action'] == 'check':
         print(json.dumps({'ready': COMPOSE.is_file(), 'service': 'serein', 'protocol': 1}))
         return
+    if item['action'] != 'deploy_url':
+        raise ValueError('signed_artifact_required')
     locations = {'url': item.get('url')}
     if item['action'] == 'deploy_url':
         def refresh_locations():
             while True:
                 try:
                     renewed = metadata(stream)
+                    if renewed['action'] == 'main_confirmation':
+                        CONFIRMATIONS.put(renewed)
+                        continue
                     if {k:v for k,v in renewed.items() if k != 'url'} != {k:v for k,v in item.items() if k != 'url'}:
                         return
                     locations['url'] = renewed['url']
