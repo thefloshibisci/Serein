@@ -577,6 +577,18 @@ class NarrativeRollStore:
         excluded_diary_ids = [item for item in self.source_diary_ids(document) if item not in target_diary_ids]
         excluded_darkroom_ids = [item for item in self.source_darkroom_ids(document) if item not in target_darkroom_ids]
         excluded_upload_ids = [item for item in self.source_upload_ids(document) if item not in target_upload_ids]
+        # A body-only edit must retain withdrawals no longer present in the
+        # material block. Only explicitly selecting that ID may restore it.
+        excluded_scene_ids = list(dict.fromkeys([*current.get('excluded_scene_ids', []), *excluded_scene_ids]))
+        excluded_event_ids = list(dict.fromkeys([*current.get('excluded_event_ids', []), *excluded_event_ids]))
+        excluded_diary_ids = list(dict.fromkeys([*current.get('excluded_diary_ids', []), *excluded_diary_ids]))
+        excluded_darkroom_ids = list(dict.fromkeys([*current.get('excluded_darkroom_ids', []), *excluded_darkroom_ids]))
+        excluded_upload_ids = list(dict.fromkeys([*current.get('excluded_upload_ids', []), *excluded_upload_ids]))
+        if source_scene_ids is not None:excluded_scene_ids = [key for key in excluded_scene_ids if key not in target_scene_ids]
+        if source_event_ids is not None:excluded_event_ids = [key for key in excluded_event_ids if key not in target_event_ids]
+        if source_diary_ids is not None:excluded_diary_ids = [key for key in excluded_diary_ids if key not in target_diary_ids]
+        if source_darkroom_ids is not None:excluded_darkroom_ids = [key for key in excluded_darkroom_ids if key not in target_darkroom_ids]
+        if source_upload_ids is not None:excluded_upload_ids = [key for key in excluded_upload_ids if key not in target_upload_ids]
 
         result = self.publish(
             narrative_id=str(current.get("narrative_id") or ""),

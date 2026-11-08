@@ -11,8 +11,8 @@ class Writer:
     def __init__(self, database, *, favorite_policy=None, promotion_policy=None, diary_writer=None):
         # Writing tools cannot initialize a typo path or implicitly migrate a DB.
         with Store(database, read_only=True) as existing:
-            if existing.conn.execute("PRAGMA user_version").fetchone()[0] not in (8,9):
-                raise ValueError("Initialize or migrate the runtime database to schema v8 or v9 first")
+            if existing.conn.execute("PRAGMA user_version").fetchone()[0] not in (8,9,10):
+                raise ValueError("Initialize or migrate the runtime database to schema v8..v10 first")
         self.store = Store(database)
         self.favorite_policy = favorite_policy
         self.promotion_policy = promotion_policy
@@ -34,6 +34,9 @@ class Writer:
         if production_diary and self.diary_writer is None:
             raise ValueError('Use the production Diary writer for this database')
         target=self.store.read(request.get('document_id','')) if request.get('document_id') else None
+        if (target and target['metadata'].get('memory_role') == 'feel' and action in {'save', 'evidence'}
+                or request.get('metadata', {}).get('memory_role') == 'feel'):
+            raise ValueError('Use the dedicated feel writer; triggers are not evidence bindings')
         favorite_only = action == 'state' and request.get('favorite') is not None and set(request) <= {'document_id','expected_revision','favorite'}
         if not favorite_only and (request.get('kind')=='event' or target and target['kind']=='event') and self.store.conn.execute("SELECT 1 FROM sqlite_master WHERE name='fact_events' AND type='table'").fetchone():
             raise ValueError('Use the production Event writer for this database')

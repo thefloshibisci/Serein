@@ -75,6 +75,6 @@ def test_version_one_database_upgrades_without_losing_body(tmp_path):
         db.execute("INSERT INTO revisions VALUES (?, ?, ?, ?, ?, ?, ?)",
                    ("existing", 1, "title", "original", digest("original"), "{}", "recorded"))
     with Store(path) as store:
-        assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 10
         assert store.read("existing")["body_md"] == "original"
         assert store.surface_state("existing")["reasons"] == ["manual_disabled"]

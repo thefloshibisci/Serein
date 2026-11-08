@@ -15,6 +15,15 @@ from . import pipeline_tracks as tracks
 MAX_HISTORY_BATCHES = 64
 MAX_HISTORY_JOBS = 256
 SOURCE_STATES = ('routed', 'done', 'superseded_input_budget', 'waiting_materials')
+# This deployed revision differs only in queue selection / review receipts.
+# Its published normalized snapshots still undergo the full scope, route and
+# anchor checks below; unfinished plans never receive this compatibility.
+QUEUE_COMPATIBLE_ROUTER_REVISIONS = {
+    # Admission lookahead counting changes no published Router evidence.
+    '37fb670e9d095d0b018c5377d673acb052f84285c5049b2e65ff10b3af2323a5',
+    '8e44cd8a8da8f21d32f6a46c77bdde11eb970413bb3d38acd84471136f93adc1',
+    '791b61c3ba4f2231d73b056aa51bfd0fd63d38a3e2898d74eb9ed437425bf7b5',
+}
 MESSAGE_KEYS = ('id', 'source', 'source_event_id', 'original_session_id',
                 'session_id', 'role', 'content', 'created_at')
 # rc65 before the replay-seed fix, with Windows CRLF or release LF files.
@@ -99,9 +108,12 @@ def _frames(database, batch):
         and all(key in original for key in ('tracks', 'recent', 'next_track_ordinal', 'input_policy'))
         and bool(jobs) and all('routing_frame' in json.loads(row['request_json']) for row in jobs))
     current_revision = p.runtime_revision()
+    queue_compatible = (batch['status'] in ('routed', 'done', 'superseded_input_budget')
+        and original.get('runtime_revision') in QUEUE_COMPATIBLE_ROUTER_REVISIONS)
     if (original.get('contract') != p.CONTRACT
             or (original.get('runtime_revision') != current_revision
                 and not published_replay
+                and not queue_compatible
                 and not (legacy_compacted and original.get('runtime_revision') in COMPACTED_ROUTER_REVISIONS))
             or original.get('scope') != batch['scope']):
         raise p.RoutingRecoveryError('route producer has an incompatible frozen contract: '

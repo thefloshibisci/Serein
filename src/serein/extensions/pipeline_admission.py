@@ -76,10 +76,17 @@ def exchanges(messages):
     return result
 
 
-def count_rounds(owned_ids, messages):
+def count_rounds(owned_ids, messages, *, independent_lookahead_ids=()):
     owned = set(owned_ids)
+    independent = set(independent_lookahead_ids) - owned
     count = 0
     for unit in exchanges(messages):
+        # A separately routed, anonymous lookahead reply cannot erase a
+        # completed owned exchange. Keep explicit reply anchors and all
+        # intervening context: split replies still require the whole reply.
+        while (unit and int(unit[-1]['id']) in independent
+               and _reply_target(unit[-1]) is None):
+            unit = unit[:-1]
         if {row['role'] for row in unit} != {'user', 'assistant'} or not all(int(row['id']) in owned for row in unit):
             continue
         users = {int(row['id']) for row in unit if row['role'] == 'user'}
@@ -130,10 +137,17 @@ def apply_gate(plan, component):
     scope = {int(row['id']): row for row in component.get('context_messages') or []}
     stable = {int(row['id']) for row in component['messages']}
     admissions = plan['event_admissions']
+    corridor_ids = {int(source_id) for unit in component.get('memberships') or []
+                    for source_id in unit.get('source_message_ids') or
+                    [unit['unit_root_message_id']]}
+    independent_lookahead_ids = ({int(row['id']) for row in
+                                  component.get('boundary_lookahead') or []}
+                                 - corridor_ids) if corridor_ids else set()
     accepted, pending, skipped, receipts = [], set(), set(), []
     for event in result['events']:
         admission = admissions[event['event_ref']]
-        rounds = count_rounds(substantive_ids(event), scope.values())
+        rounds = count_rounds(substantive_ids(event), scope.values(),
+                              independent_lookahead_ids=independent_lookahead_ids)
         owned = set(event['source_message_ids'])
         waiting_reply = (admission['closed_by'] is None and any(
             {row['role'] for row in unit} == {'user'}

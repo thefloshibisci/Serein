@@ -156,11 +156,13 @@ QUEUE_ORDER="COALESCE(json_extract(b.input_json,'$.queue_order'),b.rowid),COALES
 
 
 def new_batch(database,include_recent,clock=None,*,retry_repair=False):
+    from .pipeline_recovery import QUEUE_COMPATIBLE_ROUTER_REVISIONS
     policy=read_settings(database)['pipeline']
     current=(clock or datetime.now(timezone.utc)).astimezone(TZ)
     watermark=current if include_recent else current.replace(hour=3,minute=0,second=0,microsecond=0)
     if not include_recent and current<watermark:return None
     cutoff=watermark-timedelta(minutes=20)
+    revision=runtime_revision()
     with Store(database) as store,store.transaction(immediate=True):
         held_scopes={row['scope'] for row in store.conn.execute(
             "SELECT scope FROM pipeline_batches WHERE status IN ('needs_repair','paused_failure','retry_wait','routing_only')")}
@@ -248,6 +250,23 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
         scopes=store.conn.execute('SELECT DISTINCT r.source,r.session_id FROM raw_events r WHERE NOT EXISTS (SELECT 1 FROM raw_processing p WHERE p.raw_id=r.id)'+complete_upload+import_boundary+' ORDER BY r.id').fetchall()
         for source,session in scopes:
             if digest(encode([source,session]))[:20] in held_scopes:continue
+            scope=digest(encode([source,session]))[:20]
+            attempted_today=set();observed_today=set()
+            # A completed review may retain every owned original. Its receipt
+            # survives task compaction and prevents unchanged material from
+            # monopolizing Continue (or the scheduler) for the rest of the day.
+            for previous in store.conn.execute(
+                    "SELECT input_json,result_json FROM pipeline_batches WHERE scope=? AND status='done' "
+                    "AND json_extract(input_json,'$.day')=? "
+                    "AND json_array_length(result_json,'$.attempted_source_message_ids')>0",
+                    (scope,watermark.date().isoformat())):
+                frozen=json.loads(previous['input_json'])
+                if (frozen.get('runtime_revision') not in {revision,*QUEUE_COMPATIBLE_ROUTER_REVISIONS}
+                        or frozen.get('input_policy')!=policy):
+                    continue
+                receipt=json.loads(previous['result_json'])
+                attempted_today.update(receipt['attempted_source_message_ids'])
+                observed_today.update(receipt.get('observed_source_message_ids',[]))
             rows=[task_message(row) for row in store.conn.execute('SELECT r.* FROM raw_events r WHERE source=? AND session_id=? AND NOT EXISTS (SELECT 1 FROM raw_processing p WHERE p.raw_id=r.id)'+complete_upload+import_boundary+' ORDER BY r.id',(source,session))]
             # Evaluate the watermark against full envelopes before filtering rows.
             eligible=[m for unit in dialogue_units(rows)
@@ -257,7 +276,8 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
             for chunk_index,eligible in enumerate(chunks):
                 if chunk_index+1<len(chunks):
                     following=dialogue_units(chunks[chunk_index+1])[0]
-                    if not dialogue_unit_is_complete(following):
+                    if (not dialogue_unit_is_complete(following)
+                            and message_datetime(following[0])>=message_datetime(eligible[-1])):
                         eligible=[*eligible,*following]  # A later correction must remain readable, never owned.
                 stable=[];parked=[]
                 # Reply envelopes determine completion / parked tails, while the latest
@@ -266,6 +286,11 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
                     ready=dialogue_unit_is_complete(unit) and (include_recent or message_datetime(unit[-1])<=cutoff)
                     (stable if ready else parked).extend(unit)
                 if not stable:continue
+                # Compare whole envelopes; never delete individual deferred
+                # messages before grouping, which could invent reply pairs.
+                if ({m['id'] for m in stable}<=attempted_today
+                        and {m['id'] for m in eligible}<=observed_today):
+                    continue
                 scope=digest(encode([source,session]))[:20]
                 omitted_today=set()
                 for previous in store.conn.execute(
@@ -1693,6 +1718,8 @@ def settle(database,batch,data,routed,plans):
             'pending':len({m['id'] for m in data['messages']+data['parked']}-set(processed)),
             'skipped':sum(value=='skipped' for value in processed.values()),
             'deferred':len(deferred),
+            'attempted_source_message_ids':sorted(all_new),
+            'observed_source_message_ids':[m['id'] for m in data['routing_messages']],
             'protected_deferrals':[entry for _,plan,_ in plans for entry in plan['hard_skips'] if entry.get('reason')!='no_new_sources'],
             'no_new_source_deferrals':[entry for _,plan,_ in plans for entry in plan['hard_skips'] if entry.get('reason')=='no_new_sources'],
             'candidate_overflow_deferrals':[entry for _,plan,_ in plans for entry in plan.get('host_deferrals',[])],
@@ -1897,7 +1924,7 @@ async def first_event_writer_pass(database,batch,component,plan,index,runner):
 async def _advance_frozen(database,*,include_recent=False,runner=None,retry_repair=False):
     initialize(database)
     batch=new_batch(database,include_recent,retry_repair=retry_repair)
-    if not batch:return held_result(database) or {'status':'current','note':'No stable dialogue units are ready.'}
+    if not batch:return held_result(database) or {'status':'current','note':'No unreviewed stable dialogue units are ready; deferred originals remain pending.'}
     data=json.loads(batch['input_json']);plans=[]
     if data.get('runtime_revision')!=runtime_revision():
         return json.loads(batch['result_json'])

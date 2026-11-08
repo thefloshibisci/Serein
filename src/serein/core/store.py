@@ -38,9 +38,9 @@ class Store:
         self.conn.execute("PRAGMA foreign_keys=ON")
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         if read_only:
-            if version not in (5, 6, 7, 8, 9) or self.conn.execute("PRAGMA application_id").fetchone()[0] != 0x53524E31:
+            if version not in (5, 6, 7, 8, 9, 10) or self.conn.execute("PRAGMA application_id").fetchone()[0] != 0x53524E31:
                 self.close()
-                raise ValueError("Read-only access requires an initialized Serein schema v5..v9 database")
+                raise ValueError("Read-only access requires an initialized Serein schema v5..v10 database")
             return
         if version == 0:
             if self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table'").fetchone():
@@ -49,7 +49,7 @@ class Store:
             schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
             self.conn.executescript("BEGIN;\n" + schema + "\nCOMMIT;")
             version = 1
-        elif version not in (1, 2, 3, 4, 5, 6, 7, 8, 9) or self.conn.execute("PRAGMA application_id").fetchone()[0] != 0x53524E31:
+        elif version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10) or self.conn.execute("PRAGMA application_id").fetchone()[0] != 0x53524E31:
             self.close()
             raise ValueError(f"Unsupported Serein schema version: {version}")
         if version == 1:
@@ -82,6 +82,10 @@ class Store:
             version = 8
         if version == 8:
             migration = Path(__file__).with_name("schema_v9.sql").read_text(encoding="utf-8")
+            self.conn.executescript("BEGIN;\n" + migration + "\nCOMMIT;")
+            version = 9
+        if version == 9:
+            migration = Path(__file__).with_name("schema_v10.sql").read_text(encoding="utf-8")
             self.conn.executescript("BEGIN;\n" + migration + "\nCOMMIT;")
 
     def close(self):
@@ -233,6 +237,9 @@ class Store:
         if not document:
             raise KeyError(document_id)
         reasons = []
+        if document['metadata'].get('memory_role') == 'feel':
+            from .feelings import surface_reasons
+            reasons.extend(surface_reasons(self, document))
         if document["lifecycle"] != "active":
             reasons.append(document["lifecycle"])
         if document["manual_surface"] != 1:

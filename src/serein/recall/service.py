@@ -132,6 +132,10 @@ class Recall:
         evidence = [{"ref": f"{hit['kind']}:{hit['id']}", "title": hit["object"]["document"]["title"],
                      "body": scene.evidence_text(hit["object"]["document"]) if hit["kind"] == "scene" else hit["object"]["document"]["body_md"]}
                     for hit in scored]
+        for hit, payload in zip(scored, evidence):
+            if hit['object']['document']['metadata'].get('memory_role') == 'feel':
+                payload['body'] = '当时的主观感受（不是事实证据）：\n' + payload['body']
+                payload['semantic_kind'] = 'feel'
         scores = self.reranker(text, evidence) if self.reranker and scored else {}
         for hit in candidates:
             document = hit["object"]["document"]

@@ -144,6 +144,8 @@ def create_app(settings, *, token: str, live: bool=False):
     app.include_router(appearance_routes(settings, auth))
     from .export import routes as export_routes
     app.include_router(export_routes(settings, auth))
+    from .typed_authored_http import routes as authored_type_routes
+    app.include_router(authored_type_routes(settings, auth))
     from .extensions import routes as extension_routes
     app.include_router(extension_routes(application, auth))
     if live:

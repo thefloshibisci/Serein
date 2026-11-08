@@ -11,6 +11,7 @@ WRITING_RULE = ('准备换窗时，由正在聊天的主模型写这一窗：我
 def latest_shadow(store):
     return store.conn.execute("SELECT * FROM historical_works WHERE kind='shadow' "
         "AND id NOT IN (SELECT document_id FROM deletions) "
+        "AND COALESCE(json_extract(metadata_json,'$.continuity_eligible'),1)!=0 "
         "ORDER BY json_extract(metadata_json,'$.created_at') DESC,id DESC LIMIT 1").fetchone()
 
 
@@ -70,7 +71,8 @@ class WindowShadows:
                 "VALUES (?,'shadow',?,?,?,?,?,'authored','') ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,"
                 "title=excluded.title,body_md=excluded.body_md,body_sha256=excluded.body_sha256,metadata_json=excluded.metadata_json",
                 (key,revision,title,content,digest(content),encode(meta)))
-            if structured and latest_shadow(store)['id']==key:
+            latest = latest_shadow(store)
+            if structured and latest is not None and latest['id']==key:
                 sync_introductions(store,sections)
         return {'id':key,'window_id':window_id,'revision':revision,'status':'saved','ordinary_recall':False}
 

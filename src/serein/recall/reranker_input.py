@@ -12,6 +12,8 @@ def memory_document(document, passages, *, max_chars=4000):
     The caller supplies the already scored passages in descending score order.
     """
     prefix = f"title: {document['title'].strip()}\nbody: "
+    if document['metadata'].get('memory_role') == 'feel':
+        prefix = 'type: feel (当时的主观感受，不是事实证据)\n' + prefix
     body = document['body_md']
     evidence = evidence_text(document) if document['kind'] == 'scene' else body
     complete = prefix + evidence

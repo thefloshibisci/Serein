@@ -120,7 +120,7 @@ def create_server(app: Application, *, private=False, http=False):
             return content
         return pipeline_next
 
-    def read_memory(identifier: str, kind: Literal["scene", "event", "narrative", "diary", "darkroom", "upload", "shadow", "dream"] | None = None,
+    def read_memory(identifier: str, kind: Literal["scene", "event", "narrative", "diary", "darkroom", "upload", "shadow", "dream", "feel", "plan"] | None = None,
                     revision: int | None = None, with_evidence: bool = False) -> str:
         """Read a memory by its own ID from recall or /resume (typed Event/Scene IDs are accepted). Default reads return the memory body without bound evidence. Set with_evidence=True to return its body and all currently active bound original evidence in one call; do not collect separate original-message IDs first. For independent chat transcripts use source_message_search then source_message_read. Deleted/locked bodies stay hidden; historical revisions may not have evidence membership."""
         if not private:
@@ -286,6 +286,13 @@ def create_server(app: Application, *, private=False, http=False):
         if not app.settings.writable:raise ValueError('Private live MCP requires writable storage')
         from .private_mcp import add_tools
         add_tools(server,app.settings)
+    from .typed_authored import tools_for as typed_tools_for
+    typed_tools = typed_tools_for(app.settings)
+    for name, function in typed_tools.items():
+        annotation = read_only if name.startswith(('read_', 'find_', 'list_')) else ToolAnnotations(
+            readOnlyHint=False, destructiveHint=name == 'edit_feel', idempotentHint=False, openWorldHint=False)
+        server.add_tool(function, name=name, annotations=annotation)
+        server._tool_manager.get_tool(name).parameters['additionalProperties'] = False
     if app.settings.mcp_tools is not None:
         available = {tool.name for tool in server._tool_manager.list_tools()}
         selected = set(app.settings.mcp_tools)
@@ -335,6 +342,10 @@ def create_server(app: Application, *, private=False, http=False):
 
     async def call_tool(name, arguments):
         refresh_optional()
+        if name in typed_tools:
+            tool = server._tool_manager.get_tool(name)
+            if tool and set(arguments or {}) - tool.parameters['properties'].keys():
+                raise ValueError('Unexpected typed authored arguments')
         if name=='resume' or (not private and name in {'dream_read','window_shadow_read'}):
             tool=server._tool_manager.get_tool(name)
             if tool and set(arguments or {})-tool.parameters['properties'].keys():

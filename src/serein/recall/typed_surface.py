@@ -128,6 +128,11 @@ class Snapshot:
             if doc['manual_surface'] != 1:
                 self.suppressed['manual_surface_not_enabled'] += 1
                 continue
+            if doc['metadata'].get('memory_role') == 'feel':
+                from ..core.feelings import surface_reasons
+                if surface_reasons(search.reader.store, doc):
+                    self.suppressed['feel_surface_policy'] += 1
+                    continue
             if doc['kind'] == 'event' and doc['id'] in predecessors:
                 self.suppressed['replaced_by_event'] += 1
                 continue

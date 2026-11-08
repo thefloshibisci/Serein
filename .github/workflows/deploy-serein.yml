@@ -1,0 +1,77 @@
+name: Test and deploy Serein
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: serein-production
+  cancel-in-progress: false
+jobs:
+  test-and-build:
+    if: github.repository == 'thefloshibisci/Serein' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: python -m pip install -e '.[test,http,background,tokenizer]'
+      - name: Offline behavior checks
+        run: >-
+          python -m pytest -q
+          .github/deploy/test_receiver.py
+          tests/test_ob_types.py tests/test_ob_self.py tests/test_resume_event_dates.py
+          tests/test_narrative_body_exclusions.py tests/test_mcp.py tests/test_http_mcp.py
+          tests/test_pipeline_admission.py tests/test_pipeline_queue_fairness.py
+          tests/test_model_json_fence.py tests/test_resume_shadows.py tests/test_chat_resume.py
+          tests/test_pipeline_limits.py
+          tests/test_pipeline_prompt_budget_recovery.py tests/test_pipeline_batch_recovery.py
+          tests/test_release_boundaries.py
+      - run: python -m compileall -q src .github/deploy
+      - run: npm ci --ignore-scripts
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: node tests/resume-page.dom.mjs
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: python scripts/release.py /tmp/serein-public.zip
+      - name: Build exact tested revision
+        env:
+          COMMIT: ${{ github.sha }}
+        run: |
+          docker build --label org.opencontainers.image.revision="$COMMIT" -t "nanzhi/serein-memory:github-$COMMIT" .
+          docker build --label org.opencontainers.image.revision="$COMMIT" -f deploy/Gateway.Dockerfile -t "nanzhi/serein:github-$COMMIT" .
+          docker save "nanzhi/serein-memory:github-$COMMIT" "nanzhi/serein:github-$COMMIT" | gzip -1 > image.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nanzhi-image-${{ github.sha }}
+          path: image.tar.gz
+          compression-level: 0
+          retention-days: 3
+  deploy:
+    name: Deploy tested pair to Tencent
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: nanzhi-image-${{ github.sha }}
+      - name: Verify, rehearse, back up and deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NANZHI_DEPLOY_KEY: ${{ secrets.NANZHI_DEPLOY_KEY }}
+          COMMIT: ${{ github.sha }}
+        run: python .github/deploy/client.py serein "$COMMIT" image.tar.gz

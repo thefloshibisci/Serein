@@ -5,6 +5,7 @@ from copy import deepcopy
 from time import monotonic
 import json
 import logging
+import re
 import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -168,6 +169,34 @@ def normalize_response(model, result):
                       'cache_creation_input_tokens':usage.get('cache_creation_input_tokens',0)}}
 
 
+def normalize_json_response(payload, result):
+    """Unwrap one complete JSON fence only when the caller requested JSON.
+
+    Do not repair syntax, extract prose fragments, or alter ordinary chat.
+    Consumers still validate the object against their task-specific schema.
+    """
+    if (payload.get('response_format') or {}).get('type') not in ('json_object', 'json_schema'):
+        return result
+    normalized = result
+    for index, choice in enumerate(result.get('choices', [])):
+        content = choice.get('message', {}).get('content')
+        if not isinstance(content, str) or choice.get('finish_reason') == 'length':
+            continue
+        match = re.fullmatch(r'\s*```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```\s*', content)
+        if not match:
+            continue
+        try:
+            value = json.loads(match[1])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        if normalized is result:
+            normalized = deepcopy(result)
+        normalized['choices'][index]['message']['content'] = match[1]
+    return normalized
+
+
 async def complete(model, payload, *, window_id=''):
     url, headers, body = request_for(model, {**payload, 'stream':False}, window_id=window_id)
     timeout=httpx.Timeout(model.get('request_timeout_seconds',120),connect=15,pool=15)
@@ -177,7 +206,7 @@ async def complete(model, payload, *, window_id=''):
             response = await client.post(url, headers=headers, json=body)
             if not response.is_success:
                 raise UpstreamError(response)
-            return normalize_response(model, response.json())
+            return normalize_json_response(payload, normalize_response(model, response.json()))
     except (httpx.TimeoutException,asyncio.CancelledError) as error:
         annotate_timeout(error,timeout,monotonic()-started)
         raise

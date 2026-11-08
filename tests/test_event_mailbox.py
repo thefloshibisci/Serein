@@ -155,7 +155,7 @@ def test_automatic_inbox_retention_and_isolation(setup):
     with Store(settings.database,read_only=True) as store:
         assert tuple(store.conn.execute("SELECT * FROM personal_records WHERE scope='favorite'").fetchone())==tuple(before)
         assert store.read(event_id)['revision']==1
-        assert store.conn.execute('PRAGMA user_version').fetchone()[0]==9
+        assert store.conn.execute('PRAGMA user_version').fetchone()[0]==10
 
 
 def test_promotion_atomic_cues_receipts_and_validation(setup):

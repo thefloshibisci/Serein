@@ -21,6 +21,9 @@ def _source_time(value):
 
 def memory_dates(document, kind):
     meta = document['metadata']
+    if meta.get('memory_role') == 'feel':
+        # Import time is not the time a historical feeling was authored.
+        return {key: meta[key] for key in ('authored_at', 'imported_at') if meta.get(key)}
     if kind == 'event':
         start = _source_time(meta.get('source_started_at'))
         end = _source_time(meta.get('source_ended_at'))
@@ -47,4 +50,4 @@ def memory_dates(document, kind):
 def date_lines(card):
     return [f'{key}: {card[key]}' for key in
             ('date', 'end_date', 'date_basis', 'started_at', 'ended_at',
-             'local_start', 'local_end', 'timezone', 'recorded_at') if card.get(key)]
+             'local_start', 'local_end', 'timezone', 'recorded_at', 'authored_at', 'imported_at') if card.get(key)]

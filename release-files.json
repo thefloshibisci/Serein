@@ -635,5 +635,20 @@
   "tests/test_narrative_delete.py",
   "tests/test_narrative_rename.py",
   "web/tests/narrative-errors.test.mjs",
-  "web/tests/narrative-flow.test.mjs"
+  "web/tests/narrative-flow.test.mjs",
+  "docs/ob-types-compatibility.md",
+  "scripts/ob_types.py",
+  "src/serein/api/typed_authored.py",
+  "src/serein/api/typed_authored_http.py",
+  "src/serein/core/feelings.py",
+  "src/serein/core/plans.py",
+  "src/serein/core/schema_v10.sql",
+  "src/serein/ingest/ob_types.py",
+  "tests/test_ob_types.py",
+  "tests/test_narrative_body_exclusions.py",
+  "src/serein/ingest/ob_self.py",
+  "tests/test_ob_self.py",
+  "src/serein/extensions/handoff_dates.py",
+  "tests/test_resume_event_dates.py",
+  "docs/github-deployment.md"
 ]

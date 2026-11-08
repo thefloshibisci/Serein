@@ -18,4 +18,4 @@ def initialize(settings):
     if settings.index and not settings.index.exists():
         settings.index.parent.mkdir(parents=True, exist_ok=True)
         build_index(settings.database, settings.index)
-    return {'status':'initialized','database':str(settings.database),'schema':9}
+    return {'status':'initialized','database':str(settings.database),'schema':10}

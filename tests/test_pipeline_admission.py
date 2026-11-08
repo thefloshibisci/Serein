@@ -131,3 +131,38 @@ def test_context_questions_are_not_removed_to_join_unrelated_owned_messages():
                 {'id': 4, 'session_id': 1, 'role': 'assistant',
                  'metadata': {'reply_to_user_message_id': 3}}]
     assert count_rounds([1, 4], messages) == 0
+
+
+def test_separately_routed_anonymous_lookahead_does_not_erase_a_round():
+    messages = _messages()
+    component = {'writer_round_gate': True, 'messages': messages,
+                 'context_messages': messages,
+                 'memberships': [{'unit_root_message_id': row['id'],
+                                  'source_message_ids': [row['id']]}
+                                 for row in messages]}
+    later = {'id': 5, 'session_id': 1, 'role': 'assistant',
+             'content': 'A separate activity routed to another corridor.'}
+    add_lookahead([component, {'messages': [later], 'context_messages': [later]}])
+    assert count_rounds([1, 2, 3, 4], component['context_messages']) == 1
+    result = apply_gate(_plan([1, 2, 3, 4], {'closed_by': None}), component)
+    assert result['admission_receipts'][0]['rounds'] == 2
+    assert len(result['events']) == 1
+    assert component['boundary_lookahead'] == [later]
+    assert 'metadata' not in later
+
+
+def test_independent_lookahead_does_not_supply_a_missing_owned_reply():
+    messages = _messages()
+    assert count_rounds([1], messages[:2], independent_lookahead_ids=[2]) == 0
+    # Never remove an intervening context question to fabricate an exchange.
+    assert count_rounds([1, 4], messages, independent_lookahead_ids=[2, 3]) == 0
+
+
+def test_explicit_split_reply_remains_required_even_if_marked_lookahead():
+    messages = [{'id': 1, 'session_id': 1, 'role': 'user'},
+                {'id': 2, 'session_id': 1, 'role': 'assistant',
+                 'metadata': {'reply_to_user_message_id': 1}},
+                {'id': 3, 'session_id': 1, 'role': 'assistant',
+                 'metadata': {'reply_to_user_message_id': 1}}]
+    assert count_rounds([1, 2], messages, independent_lookahead_ids=[3]) == 0
+    assert count_rounds([1, 2, 3], messages, independent_lookahead_ids=[3]) == 1

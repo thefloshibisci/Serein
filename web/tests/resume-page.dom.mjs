@@ -27,7 +27,8 @@ globalThis.fetch=async(url,options={})=>{
   previews++;
   if(fail)return {ok:false,json:async()=>({detail:'Invalid resume preview selection; use content options only'})};
   return {ok:true,json:async()=>({collection_id:'synthetic',total_items:1,has_more:false,next_cursor:null,
-    items:[{id:'scene_test',kind:'scene',section:'selected_memory',title:'Synthetic Scene',
+    items:[{id:'scene_test',kind:'event',section:'recent_event',title:'Synthetic Event',
+      created_at:'2026-11-08T03:59:38Z',date:'2026-08-30',date_basis:'source_records',
       body_md:'Synthetic continuity body',body_offset:0,body_complete:true}]})};
 };
 const directory=await mkdtemp(join(tmpdir(),'serein-resume-dom-'));
@@ -53,6 +54,9 @@ try {
   await act(async()=>retry.click());
   assert.equal(panel.querySelector('[role="alert"]'),null);
   assert.match(panel.textContent,/Synthetic continuity body/);
+  assert.match(panel.querySelector('article small').textContent,/来源日期 2026-08-30/);
+  assert.equal(panel.querySelector('article time').dateTime,'2026-08-30');
+  assert(!panel.querySelector('article small').textContent.includes('2026-11-08'));
   assert.equal(previews,2);
   await act(async()=>root.unmount());root=null;
   console.log('PASS resume preview: error visible in reading pane, retry restores content without saving');

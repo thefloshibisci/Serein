@@ -16,6 +16,21 @@ def settlement_window(unit):
 
 def routing_blocks(messages, max_chars=40000):
     """Freeze transport frames within settlement windows, never split a unit."""
+    # A later archive upload may follow newer live rows in raw-ID order. Split
+    # at that explicit acquisition boundary BEFORE constructing reply envelopes;
+    # otherwise an old imported reply can complete an unrelated live question.
+    segments=[];current=[]
+    for message in messages:
+        if (current and message_datetime(message)<message_datetime(current[-1])
+                and (message.get('metadata') or {}).get('import_upload_id')
+                    != (current[-1].get('metadata') or {}).get('import_upload_id')):
+            segments.append(current);current=[]
+        current.append(message)
+    if current:segments.append(current)
+    return [block for segment in segments for block in _routing_segment_blocks(segment,max_chars)]
+
+
+def _routing_segment_blocks(messages, max_chars):
     result=[];segment=[];window=None
     for unit in dialogue_units(messages):
         current=settlement_window(unit)

@@ -30,6 +30,7 @@ def read_works(database, kind, index=1):
         for position in selected:
             row = store.conn.execute("SELECT * FROM historical_works WHERE kind=? "
                 "AND id NOT IN (SELECT document_id FROM deletions) "
+                "AND COALESCE(json_extract(metadata_json,'$.continuity_eligible'),1)!=0 "
                 "ORDER BY COALESCE(julianday(json_extract(metadata_json,?)),0) DESC,id DESC LIMIT 1 OFFSET ?",
                 (kind, '$.'+field, position-1)).fetchone()
             lines = [f'{label} · 倒数第 {position} 篇', f'index: {position}']

@@ -42,4 +42,4 @@ def test_transplant_preserves_ids_source_rows_and_search(tmp_path):
     assert migrated.search('风铃')['items'] == archive.search('风铃')['items']
     assert migrated.ingest([record], source='original')['duplicate'] == 1
     with closing(sqlite3.connect(target)) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 9
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 10

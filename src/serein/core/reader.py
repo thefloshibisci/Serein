@@ -8,7 +8,7 @@ from .notebook import read_entry, resolve_entry
 from .store import Store
 
 
-KINDS = {"scene", "event", "narrative", "diary", "darkroom", "upload", "shadow", "dream"}
+KINDS = {"scene", "event", "narrative", "diary", "darkroom", "upload", "shadow", "dream", "feel", "plan"}
 
 
 class Reader:
@@ -34,6 +34,8 @@ class Reader:
                 kind = row[0]
             elif target.startswith("upload_"):
                 kind = "upload"
+            elif target.startswith('plan_'):
+                kind = 'plan'
             elif target.startswith(("window_", "dream_")):
                 kind = "shadow" if target.startswith("window_") else "dream"
             elif re.fullmatch(r"(?:diary-vps-)?\d+", target) or target.startswith(("diary_source_", "dr_", "legacy_darkroom:")):
@@ -51,6 +53,14 @@ class Reader:
 
     def read(self, identifier, *, kind=None, revision=None, with_evidence=True, include_blob=False, at=None):
         kind, target = self._identity(identifier, kind)
+        if kind == 'plan':
+            from .plans import read_plan, public_plan
+            plan = public_plan(self.store, read_plan(self.store, target, revision))
+            if not plan:
+                return self._result(kind, target, 'missing')
+            return self._result(kind, target, plan['status'], readable=True, plan=plan,
+                document={'title': plan['content'][:40], 'body_md': plan['content'], 'revision': plan['revision'],
+                          'metadata': plan}, surface_state={'can_surface': False, 'reasons': ['intention_not_fact']})
         if kind in {"shadow", "dream"}:
             if self.store.conn.execute("SELECT 1 FROM deletions WHERE document_id=?", (target,)).fetchone():
                 return self._result(kind, target, "deleted")
@@ -120,23 +130,37 @@ class Reader:
         if current is None:
             deleted = self.store.conn.execute("SELECT 1 FROM deletions WHERE document_id=?", (target,)).fetchone()
             return self._result(kind, target, "deleted" if deleted else "missing")
-        if kind and kind != current["kind"]:
+        is_feel = current['metadata'].get('memory_role') == 'feel'
+        if kind and kind != current["kind"] and not (kind == 'feel' and is_feel):
             return self._result(kind, target, "wrong_kind")
-        kind = current["kind"]
+        kind = 'feel' if kind == 'feel' else current["kind"]
         if current["lifecycle"] == "deleted":
             return self._result(kind, target, "deleted")
+        from .feelings import access_status
+        if access_status(self.store, current) != 'available':
+            return self._result(kind, target, 'locked')
         document = current if revision is None else self.store.read(target, revision=revision)
         if document is None:
             return self._result(kind, target, "revision_missing")
+        if access_status(self.store, document) != 'available':
+            return self._result(kind, target, 'locked')
         historical = document["body_revision"] != current["revision"]
         result = self._result(kind, target, current["lifecycle"], readable=True,
                               document=document, surface_state=self.store.surface_state(target),
                               evidence_scope="unavailable_for_revision" if historical else "current_bindings")
+        from .feelings import source_views, backlinks as feel_backlinks
+        from .plans import backlinks as plan_backlinks
+        if is_feel:
+            result.update(memory_role='feel', semantic_kind='feel', feel_sources=source_views(self.store, document),
+                          evidence_scope='subjective_feeling_not_evidence')
+        else:
+            result['feelings'] = feel_backlinks(self.store, target)
+        result['plans'] = plan_backlinks(self.store, target)
         if self.store.conn.execute('PRAGMA user_version').fetchone()[0]>=9:
             result['annotations']=[{'id':r['key'],**json.loads(r['payload_json']),'created_at':r['created_at']}
                 for r in self.store.conn.execute("SELECT * FROM personal_records WHERE scope='annotation' AND document_id=? AND deleted=0 ORDER BY created_at,key",(target,))]
             result['annotations_scope']='current_personal_notes_not_evidence'
-        if with_evidence and not historical:
+        if with_evidence and not historical and not is_feel:
             result["evidence"] = [{"binding_id": row["id"], "source_id": row["source_id"],
                                    "source_key": row["source_key"], "content": row["content"],
                                    "content_sha256": row["content_sha256"], "metadata": json.loads(row["metadata_json"])}

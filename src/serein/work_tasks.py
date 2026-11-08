@@ -228,6 +228,8 @@ async def work(settings,key,arguments):
                 return {**result,'events':events}  # Never spin on an unchanged hold.
             if result['status']!='processed':return {**result,'events':events}
             if not result.get('processed_originals',0):
+                if result.get('attempted_source_message_ids'):
+                    continue  # Durable review receipts exclude unchanged material; drain other chunks/scopes.
                 if batch_curator_omissions or result.get('retained_materials'):
                     continue  # Host-retained scope is excluded today; process other ready scopes.
                 return {**result,'status':'current','events':events,'note':'本批需要后续上下文，原话仍待整理；不会反复请求同一批。'}
