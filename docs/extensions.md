@@ -23,7 +23,9 @@ HTTP `POST /v1/extensions/pipeline_next` 接受 `{"include_recent":true}`，返�
 
 Agent 交付的原话只在 `request.prompt` 中出现一次；`messages`、`component` 等旁侧字段仅提供编号和必要结构，不是服务端完整校验快照。完整原话、来源绑定及旧材料回执保存在服务端，提交时仍按这些材料校验。MCP `pipeline_next` 明确只返回一份紧凑 JSON 文本（图片另走 image content），不附同内容的 `structuredContent`；HTTP 仍返回 JSON 对象。外部 runner 应解析文本 JSON，完整读取 `rules` 和 `prompt`，不要从精简后的旁侧字段重建原话。
 
-设置中的“自动摘要管理”集中提供执行方式、阶段模型、输入参数和 Agent 开关。“减小输入”默认关闭；开启后，候选旧 Event 才仅给 Curator 标题、正文和来源编号，可能遗漏细节并影响续接或材料取舍，不能保证模型主动补读。需要核对具体旧主张时，可返回 `{"context_request":{"event_id":"本轮候选编号","reason":"missing_prior_claim"}}`；也可使用现有 Track 补读。两种方式共用一次机会，按完整对话单元选取，最多六个、序列化三万字符；未提供的单元会在回执中列明，不能推断或视为 omit。旧正文不能当逐字原话引用。
+网页失败恢复使用 `POST /v1/pipeline/recovery-preview` 查看指定 `batch_id` 的数量、时间范围及可选 `max_input_chars` 下的拆分结果；此接口不修改批次或调用模型。`POST /v1/pipeline/skip-batch` 要求 `confirm: "SKIP_PIPELINE_BATCH"`；`POST /v1/pipeline/rebatch` 要求 `confirm: "REBATCH_PIPELINE_BATCH"` 与整数 `max_input_chars`（2000–100000）。只操作同一聊天最早的待处理批次，经现有 pipeline 锁执行；原话、旧请求和模型输出保留，不改已有 Event。重新分批不修改全局设置，使用完整问答并保留待回答的尾巴；成功后网页通过现有 `/v1/pipeline/next` 继续后台任务。
+
+设置中的“自动摘要管理”集中提供执行方式、阶段模型、输入参数和 Agent 开关。新批次的候选旧 Event 固定先给 Curator 标题、正文和来源编号，不再提供“减小输入”开关；旧配置中保存的关闭值也按此处理。需要核对具体旧主张时，可返回 `{"context_request":{"event_id":"本轮候选编号","reason":"missing_prior_claim"}}`；也可使用现有 Track 补读。两种方式共用一次机会，按完整对话单元选取，最多六个、序列化三万字符；未提供的单元会在回执中列明，不能推断或视为 omit。旧正文不能当逐字原话引用。
 
 设置页的“配置 Agent 整理 Event”弹窗提供 MCP 配置示例。使用发行包内 `scripts/event_agent_mcp.py` 连接已运行的 HTTP 后端；它只暴露领取、提交两个工具，不启动另一份后台任务。配置 `SEREIN_AGENT_URL` 与 `SEREIN_AGENT_TOKEN`，并把 Python 和脚本路径替换成实际安装位置。Agent 完整读取 prompt，完成对应角色，提交 JSON，再领下一阶段；不是打开弹窗就自动运行 Agent。
 

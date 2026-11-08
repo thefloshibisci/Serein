@@ -125,15 +125,23 @@ def routes(settings, auth):
         try:
             theme, title, key, ids, receipts = validate_creation(body)
             ids = normalize_material_ids(ids)
-        except (ValueError, TypeError, AttributeError):
-            return JSONResponse({'status': 'invalid', 'message': '请填写主题、16 字以内书名，并选择 2–24 条材料。'}, status_code=400)
+        except ValueError as exc:
+            return JSONResponse({'status': 'invalid', 'message': str(exc)}, status_code=400)
+        except (TypeError, AttributeError):
+            return JSONResponse({'status': 'invalid', 'message': '选材数据格式无效，请重新找材料。'}, status_code=400)
         with narrative_transaction(settings.database, write=True) as rolls:
+            document = rolls.store.read(key)
+            if document and document['lifecycle'] == 'deleted':
+                return JSONResponse({'status': 'conflict', 'reason': 'narrative_deleted',
+                    'message': '这本叙事卷已经删除，请重新找材料后新建。'}, status_code=409)
             current = rolls.read(key)
             if current.get('status') == 'ok':
                 same = (current.get('title') == title and current.get('current_status_cue') == '主题：' + theme
                         and all(set(map(str, current.get(f'linked_{kind}_ids') or [])) == set(map(str, ids[f'{kind}_ids']))
                                 for kind in ('event', 'scene', 'diary', 'darkroom', 'upload')))
-                return JSONResponse({'status': 'idempotent' if same else 'conflict', 'narrative_id': key}, status_code=200 if same else 409)
+                return JSONResponse({'status': 'idempotent' if same else 'conflict', 'narrative_id': key,
+                    **({'narrative': current} if same else {'reason': 'creation_request_changed',
+                        'message': '这次创建请求已保存过另一份书名或材料，请重新找材料后新建。'})}, status_code=200 if same else 409)
             proposed = {'narrative_id': key, 'title': title,
                         **{f'linked_{kind}_ids': ids[f'{kind}_ids'] for kind in ('event', 'scene', 'diary')}}
             materials = endpoints(settings, rolls).materialize(proposed)
@@ -149,7 +157,34 @@ def routes(settings, auth):
                 current_status_cue='主题：' + theme, query_cues=[theme],
                 time_start=dates[0] if dates else '', time_end=dates[-1] if dates else '',
                 **{f'source_{kind}_ids': ids[f'{kind}_ids'] for kind in ('event', 'scene', 'diary')})
+            if result['status'] == 'created':
+                result['narrative'] = {**result, 'status': 'ok'}
             return JSONResponse(result, status_code=200 if result['status'] == 'created' else 409)
+
+    @router.post('/api/narrative-rolls/rename')
+    def rename_roll(body: dict):
+        key, revision = body.get('narrative_id'), body.get('expected_revision')
+        title = body.get('title')
+        if not isinstance(title, str) or not 1 <= len(title.strip()) <= 16 or any(c in title for c in '\n\r#'):
+            return JSONResponse({'status': 'invalid', 'message': '书名请填写 1–16 个字符，不要换行或包含 #。'}, status_code=400)
+        if not isinstance(key, str) or not key or type(revision) is not int or revision < 1:
+            return JSONResponse({'status': 'invalid', 'reason': 'invalid_expected_revision'}, status_code=400)
+        with narrative_transaction(settings.database, write=True) as rolls:
+            result = rolls.rename(key, revision, title.strip())
+            return JSONResponse(result, status_code=404 if result['status'] == 'not_found'
+                else 409 if result['status'] == 'conflict' else 200)
+
+    @router.post('/api/narrative-rolls/delete')
+    def delete_roll(body: dict):
+        key = body.get('narrative_id')
+        revision = body.get('expected_revision')
+        if (body.get('confirm') != 'DELETE' or not isinstance(key, str) or not key
+                or type(revision) is not int or revision < 1):
+            return JSONResponse({'status': 'invalid', 'reason': 'invalid_delete_request'}, status_code=400)
+        with narrative_transaction(settings.database, write=True) as rolls:
+            result = rolls.delete(key, revision)
+            return JSONResponse(result, status_code=200 if result['status'] == 'deleted'
+                else 404 if result['status'] == 'not_found' else 409)
 
     @router.post('/api/narrative-rolls/save-materials')
     def save_materials(body: dict):
@@ -159,7 +194,10 @@ def routes(settings, auth):
                 return JSONResponse({'status': 'conflict', 'reason': 'requires_collecting_line'}, status_code=409)
             if current['revision'] != body.get('expected_revision'):
                 return JSONResponse({'status': 'conflict', 'reason': 'narrative_revision_changed'}, status_code=409)
-            ids = normalize_material_ids(body.get('material_ids'))
+            try:
+                ids = normalize_material_ids(body.get('material_ids'))
+            except ValueError as exc:
+                return JSONResponse({'status': 'invalid', 'reason': str(exc)}, status_code=400)
             proposed = {**current, **{f'linked_{kind}_ids': ids[f'{kind}_ids'] for kind in ('event','scene','diary','darkroom','upload')}}
             materials = endpoints(settings, rolls).materialize(proposed)
             if materials.get('status') != 'ok':

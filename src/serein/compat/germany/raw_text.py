@@ -25,8 +25,57 @@ def strip_worldbook_context(text: str) -> str:
     return WORLDBOOK_RE.sub("\n", str(text or ""))
 
 
+KELIVO_FULL_INTROS = (
+    '以下内容由系统提供，不是用户本轮发送的内容。',
+    'The following context is provided by the system. It is not what the user said in this turn.',
+)
+KELIVO_UPDATE_INTROS = (
+    '以下是本次对话开始后发生的记忆更新，由系统提供。',
+    'The following memory changes happened after this conversation started, provided by the system.',
+)
+
+
+def strip_kelivo_memory_context(text: str) -> str:
+    """Remove only a complete, leading Kelivo-generated memory envelope."""
+    original = str(text or '')
+    payload = original.lstrip()
+    for intro in KELIVO_UPDATE_INTROS:
+        if payload.startswith(intro):
+            tail = payload[len(intro):].lstrip()
+            block = re.match(r'<user_memory_update\b[^>]*>[\s\S]*?</user_memory_update>', tail)
+            return tail[block.end():].lstrip('\r\n') if block else original
+    for intro in KELIVO_FULL_INTROS:
+        if not payload.startswith(intro):
+            continue
+        tail = payload[len(intro):].lstrip()
+        profile = re.match(r'<user_profile\s*/>|<user_profile>[\s\S]*?</user_profile>', tail)
+        if profile is None:
+            return original
+        tail = tail[profile.end():].lstrip()
+        for kind in ('identity', 'workflow', 'voice', 'instruction'):
+            block = re.match(r'<user_memory\s+type="'+kind+r'"[^<>]*?(?:/>|>[\s\S]*?</user_memory>)', tail)
+            if block is None:
+                return original
+            tail = tail[block.end():].lstrip('\r\n')
+        return tail
+    return original
+
+
+RIKKAHUB_TIME_RE = re.compile(r'\A\s*<time_reminder>\s*Current time:\s+[^<>]+</time_reminder>\s*')
+
+
+def strip_rikkahub_time_context(text: str) -> str:
+    """Remove complete leading reminders emitted by RikkaHub, preserving quotes."""
+    cleaned = str(text or '')
+    while True:
+        previous = cleaned
+        cleaned = RIKKAHUB_TIME_RE.sub('', cleaned, count=1)
+        if cleaned == previous:
+            return cleaned
+
+
 def strip_raw_client_context(text: str) -> str:
-    cleaned = strip_worldbook_context(text)
+    cleaned = strip_kelivo_memory_context(strip_rikkahub_time_context(strip_worldbook_context(text)))
     cleaned = WORKSPACE_ATTACHMENT_RE.sub('', cleaned)
     cleaned = CLIENT_ATTACHMENT_RE.sub('', cleaned)
     cleaned = SELF_CLOSING_ATTACHMENT_RE.sub('', cleaned)

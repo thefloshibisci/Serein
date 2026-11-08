@@ -127,7 +127,7 @@ def test_route_failure_budget_holds_scope_across_restart_new_raw_and_budget(sett
     for _ in range(2):asyncio.run(p.flush_routes(settings.database))
     assert len(calls)==3
     with Store(settings.database,read_only=True) as store:
-        paused=store.conn.execute("SELECT * FROM pipeline_batches WHERE status='paused_failure'").fetchone()
+        paused=store.conn.execute("SELECT * FROM pipeline_batches WHERE status='waiting_materials'").fetchone()
         assert paused and store.conn.execute('SELECT failures FROM pipeline_job_failures').fetchone()[0]==3
         assert store.conn.execute('SELECT count(*) FROM pipeline_attempts').fetchone()[0]==3
         assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==0
@@ -172,7 +172,7 @@ def test_successful_router_prefix_is_reused_after_pause(settings,monkeypatch):
     asyncio.run(p.flush_routes(settings.database))
     assert len(calls)==4
     with Store(settings.database,read_only=True) as store:
-        row=store.conn.execute("SELECT * FROM pipeline_batches WHERE status='paused_failure'").fetchone()
+        row=store.conn.execute("SELECT * FROM pipeline_batches WHERE status='waiting_materials'").fetchone()
         successful=store.conn.execute('SELECT output_json FROM pipeline_jobs WHERE output_json IS NOT NULL').fetchone()[0]
     p.retry_batch(settings.database,row['id'])
     calls=api(settings,monkeypatch,lambda r:output_for(r['role'],r))

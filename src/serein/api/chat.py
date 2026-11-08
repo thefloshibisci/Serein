@@ -419,6 +419,19 @@ def routes(settings, services, auth):
             return {'result':json.loads(result['choices'][0]['message']['content'])}
         except (httpx.TimeoutException,TimeoutError):
             raise HTTPException(504,'Narrative Writer exceeded 5 minutes') from None
-        except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError):
+        except (UpstreamError, httpx.HTTPStatusError) as exc:
+            code = exc.response.status_code
+            reason, message = (
+                ('narrative_writer_auth_failed', 'Writer 模型凭据失效，请检查上游密钥。') if code in (401, 403)
+                else ('narrative_writer_rate_limited', 'Writer 模型额度不足或触发限流，请稍后重试。') if code == 429
+                else ('narrative_writer_input_too_large', '材料总量超过上游容量，请减少材料后重试。') if code == 413
+                else ('narrative_writer_model_unavailable', '上游不支持所选 Writer 模型或请求，请检查模型配置。') if code in (400, 404, 422)
+                else ('narrative_writer_upstream_unavailable', 'Writer 上游服务暂不可用，请稍后重试。'))
+            return JSONResponse({'status': 'error', 'reason': reason, 'message': message,
+                                 'upstream_status': code}, status_code=502)
+        except httpx.HTTPError:
+            return JSONResponse({'status': 'error', 'reason': 'narrative_writer_upstream_unavailable',
+                'message': '无法连接 Writer 上游服务，请稍后重试。'}, status_code=502)
+        except (ValueError,KeyError,IndexError,TypeError):
             raise HTTPException(502,'Writer returned an invalid result') from None
     return router

@@ -125,7 +125,9 @@ export async function runNarrativeCodexTask({mode,title,writingFocus = "",curren
   const writerModel = (instance.payload.available_models || instance.payload.models)?.find(item => item.id === instance.payload.assignments?.writer);
   const useUpstream = upstream.writer_enabled;
   if (!useUpstream && process.env.SEREIN_WRITER_ENABLED !== "1") throw new Error("narrative_writer_disabled");
-  const command = JSON.parse(process.env.SEREIN_WRITER_COMMAND || "[]");
+  let command;
+  try { command = JSON.parse(process.env.SEREIN_WRITER_COMMAND || "[]"); }
+  catch { throw new Error('narrative_writer_command_not_configured'); }
   if (!useUpstream && (!Array.isArray(command) || !command.length || command.some(x => typeof x !== "string"))) {
     throw new Error("narrative_writer_command_not_configured");
   }
@@ -136,7 +138,17 @@ export async function runNarrativeCodexTask({mode,title,writingFocus = "",curren
     prompt, materials, output_schema:JSON.parse(readFileSync(join(roleDir,"output.schema.json"),"utf8"))};
   const raw = useUpstream ? await (async () => {
     const result = await backend("/v1/models/writer", {method:"POST",body:task,signal}, {timeout:310_000});
-    if (!result.ok) throw new Error(result.status === 504 ? "narrative_writer_timeout" : "narrative_upstream_failed");
+    if (!result.ok) {
+      const known = new Set(['narrative_writer_auth_failed', 'narrative_writer_rate_limited',
+        'narrative_writer_model_unavailable', 'narrative_writer_upstream_unavailable',
+        'narrative_writer_invalid_output', 'narrative_writer_input_too_large']);
+      const reason = known.has(result.payload?.reason) ? result.payload.reason
+        : result.status === 504 ? 'narrative_writer_timeout'
+        : result.status === 503 && result.payload?.detail === 'Select a Writer model in Settings' ? 'narrative_writer_model_not_configured'
+        : result.payload?.detail === 'Writer returned an invalid result' ? 'narrative_writer_invalid_output'
+        : 'narrative_upstream_failed';
+      throw Object.assign(new Error(reason), { upstreamStatus: result.payload?.upstream_status || result.status });
+    }
     return result.payload.result;
   })() : await new Promise((resolveResult,reject) => {
     const child=spawn(command[0],command.slice(1),{stdio:["pipe","pipe","pipe"],windowsHide:true,signal});

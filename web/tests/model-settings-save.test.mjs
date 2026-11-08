@@ -27,13 +27,14 @@ test('catalog saves tolerate incompatible pipeline fields and preserve pending c
   const saves=[];
   let rejectNext=false;
   globalThis.fetch=async(url,options={})=>{
+    if(url==='/__serein/pipeline/status')return {ok:true,json:async()=>({pending_materials:[]})};
     if(url==='/__serein/settings/index-status')return {ok:true,json:async()=>structuredClone(state.index_status)};
     assert.equal(url,'/__serein/settings');
     if(options.method==='PATCH'){
       const body=JSON.parse(options.body);saves.push(body);
       assert.equal(body.expected_version,state.settings_version);
       // Reproduce an older server that returns fields it cannot accept in PATCH.
-      for(const key of Object.keys(body.pipeline||{}))assert(['execution_mode','max_prompt_chars','timeout_seconds','curator_summary_first'].includes(key));
+      for(const key of Object.keys(body.pipeline||{}))assert(['execution_mode','max_prompt_chars','timeout_seconds','event_history_enabled'].includes(key));
       if(rejectNext){rejectNext=false;return {ok:false,status:409,json:async()=>({detail:'synthetic save conflict'})};}
       for(const key of ['upstreams','models'])if(key in body)state[key]=body[key];
       for(const key of ['assignments','recall','upstream','pipeline','dream'])Object.assign(state[key],body[key]);
@@ -98,13 +99,17 @@ test('catalog saves tolerate incompatible pipeline fields and preserve pending c
     await click('保存自动摘要设置');
     assert.deepEqual(saves.at(-1).pipeline,{timeout_seconds:900});
     assert.equal(state.pipeline.timeout_seconds,900);
-    assert.equal(field('减小输入').checked,false);
-    assert.match(document.querySelector('#settings-content-summary').textContent,/可能漏掉旧细节/);
+    assert.equal([...document.querySelectorAll('label')].some(node=>node.textContent.startsWith('减小输入')),false);
+    assert.match(document.querySelector('#settings-content-summary').textContent,/切分先读旧 Event 正文，需要时再补读原话/);
     assert.equal(document.querySelector('#settings-content-configuration').textContent.includes('自动 Event 执行方式'),false);
-    await app.act(async()=>{field('减小输入').click();});
+    assert.equal(field('回看旧 Event').checked,true);
+    await app.act(async()=>{field('回看旧 Event').click();});
     await click('保存自动摘要设置');
-    assert.deepEqual(saves.at(-1).pipeline,{curator_summary_first:true});
-    assert.equal(state.pipeline.curator_summary_first,true);
+    assert.deepEqual(saves.at(-1).pipeline,{event_history_enabled:false});
+    assert.equal(state.pipeline.event_history_enabled,false);
+    await app.act(async()=>{field('回看旧 Event').click();});
+    await click('保存自动摘要设置');
+    assert.deepEqual(saves.at(-1).pipeline,{event_history_enabled:true});
   }finally{
     if(root)await app.act(async()=>root.unmount());
     dom.window.close();delete globalThis.IS_REACT_ACT_ENVIRONMENT;

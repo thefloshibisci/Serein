@@ -201,6 +201,30 @@ def test_narrative_api_writer_uses_text_only(settings, monkeypatch):
     assert cancelled==[True]
 
 
+@pytest.mark.parametrize('status,reason', [
+    (401, 'narrative_writer_auth_failed'), (403, 'narrative_writer_auth_failed'),
+    (429, 'narrative_writer_rate_limited'), (404, 'narrative_writer_model_unavailable'),
+    (413, 'narrative_writer_input_too_large'), (503, 'narrative_writer_upstream_unavailable'),
+])
+def test_narrative_writer_reports_provider_failure_without_private_payload(settings, monkeypatch, status, reason):
+    import httpx
+    from serein.model_runtime import UpstreamError
+    save_settings(settings.database, {'models': [
+        {'id': 'writer', 'model': 'synthetic-writer', 'base_url': 'http://127.0.0.1:9/v1'}],
+        'assignments': {'writer': 'writer'}, 'upstream': {'writer_enabled': True}})
+    client = TestClient(create_app(settings, token='synthetic', live=True),
+                        headers={'Authorization': 'Bearer synthetic'})
+    async def fail(model, payload):
+        raise UpstreamError(httpx.Response(status, text='synthetic-private-provider-body',
+            request=httpx.Request('POST', 'https://synthetic.invalid/v1/chat/completions')))
+    monkeypatch.setattr('serein.api.chat.complete', fail)
+    response = client.post('/v1/models/writer', json={'prompt': 'Synthetic source', 'output_schema': {'type': 'object'}})
+    assert response.status_code == 502
+    assert response.json()['reason'] == reason
+    assert response.json()['upstream_status'] == status
+    assert 'synthetic-private-provider-body' not in response.text
+
+
 def test_background_task_claim_progress_failure_resume_and_single_execution(settings):
     async def check():
         started=asyncio.Event();release=asyncio.Event();calls=[]

@@ -129,9 +129,11 @@ def test_pipeline_does_not_truncate_a_long_dialogue_unit(settings):
     raw_archive(settings).ingest(messages,source='test')
     # Exercise rejection and recovery with explicit budgets, independent of defaults.
     save_settings(settings.database,{'pipeline':{'max_prompt_chars':1}})
-    with pytest.raises(ValueError,match='提示词'):
-        asyncio.run(advance(settings.database,include_recent=True))
+    result=asyncio.run(advance(settings.database,include_recent=True))
+    assert result['status']=='retained' and '提示词' in result['reason']
     save_settings(settings.database,{'pipeline':{'max_prompt_chars':300000}})
+    from serein.extensions.pipeline import retry_batch
+    retry_batch(settings.database,result['batch_id'])
     task=asyncio.run(advance(settings.database,include_recent=True))
     assert task['status']=='awaiting_agent'
     reading=json.loads(task['request']['prompt'].split('<raw_messages_json>\n',1)[1].split('\n</raw_messages_json>',1)[0])

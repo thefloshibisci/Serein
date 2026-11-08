@@ -16,6 +16,7 @@ import {
 import { narrativeBodyDiff, runNarrativeCodexTask } from "./server/narrativeCodexRunner.mjs";
 import { buildNarrativePreviewFingerprint } from "./server/narrativeMaterialPreview.mjs";
 import { createNarrativePreviewJobs } from "./server/narrativePreviewJobs.mjs";
+import { narrativePreviewFailure } from './server/narrativeErrors.mjs';
 
 const narrativeWriterRoleDir = fileURLToPath(new URL("./codex_agents/narrative_writer/", import.meta.url));
 
@@ -146,7 +147,7 @@ function parseMcpEvent(text) {
   return JSON.parse(data);
 }
 
-import { sereinConfigured, callSereinBackend, callSereinTool } from './server/sereinBackend.mjs';
+import { sereinConfigured, sereinBackendTimedOut, callSereinBackend, callSereinTool } from './server/sereinBackend.mjs';
 
 async function callSereinDashboard(path, options = {}) { return callSereinBackend(path, options); }
 
@@ -309,14 +310,14 @@ async function attachNarrativeSourceLedgers(items) {
 
 export async function readLiveNarratives() {
   const index = await callSereinDashboard("/api/narrative-rolls?limit=100");
-  if (!index.ok) throw new Error(`narrative_live_projection_${index.status}`);
+  if (!index.ok) throw Object.assign(new Error(`narrative_live_projection_${index.status}`), { upstream: index });
   const summaries = Array.isArray(index.payload?.items) ? index.payload.items : [];
   const items = [];
   for (const summary of summaries) {
     const narrativeId = String(summary?.narrative_id || "").trim();
     if (!narrativeId) continue;
     const result = await callSereinDashboard(`/api/narrative-rolls?narrative_id=${encodeURIComponent(narrativeId)}`);
-    if (!result.ok) throw new Error(`narrative_live_projection_${result.status}`);
+    if (!result.ok) throw Object.assign(new Error(`narrative_live_projection_${result.status}`), { upstream: result });
     items.push(result.payload);
   }
   const enrichedItems = await attachNarrativeSourceLedgers(items);
@@ -800,7 +801,7 @@ function sereinMemoryBridge() {
         response.setHeader("Content-Type","application/json; charset=utf-8");
         response.setHeader("Cache-Control","no-store");
         const action=request.url?.split("?")[0];
-        if(!(request.method==="GET" && (action==="/status" || /^\/attempts\/\d+$/.test(action))) && !(request.method==="POST" && ["/next","/submit","/rebuild","/retry-image","/retry-batch","/restore-auto-boundary"].includes(action))) {
+          if(!(request.method==="GET" && (action==="/status" || /^\/(?:attempts|pending)\/\d+$/.test(action))) && !(request.method==="POST" && ["/next","/submit","/rebuild","/retry-image","/retry-batch","/restore-auto-boundary","/recovery-preview","/skip-batch","/rebatch","/resume-pending"].includes(action))) {
           response.statusCode=405;response.end(JSON.stringify({error:"method_not_allowed"}));return;
         }
         if(request.method==="POST" && (!String(request.headers["content-type"]).startsWith("application/json") ||
@@ -1110,6 +1111,7 @@ function sereinMemoryBridge() {
 
       server.middlewares.use("/__serein/live/narratives", async (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.setHeader('Cache-Control', 'no-store');
         if (request.method !== "POST") {
           response.statusCode = 405;
           response.end(JSON.stringify({ error: "method_not_allowed" }));
@@ -1119,17 +1121,17 @@ function sereinMemoryBridge() {
           response.statusCode = 200;
           response.end(JSON.stringify(await readLiveNarratives()));
         } catch (error) {
-          response.statusCode = error?.name === "AbortError" ? 504 : 502;
-          response.end(JSON.stringify({
+          response.statusCode = error.upstream?.status || (sereinBackendTimedOut(error) ? 504 : 502);
+          response.end(JSON.stringify(error.upstream?.payload || {
             status: "error",
             error: "narrative_live_projection_failed",
-            message: "没有读到线上叙事卷，已保留本地样卷回退。",
+            message: "暂时无法读取书架，请重新读取；当前已显示的书目保留。",
             items: [],
           }));
         }
       });
 
-      for (const action of ["discover-theme", "create-line"]) {
+      for (const action of ["discover-theme", "create-line", "delete", "rename"]) {
         server.middlewares.use(`/__serein/narrative-${action}`, async (request, response) => {
           response.setHeader("Content-Type", "application/json; charset=utf-8");
           if (request.method !== "POST") {
@@ -1144,9 +1146,12 @@ function sereinMemoryBridge() {
             });
             response.statusCode = result.status;
             response.end(JSON.stringify(result.payload));
-          } catch {
-            response.statusCode = 502;
-            response.end(JSON.stringify({ status: "error", message: "叙事卷服务暂时没有响应，请重试。" }));
+          } catch (error) {
+            const timedOut = sereinBackendTimedOut(error);
+            const actionName = action === 'discover-theme' ? 'discovery' : action === 'create-line' ? 'create' : action;
+            response.statusCode = timedOut ? 504 : 502;
+            response.end(JSON.stringify({ status: 'error', reason: `narrative_${actionName}_${timedOut ? 'timeout' : 'unavailable'}`,
+              message: timedOut ? '服务响应超时，尚未确认操作结果，请稍后重试。' : '叙事卷服务暂时没有响应，请重试。' }));
           }
         });
       }
@@ -1255,13 +1260,9 @@ function sereinMemoryBridge() {
             : { status: "error", reason: "preview_busy", message: "已有预览正在生成，请稍后再试。" }));
         } catch (error) {
           console.error("[serein-memory-bridge] Narrative preview failed", error);
-          response.statusCode = error?.name === "AbortError" ? 504 : 502;
-          response.end(JSON.stringify({
-            status: "error",
-            reason: "narrative_preview_failed",
-            message: error?.name === "AbortError" ? "这次预览生成超时了。" : "暂时没有生成叙事卷预览。",
-            writes_performed: [],
-          }));
+          const failure = narrativePreviewFailure(error);
+          response.statusCode = failure.statusCode;
+          response.end(JSON.stringify(failure.payload));
         }
       });
 
@@ -1334,11 +1335,11 @@ function sereinMemoryBridge() {
           response.end(JSON.stringify(upstream.payload));
         } catch (error) {
           console.error("[serein-memory-bridge] Narrative body save failed", error);
-          response.statusCode = error?.name === "AbortError" ? 504 : 502;
+          response.statusCode = sereinBackendTimedOut(error) ? 504 : 502;
           response.end(JSON.stringify({
             status: "error",
             reason: "narrative_body_save_failed",
-            message: error?.name === "AbortError" ? "保存正文超时了。" : "这次正文没有保存。",
+            message: sereinBackendTimedOut(error) ? "保存正文响应超时，尚未确认保存结果，请重新打开书卷查看。" : "保存正文连接中断，尚未确认保存结果，请重新打开书卷查看。",
           }));
         }
       });
@@ -1844,7 +1845,7 @@ function sereinMemoryBridge() {
           response.end(JSON.stringify(result.payload));
         } catch (error) {
           response.statusCode = 502;
-          response.end(JSON.stringify({ message: "没有保存叙事线材料，请刷新后重试。" }));
+          response.end(JSON.stringify({ message: "保存材料时连接中断或响应超时，尚未确认保存结果，请重新打开书卷查看。" }));
         }
       });
 

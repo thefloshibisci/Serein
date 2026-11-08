@@ -227,7 +227,7 @@ def bind_transcriptions(output, images):
 
 def decision(output):
     return {key: value for key, value in output.items()
-            if key != 'image_transcriptions' and not (key == 'context_request' and value is None)}
+            if key not in ('image_transcriptions','adopt_pending_material_ids') and not (key == 'context_request' and value is None)}
 
 
 def verify_transcriptions(transcriptions, images):
@@ -261,7 +261,7 @@ def compact_batch_snapshot(data):
     """Keep the exact Router proof while dropping completed downstream material."""
     keys=('contract','runtime_revision','scope','source','day','routing_messages','routing_result',
           'tracks','recent','next_track_ordinal','input_policy',
-          'last_routing_repair','rebuild_of','recovery_downgrade')
+          'last_routing_repair','rebuild_of','recovery_downgrade','pending_previous_batch_id')
     compact={key:data[key] for key in keys if key in data}
     compact['task_snapshot_compacted']=True
     return _strip_task_media(compact)
@@ -281,7 +281,7 @@ def compact_job_request(value):
 
 def compact_completed_snapshots(store):
     """One-time recovery for historical done batches with materialized task copies."""
-    rows=store.conn.execute("SELECT id,input_json,result_json FROM pipeline_batches WHERE status='done' "
+    rows=store.conn.execute("SELECT id,input_json,result_json FROM pipeline_batches WHERE status='done' AND NOT EXISTS (SELECT 1 FROM pipeline_pending_materials pm WHERE pm.batch_id=pipeline_batches.id AND pm.status IN ('open','running')) "
         "AND COALESCE(json_extract(result_json,'$.task_snapshot_compacted'),0)=0").fetchall()
     for row in rows:
         try:
@@ -304,7 +304,7 @@ def compact_completed_snapshots(store):
 
 def expire_completed_media(store):
     """Only disposable task copies expire. Canonical raw attachments remain intact."""
-    rows=store.conn.execute("SELECT id,input_json,result_json FROM pipeline_batches WHERE status='done' AND json_extract(result_json,'$.media_cache_expired') IS NULL AND datetime(json_extract(result_json,'$.completed_at'))<datetime('now','-7 days')").fetchall()
+    rows=store.conn.execute("SELECT id,input_json,result_json FROM pipeline_batches WHERE status='done' AND NOT EXISTS (SELECT 1 FROM pipeline_pending_materials pm WHERE pm.batch_id=pipeline_batches.id AND pm.status IN ('open','running')) AND json_extract(result_json,'$.media_cache_expired') IS NULL AND datetime(json_extract(result_json,'$.completed_at'))<datetime('now','-7 days')").fetchall()
     for row in rows:
         result=json.loads(row['result_json']);result['media_cache_expired']=True
         store.conn.execute('UPDATE pipeline_batches SET input_json=?,result_json=? WHERE id=?',

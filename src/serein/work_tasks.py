@@ -149,7 +149,7 @@ async def execute(database,key,operation,*,queued_id=None):
             if value.get('run_id')==run_id and value['status']=='running':
                 followup=value.get('followup_arguments')
                 if followup is not None and not value.get('stop_requested') and state in (
-                        'current','processed','settled_today','waiting_settlement_window','auto_paused'):
+                        'current','processed','retained','settled_today','waiting_settlement_window','auto_paused'):
                     _queue(value,followup)
                 elif followup is None and state in ('current','settled_today','waiting_settlement_window','auto_paused') and previous['status'] not in ('queued','running'):
                     value=previous
@@ -220,7 +220,7 @@ async def work(settings,key,arguments):
             result={**result,'deferred':deferred,'skipped':skipped,'protected_deferrals':protected,
                     'curator_omission_deferrals':curator_omissions}
             progress(events=events)
-            if (result['status']=='paused' and result.get('job_id')) or result['status']=='routed' or (result['status']=='needs_repair' and not result.get('blocked_scopes')):
+            if result['status']=='retained' or (result['status']=='paused' and result.get('job_id')) or result['status']=='routed' or (result['status']=='needs_repair' and not result.get('blocked_scopes')):
                 batch_id=result.get('batch_id') or result.get('job_id')
                 if batch_id and batch_id not in continued_batches:
                     continued_batches.add(batch_id)
@@ -228,7 +228,7 @@ async def work(settings,key,arguments):
                 return {**result,'events':events}  # Never spin on an unchanged hold.
             if result['status']!='processed':return {**result,'events':events}
             if not result.get('processed_originals',0):
-                if batch_curator_omissions:
+                if batch_curator_omissions or result.get('retained_materials'):
                     continue  # Host-retained scope is excluded today; process other ready scopes.
                 return {**result,'status':'current','events':events,'note':'本批需要后续上下文，原话仍待整理；不会反复请求同一批。'}
     from .imports import advance_import, DEFAULT_BATCH_SIZE, LARGE_BATCH_SIZE

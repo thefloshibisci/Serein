@@ -35,6 +35,8 @@ def test_create_theme_line_retry_conflict_and_writer_focus(live):
     response = client.post('/api/narrative-rolls/create-line', json=body)
     assert response.status_code == 200, response.text
     key = response.json()['narrative_id']
+    assert response.json()['narrative']['narrative_id'] == key
+    assert response.json()['narrative']['body'] == ''
     assert client.post('/api/narrative-rolls/create-line', json=body).json()['status'] == 'idempotent'
     line = client.get('/api/narrative-rolls', params={'narrative_id': key}).json()
     assert line['body'] == '' and line['publication_status'] == 'collecting'
@@ -49,6 +51,11 @@ def test_create_theme_line_retry_conflict_and_writer_focus(live):
     client.put(f'/diaries/{diary}', json={'content': '这条材料改过了'})
     stale = client.post('/api/narrative-rolls/create-line', json={**body, 'request_id': str(uuid4())})
     assert stale.status_code == 409 and '材料已变化' in stale.text
+    assert client.post('/api/narrative-rolls/create-line', json={**body, 'title': '雨' * 17}).json()['message'] == '书名请填写 1–16 个字符，不要换行。'
+    line = client.get('/api/narrative-rolls', params={'narrative_id': key}).json()
+    assert client.post('/api/narrative-rolls/delete', json={
+        'narrative_id': key, 'expected_revision': line['revision'], 'confirm': 'DELETE'}).status_code == 200
+    assert client.post('/api/narrative-rolls/create-line', json=body).json()['reason'] == 'narrative_deleted'
 
 
 @pytest.mark.parametrize('legacy', [

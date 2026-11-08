@@ -49,15 +49,8 @@ def load_tracks(store, source, session, before_id, message, *, lookback_days=3):
     metadata=json.loads(current['metadata_json'] or '{}')
     boundary=(metadata.get('runtime',''),metadata.get('workspace_root',''))
     scope=scope_for(source,session)
-    # Only a successfully published explicit rebuild can retire earlier
-    # unprovable history, and only for its own scope.
-    cutoff=store.conn.execute("SELECT MAX(CAST(json_extract(old.result_json,"
-        "'$.recovery_downgrade.history_before_id') AS INTEGER)) FROM pipeline_batches old "
-        "JOIN pipeline_batches fresh ON fresh.id=json_extract(old.result_json,'$.replacement_batch_id') "
-        "WHERE old.scope=? AND old.status='superseded_repair' AND fresh.status IN ('routed','done') AND "
-        "CAST(json_extract(old.result_json,'$.recovery_downgrade.history_before_id') AS INTEGER)<=? AND "
-        "json_extract(old.result_json,'$.recovery_downgrade.confirmed_by')='REBUILD_PIPELINE_BATCH'",
-        (scope,before_id)).fetchone()[0] or 0
+    from .pipeline_recovery import history_reset_cutoff
+    cutoff=history_reset_cutoff(store,scope,before_id)
     anchors={}
     clock=source_julianday('r')
     rows=store.conn.execute('SELECT r.*,p.route_json FROM pipeline_routes p JOIN raw_events r ON r.id=p.raw_id '
@@ -94,15 +87,19 @@ def load_tracks(store, source, session, before_id, message, *, lookback_days=3):
             from .pipeline_recovery import _frames
             producer=store.conn.execute('SELECT b.* FROM pipeline_route_provenance r '
                 'JOIN pipeline_batches b ON b.id=r.batch_id WHERE r.raw_id=?',(original['id'],)).fetchone()
-            historical=None
+            historical=None;future_pending_frame=False
             if producer:
                 for frame in _frames(store.conn.execute('PRAGMA database_list').fetchone()[2],dict(producer)):
-                    if max(m['id'] for m in frame['messages'])>=before_id:continue
-                    if any(message_datetime(m)>reference for m in frame['messages']):continue
                     if original['id'] not in {m['id'] for m in frame['messages']}:continue
+                    if (max(m['id'] for m in frame['messages'])>=before_id or
+                            any(message_datetime(m)>reference for m in frame['messages'])):
+                        future_pending_frame=True
+                        continue
                     historical=next((c for c in frame['tracks'] if c['track_id']==card['track_id']),None)
                     if historical:break
             if historical is None:
+                if future_pending_frame and store.conn.execute("SELECT 1 FROM pipeline_pending_materials WHERE batch_id=? AND status IN ('open','running')",(producer['id'],)).fetchone():
+                    continue  # Retained frames become recallable only after their whole source window.
                 raise p.RoutingRecoveryError('No bounded historical pre-routing Track frame: '+card['track_id'])
             card=historical
             assert_before(store,[card],before_id)

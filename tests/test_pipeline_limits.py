@@ -423,9 +423,8 @@ def test_timeout_durable_diagnostic_and_prompt_budget_before_model(settings,monk
         assert store.conn.execute('SELECT error FROM pipeline_attempts').fetchone()[0]
     # Programmatic low limit tests the final serialized-request guard.
     save_settings(settings.database,{'pipeline':{'max_prompt_chars':1}})
-    paused=asyncio.run(p.advance(settings.database,include_recent=True))
-    assert paused['status']=='paused' and paused['repair_kind']=='prompt_budget'
-    assert '提示词' in paused['reason']
+    result=asyncio.run(p.advance(settings.database,include_recent=True))
+    assert result['status']=='retained' and '提示词' in result['reason']
     assert len(called)==1
 
 
@@ -440,7 +439,7 @@ def test_empty_structured_output_reports_length_exhaustion(settings,monkeypatch)
                 'usage':{'completion_tokens':8192,'completion_tokens_details':{'reasoning_tokens':8192}}}
     monkeypatch.setattr('serein.model_runtime.complete',empty)
     result=asyncio.run(p.advance(settings.database,include_recent=True))
-    assert result['status']=='paused'
+    assert result['status']=='retained'
     assert '未返回最终 JSON 内容' in result['reason'] and '输出预算耗尽' in result['reason'] and '8192' in result['reason']
     assert len(calls)==3 and all('max_tokens' not in payload for payload in calls)
     with Store(settings.database,read_only=True) as store:

@@ -3,6 +3,10 @@ export function sereinConfigured(env = process.env) {
   return Boolean(String(env.SEREIN_MEMORY_URL || "").trim());
 }
 
+export function sereinBackendTimedOut(error) {
+  return error?.name === 'TimeoutError' || error?.name === 'AbortError';
+}
+
 export async function callSereinBackend(path, { method = "GET", body, timeoutMs, signal } = {}, { env = process.env, fetchImpl = fetch, timeout = 30_000 } = {}) {
   const base = String(env.SEREIN_MEMORY_URL || "").trim().replace(/\/$/, "");
   const token = String(env.SEREIN_MEMORY_TOKEN || "").trim();

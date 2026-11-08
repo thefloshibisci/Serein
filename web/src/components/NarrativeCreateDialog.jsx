@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "@phosphor-icons/react";
 import { createUuid } from "../utils/createUuid.js";
+import { narrativeRequest } from '../storage/narrativeErrors.js';
 
 async function request(action, body) {
-  const response = await fetch(`/__serein/narrative-${action}`, {
+  const { payload } = await narrativeRequest(`/__serein/narrative-${action}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.message || payload.reason || "这次没有完成，请重试。");
+  }, action === 'create-line' ? '保存叙事线' : '寻找材料',
+  action === 'create-line' ? ['created', 'idempotent'] : ['ok']);
   return payload;
 }
 
@@ -39,7 +39,7 @@ export function NarrativeCreateDialog({ onClose, onCreated }) {
     setBusy(write ? "write" : "save"); setError("");
     try {
       const saved = await request("create-line", { request_id: requestId.current, theme, title, sources });
-      await onCreated(saved.narrative_id, write);
+      await onCreated(saved.narrative_id, write, saved.narrative ? { ...saved.narrative, source_ledger: sources } : null);
     } catch (err) { setError(err.message); setBusy(""); }
   };
   return <dialog ref={dialog} className="narrative-create" aria-labelledby="narrative-create-title"
@@ -72,6 +72,6 @@ export function NarrativeCreateDialog({ onClose, onCreated }) {
           {busy === "write" ? "准备书写…" : "书写"}</button></footer>
       <p className="narrative-create__hint">保存叙事线会留下一本空白的书，之后可以继续攒材料。</p>
     </section>}
-    {error && <p role="alert">{error}</p>}
+    {error && <p role="alert" style={{ whiteSpace: 'pre-line' }}>{error}</p>}
   </dialog>;
 }

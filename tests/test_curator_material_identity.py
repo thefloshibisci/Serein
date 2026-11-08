@@ -117,9 +117,9 @@ def test_protected_append_filters_writer_materials_to_new_owned_sources(settings
 
 
 @pytest.mark.parametrize('with_image', [False, True])
-@pytest.mark.parametrize('reduce_input', [False, True])
-def test_cross_window_event_extension_hands_correct_materials_to_writer(settings, with_image, reduce_input):
-    save_settings(settings.database, {'pipeline': {'material_review_enabled': True, 'curator_summary_first': reduce_input}})
+@pytest.mark.parametrize('legacy_reduce_input', [False, True])
+def test_cross_window_event_extension_hands_correct_materials_to_writer(settings, with_image, legacy_reduce_input):
+    save_settings(settings.database, {'pipeline': {'material_review_enabled': True, 'curator_summary_first': legacy_reduce_input}})
     seen = []
     curator_seen = []
     first_body = None
@@ -173,8 +173,8 @@ def test_cross_window_event_extension_hands_correct_materials_to_writer(settings
         assert len(transcription_calls) == 1
         assert request['images'] == []
         assert request['curator_image_transcriptions'] == []
-        assert bool(curator_seen[-1].get('curator_image_transcriptions',[])) is (not reduce_input)
-        assert ('Synthetic cover image' in curator_seen[-1]['prompt']) is (not reduce_input)
+        assert curator_seen[-1].get('curator_image_transcriptions',[]) == []
+        assert 'Synthetic cover image' not in curator_seen[-1]['prompt']
         transcript = curator_seen[0]['curator_image_transcriptions'][0]
         assert transcript['text'] == 'Synthetic cover image'
         assert transcript['source_message_id'] == 1

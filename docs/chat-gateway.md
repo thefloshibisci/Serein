@@ -63,6 +63,12 @@ turns; an in-progress tool continuation cannot restore the previous settings' ca
 
 ## Worldbook and raw dialogue
 
+RikkaHub 3.1.1 的完整前置 `<time_reminder>Current time: …</time_reminder>` 时间提醒从召回查询、新增原话和本轮去重输入中排除；独立提醒不归档为用户原话。带正文或图片的消息保留正文和图片，正文中引用的提醒、代码示例及未闭合标签不按前置提醒删除。提醒仍完整发给聊天模型，此处理不依赖 Operit 重写开关。
+
+RikkaHub 的世界书和模式注入请在客户端「设置 → 提示词」的条目中，将注入位置选为「系统提示词之前／之后」（Before/After System Prompt）。这两个位置将内容写进 system 消息，Serein 已从原话归档和本轮去重中排除 system；无需启用额外拆包。聊天顶部、底部和指定深度位置可以发出没有来源标记的 user／assistant 消息，Serein 无法仅凭其正文可靠识别为世界书；不会自动移动或猜测删除这些内容。上传文件正文也不作为时间提醒删除。
+
+Kelivo 的已知系统记忆前缀也从召回查询和新增原话归档中排除：须以其固定中英文系统说明开头，并包含完整 `user_profile` 和按序的四类 `user_memory` 块；旧版 `user_memory_update` 前缀同样支持。只有完整的开头包装会被移除，保留后面的用户正文和图片；正文中的引用、代码示例、任意 XML 和不完整包装不按此规则删除。客户端原始请求仍完整发给聊天模型，已存在的原话与 Event 来源不批量重写。
+
 完整的 `<worldbook>…</worldbook>` 是客户端背景设定，不是用户本轮原话。
 召回查询和新增原话归档都会排除整个区块（包括多个 entry、多段、多行、大小写与带属性的标签），
 保留区块外的对话文字和图片附件。归档在生成本轮去重标识之前清理世界书，直接 raw ingest

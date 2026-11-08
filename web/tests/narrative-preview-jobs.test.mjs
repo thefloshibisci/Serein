@@ -108,7 +108,7 @@ test("polling reports missing jobs and upstream timeouts without saving", async 
       return new Response(JSON.stringify(requests === 1 ? {status: "pending", job_id: "job-1"}
         : {status: "error", message, writes_performed: []}), {status: requests === 1 ? 202 : status});
     });
-    await assert.rejects(previewNarrativeRoll({id: "narrative_1"}, "rewrite", {}), error => error.message === message);
+    await assert.rejects(previewNarrativeRoll({id: "narrative_1"}, "rewrite", {}), error => error.message.includes(message) && error.message.startsWith('读取书写结果失败：'));
     assert.equal(requests, 2);
   }
 });

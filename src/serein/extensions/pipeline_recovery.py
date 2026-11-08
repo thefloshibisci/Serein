@@ -9,11 +9,12 @@ import re
 from uuid import uuid4
 
 from ..core.store import Store, Conflict, digest, encode, now
+from ..deployment import read_from_store
 from . import pipeline_tracks as tracks
 
 MAX_HISTORY_BATCHES = 64
 MAX_HISTORY_JOBS = 256
-SOURCE_STATES = ('routed', 'done', 'superseded_input_budget')
+SOURCE_STATES = ('routed', 'done', 'superseded_input_budget', 'waiting_materials')
 MESSAGE_KEYS = ('id', 'source', 'source_event_id', 'original_session_id',
                 'session_id', 'role', 'content', 'created_at')
 # rc65 before the replay-seed fix, with Windows CRLF or release LF files.
@@ -55,6 +56,31 @@ def _same_scope(data, messages):
     return bool(messages) and all(isinstance(m, dict) and
         tracks.scope_for(m.get('source'), m.get('original_session_id')) == data['scope']
         for m in messages)
+
+
+def history_reset_cutoff(store, scope, before_id):
+    """A confirmed reset survives downstream state changes after accepted routing."""
+    from . import pipeline as p
+    rows = store.conn.execute("SELECT fresh.input_json,CAST(json_extract(old.result_json,"
+        "'$.recovery_downgrade.history_before_id') AS INTEGER) AS cutoff FROM pipeline_batches old "
+        "JOIN pipeline_batches fresh ON fresh.id=json_extract(old.result_json,'$.replacement_batch_id') "
+        "WHERE old.scope=? AND fresh.scope=old.scope AND old.status='superseded_repair' "
+        "AND json_extract(fresh.input_json,'$.routing_result._public_normalized')=1 "
+        "AND CAST(json_extract(old.result_json,'$.recovery_downgrade.history_before_id') AS INTEGER)<=? "
+        "AND json_extract(old.result_json,'$.recovery_downgrade.confirmed_by')='REBUILD_PIPELINE_BATCH' "
+        "ORDER BY cutoff DESC", (scope, before_id))
+    for row in rows:
+        data = json.loads(row['input_json'])
+        try:
+            if data.get('scope') != scope or not _same_scope(data, data.get('routing_messages', [])):
+                continue
+            p.validate_routing_result(data, data['routing_result'])
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        # Skip/rebatch inputs deliberately omit this accepted snapshot. Merely
+        # finishing an unrouted batch therefore cannot publish a history reset.
+        return row['cutoff']
+    return 0
 
 
 def _frames(database, batch):
@@ -277,10 +303,21 @@ def assert_downstream_snapshot(database, batch, data):
             roots = {u['unit_root_message_id'] for u in component['memberships']}
             bounded = {**frozen, 'memberships': [u for u in frozen['memberships']
                                                 if u['unit_root_message_id'] in roots]}
+            pending_read=frozen.get('pending_material_read')
+            if pending_read:
+                original_ids={m['id'] for m in component['messages']}
+                extra={m['id'] for m in frozen['messages']}-original_ids
+                if extra and (frozen.get('adopted_pending_ids')!=[pending_read['id']]
+                        or extra!={m['id'] for m in pending_read['messages']}):
+                    raise ValueError('pending material ownership differs from the explicit adoption')
+                bounded['messages']=[m for m in frozen['messages'] if m['id'] in original_ids]
+                allowed_sessions=set(component.get('context_session_ids',[]))|{m['session_id'] for m in pending_read['messages']}
+                if not set(frozen.get('context_session_ids',[])).issubset(allowed_sessions):raise ValueError('pending read has unrelated sessions')
+                bounded['context_session_ids']=component.get('context_session_ids',[])
             if (p._component_signature([bounded]) != p._component_signature([component])
-                    or [_message_key(m) for m in frozen['messages']] != [_message_key(m) for m in component['messages']]
+                    or [_message_key(m) for m in bounded['messages']] != [_message_key(m) for m in component['messages']]
                     or frozen.get('base_event_candidates', []) != component.get('base_event_candidates', [])
-                    or frozen.get('context_session_ids', []) != component.get('context_session_ids', [])):
+                    or bounded.get('context_session_ids', []) != component.get('context_session_ids', [])):
                 raise ValueError('frozen ownership, bridge endpoints or predecessors differ')
         except (AttributeError, IndexError, KeyError, TypeError, ValueError) as error:
             raise p.RoutingRecoveryError('downstream job disagrees with frozen component: '+str(error)) from error
@@ -295,17 +332,112 @@ async def rebuild(database, batch_id, confirm):
     return await execute(database, 'pipeline', operation)
 
 
-def _rebuild(database, batch_id):
+RECOVERABLE = ('pending', 'paused_failure', 'retry_wait', 'routing_only', 'needs_repair', 'waiting_materials')
+
+
+def _recovery_scope(store, batch_id):
+    from . import pipeline as p
+    if not isinstance(batch_id, str) or not batch_id:
+        raise ValueError('请选择需要处理的批次')
+    batch = store.conn.execute('SELECT rowid AS queue_order,* FROM pipeline_batches WHERE id=?', (batch_id,)).fetchone()
+    if batch is None or batch['status'] not in RECOVERABLE:
+        raise Conflict('此批已不处于待处理状态，请刷新后确认')
+    if not store.conn.execute('SELECT 1 FROM pipeline_batches b WHERE b.id=? AND '+p.SCOPE_HEAD, (batch_id,)).fetchone():
+        raise Conflict('请先处理同一聊天中更早的批次')
+    data = json.loads(batch['input_json'])
+    routing = data.get('routing_messages', data.get('messages', []))
+    stable = data.get('messages', routing)
+    if not stable or not _same_scope(data, routing):
+        raise Conflict('无法确认本批原话范围，请先检查批次记录')
+    stable_ids = {m['id'] for m in stable}
+    reserved=store.conn.execute("SELECT pm.id FROM pipeline_pending_materials pm,json_each(pm.source_ids_json) s WHERE pm.status IN ('open','running') AND pm.batch_id<>? AND s.value IN ("+','.join('?' for _ in stable_ids)+") LIMIT 1",(batch_id,*sorted(stable_ids))).fetchone()
+    if reserved:raise Conflict('原话已由待办 '+str(reserved['id'])+' 保留，请先处理对应待办')
+    if len(stable_ids) != len(stable) or not stable_ids.issubset({m['id'] for m in routing}):
+        raise Conflict('本批原话编号不完整，不能继续操作')
+    for unit in p.dialogue_units(routing):
+        ids = {m['id'] for m in unit}
+        if ids & stable_ids and (not ids.issubset(stable_ids) or not p.dialogue_unit_is_complete(unit)):
+            raise Conflict('本批范围不包含完整问答，不能跳过或拆分')
+    for frozen in routing:
+        row = store.conn.execute('SELECT * FROM raw_events WHERE id=?', (frozen['id'],)).fetchone()
+        if row is None or _message_key(p.message(row)) != _message_key(frozen):
+            raise Conflict('原话已变化，请刷新并核对批次')
+        if frozen['id'] in stable_ids and store.conn.execute('SELECT 1 FROM raw_processing WHERE raw_id=?', (frozen['id'],)).fetchone():
+            raise Conflict('本批原话已有处理记录，不能重复操作')
+    if store.conn.execute('SELECT 1 FROM raw_processing WHERE operation_id=?', (batch_id,)).fetchone():
+        raise Conflict('本批已有结算记录，不能重新操作')
+    if store.conn.execute("SELECT 1 FROM sqlite_master WHERE name='fact_event_settlement_operations'").fetchone():
+        if store.conn.execute('SELECT 1 FROM fact_event_settlement_operations WHERE operation_id=?', (batch_id,)).fetchone():
+            raise Conflict('本批已有 Event 结算记录，不能重新操作')
+    return batch, data, routing, stable
+
+
+def _recovery_chunks(data, max_chars):
+    from . import pipeline as p
+    from .pipeline_limits import routing_blocks
+    stable_ids = {m['id'] for m in data.get('messages', data['routing_messages'])}
+    chunks = routing_blocks(data['routing_messages'], max_chars)
+    result = []
+    for index, chunk in enumerate(chunks):
+        if index+1 < len(chunks):
+            following = p.dialogue_units(chunks[index+1])[0]
+            if not p.dialogue_unit_is_complete(following):
+                chunk = [*chunk, *following]
+        stable = [m for m in chunk if m['id'] in stable_ids]
+        if stable:
+            result.append((chunk, stable))
+    return result
+
+
+def recovery_preview(database, batch_id, max_input_chars=None):
+    with Store(database, read_only=True) as store, store.transaction():
+        batch, data, routing, stable = _recovery_scope(store, batch_id)
+        chars = sum(len(m['content']) for m in stable)
+        if max_input_chars is None:
+            max_input_chars = max(2000, min(10000, chars//2))
+        if type(max_input_chars) is not int or not 2000 <= max_input_chars <= 100000:
+            raise ValueError('每批原话字符上限须为 2000 至 100000 的整数')
+        chunks = _recovery_chunks({**data, 'routing_messages': routing}, max_input_chars)
+        sizes = [sum(len(m['content']) for m in chunk) for chunk, _ in chunks]
+        return {'batch_id': batch_id, 'scope': batch['scope'], 'originals': len(stable), 'original_chars': chars,
+                'first_at': min(m['created_at'] for m in stable), 'last_at': max(m['created_at'] for m in stable),
+                'max_input_chars': max_input_chars, 'batches': len(chunks), 'batch_chars': sizes,
+                'oversized_batches': sum(size > max_input_chars for size in sizes), 'can_rebatch': len(chunks) > 1}
+
+
+async def recover_batch(database, batch_id, action, confirm, max_input_chars=None):
+    from ..work_tasks import execute
+    expected = {'skip': 'SKIP_PIPELINE_BATCH', 'rebatch': 'REBATCH_PIPELINE_BATCH'}
+    if action not in expected or confirm != expected[action]:
+        raise ValueError('请明确确认本批操作；原话和已保存的 Event 保留')
+    if action == 'rebatch' and (type(max_input_chars) is not int or not 2000 <= max_input_chars <= 100000):
+        raise ValueError('每批原话字符上限须为 2000 至 100000 的整数')
+    async def operation():
+        return _rebuild(database, batch_id, recovery_action=action, max_input_chars=max_input_chars)
+    return await execute(database, 'pipeline', operation)
+
+
+def _rebuild(database, batch_id, *, recovery_action=None, max_input_chars=None, resume_pending_id=None):
     from . import pipeline as p
     p.initialize(database)
     with Store(database) as store, store.transaction(immediate=True):
         batch = store.conn.execute('SELECT rowid AS queue_order,* FROM pipeline_batches WHERE id=?',
                                    (batch_id,)).fetchone()
-        if batch is None or batch['status'] != 'needs_repair':
+        if recovery_action:
+            batch, data, _, _ = _recovery_scope(store, batch_id)
+        elif batch is None or batch['status'] != 'needs_repair':
             raise Conflict('此批已不处于待修复状态，请刷新后确认')
+        if resume_pending_id is not None and not store.conn.execute(
+                "SELECT 1 FROM pipeline_pending_materials WHERE id=? AND batch_id=? AND status='open' AND kind='unrouted'",
+                (resume_pending_id,batch_id)).fetchone():
+            raise Conflict('待办已被领取或完成，请刷新')
         data = json.loads(batch['input_json'])
-        if data.get('contract') != p.CONTRACT:
-            raise Conflict('旧批次契约不兼容，不能自动重建')
+        split = _recovery_chunks(data, max_input_chars) if recovery_action == 'rebatch' else None
+        if split is not None and len(split) < 2:
+            raise ValueError('当前上限无法把本批拆成更小的完整问答；可降低上限，或选择跳过本批')
+        legacy_contract = data.get('contract') != p.CONTRACT
+        if legacy_contract and not recovery_action:
+            _recovery_scope(store,batch_id)
         stable = [m['id'] for m in data.get('messages',data['routing_messages'])]
         routing = data['routing_messages']
         if not stable or not _same_scope(data, routing):
@@ -344,18 +476,21 @@ def _rebuild(database, batch_id):
             store.conn.execute('DELETE FROM pipeline_route_provenance WHERE raw_id=?', (frozen['id'],))
         # Retain only the original pre-routing input, never old ownership/plans.
         fresh = {key: deepcopy(data[key]) for key in ('contract', 'runtime_revision', 'input_policy', 'messages', 'parked',
-                 'routing_messages', 'tracks', 'scope', 'source', 'recent', 'day', 'recovery_downgrade') if key in data}
+                 'routing_messages', 'tracks', 'scope', 'source', 'recent', 'day', 'recovery_downgrade', 'recovery_path') if key in data}
         fresh['contract'] = p.CONTRACT
         fresh['runtime_revision'] = p.runtime_revision()
-        fresh['tracks'] = [c for c in fresh['tracks'] if p._card_is_complete(c)]
+        # Explicit rebuilding creates a new summary-first plan; old jobs and
+        # their original reading policy remain available in the retired batch.
+        fresh['input_policy'] = {**read_from_store(store)['pipeline'], 'curator_summary_first': True}
+        fresh['tracks'] = [c for c in fresh.get('tracks',[]) if p._card_is_complete(c)]
         previous_result = json.loads(batch['result_json'] or '{}')
         history_error = data.get('routing_evidence_error') or previous_result.get('reason', '')
-        if data.get('routing_evidence_error') or 'No bounded historical pre-routing Track frame:' in history_error:
+        if legacy_contract or data.get('routing_evidence_error') or 'No bounded historical pre-routing Track frame:' in history_error:
             # The existing explicit rebuild starts a new history segment for
             # this scope. Later windows must not reintroduce the same gap.
             fresh['tracks'] = []
             fresh['recent'] = []
-            fresh['recovery_downgrade'] = {'reason': history_error,
+            fresh['recovery_downgrade'] = {'reason': '旧执行方案不兼容，按已核对原话重新归线' if legacy_contract else history_error,
                 'history_before_id': min(m['id'] for m in routing),
                 'confirmed_by': 'REBUILD_PIPELINE_BATCH', 'source_batch_id': batch_id}
         fresh['next_track_ordinal'] = max(data.get('next_track_ordinal', 1),
@@ -363,16 +498,51 @@ def _rebuild(database, batch_id):
         fresh['ignore_route_cache'] = True
         fresh['rebuild_of'] = batch_id
         fresh['queue_order'] = data.get('queue_order', batch['queue_order'])
-        route_only=batch_id.startswith('route:')
+        if resume_pending_id is not None:
+            fresh.update(resume_pending_id=resume_pending_id,pending_previous_batch_id=batch_id)
+        route_only=batch_id.startswith('route:') and not recovery_action and resume_pending_id is None
         replacement = ('route:' if route_only else 'pipeline:')+digest(encode([batch_id, uuid4().hex]))
         audit = {'status': 'superseded_repair', 'replacement_batch_id': replacement,
                  'confirmed_at': now(), 'previous_result': previous_result,
                  'discarded_route_cache': cache}
         if fresh.get('recovery_downgrade'):
             audit['recovery_downgrade'] = fresh['recovery_downgrade']
+        if recovery_action == 'skip':
+            completed = {'status': 'processed', 'batch_id': replacement, 'completed_at': now(), 'events': 0,
+                         'processed_originals': len(stable), 'skipped': len(stable), 'manual_skip': True, 'pending': 0}
+            for raw_id in stable:
+                store.conn.execute('INSERT INTO raw_processing VALUES (?,?,?)', (raw_id, replacement, 'manual_skip'))
+            store.conn.execute("INSERT INTO pipeline_batches(id,scope,input_json,status,result_json) VALUES (?,?,?,'done',?)",
+                               (replacement, data['scope'], encode(fresh), encode(completed)))
+            audit.update(recovery_action='skip', source_message_ids=stable)
+            result = {'status': 'skipped_batch', 'batch_id': batch_id, 'skipped_originals': len(stable)}
+        elif split is not None:
+            fresh['input_policy'] = {**read_from_store(store)['pipeline'], 'max_input_chars': max_input_chars}
+            replacements = []
+            for index, (chunk, owned) in enumerate(split):
+                key = replacement if index == 0 else 'pipeline:'+uuid4().hex
+                owned_ids = {m['id'] for m in owned}
+                child = {**fresh, 'routing_messages': chunk, 'messages': owned,
+                         'parked': [m for m in chunk if m['id'] not in owned_ids],
+                         'rebatch_of': batch_id, 'rebatch_load_tracks': index > 0,
+                         'recovery_path': fresh.get('recovery_path', '')+f'{index:08d}/'}
+                store.conn.execute("INSERT INTO pipeline_batches(id,scope,input_json,status) VALUES (?,?,?,'pending')",
+                                   (key, data['scope'], encode(child)))
+                replacements.append(key)
+            audit.update(recovery_action='rebatch', replacement_batch_ids=replacements, max_input_chars=max_input_chars)
+            result = {'status': 'rebatched', 'batch_id': replacements[0], 'batch_ids': replacements,
+                      'superseded_batch_id': batch_id, 'batches': len(replacements), 'originals': len(stable)}
+        else:
+            store.conn.execute('INSERT INTO pipeline_batches(id,scope,input_json,status) VALUES (?,?,?,?)',
+                               (replacement, data['scope'], encode(fresh),'routing_only' if route_only else 'pending'))
+            result = {'status': 'rebuilt', 'batch_id': replacement, 'superseded_batch_id': batch_id,
+                      'note': '旧计划与模型结果已保留，尚未处理的原话将重新归线；已保存的 Event 不变。'}
         store.conn.execute("UPDATE pipeline_batches SET status='superseded_repair',result_json=? WHERE id=?",
                            (encode(audit), batch_id))
-        store.conn.execute('INSERT INTO pipeline_batches(id,scope,input_json,status) VALUES (?,?,?,?)',
-                           (replacement, data['scope'], encode(fresh),'routing_only' if route_only else 'pending'))
-        return {'status': 'rebuilt', 'batch_id': replacement, 'superseded_batch_id': batch_id,
-                'note': '旧计划与模型结果已保留，尚未处理的原话将重新归线；已保存的 Event 不变。'}
+        if resume_pending_id is not None:
+            store.conn.execute("UPDATE pipeline_pending_materials SET batch_id=?,status='running',updated_at=? WHERE id=?",
+                               (replacement,now(),resume_pending_id))
+        else:
+            store.conn.execute("UPDATE pipeline_pending_materials SET status=?,updated_at=? WHERE batch_id=? AND status IN ('open','running')",
+                               ('resolved_skipped' if recovery_action=='skip' else 'resolved_rebuilt',now(),batch_id))
+        return result

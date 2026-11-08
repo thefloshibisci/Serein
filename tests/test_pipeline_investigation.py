@@ -26,23 +26,24 @@ def test_deleted_predecessor_holds_batch_without_repeating_models(settings):
                 store.conn.execute("UPDATE fact_events SET status='tombstoned' WHERE item_id=?",(predecessor,))
         return output_for(role,request)
     held=asyncio.run(p.advance(settings.database,include_recent=True,runner=delete_during_writer))
-    assert held['status']=='needs_repair' and held['repair_kind']=='event_settlement'
+    assert held['status']=='retained'
     assert 'no_active_leaf' in held['reason']
     assert calls.count('event_writer')==1
     async def forbidden(*args):
         raise AssertionError('accepted model result must not be requested again')
     blocked=asyncio.run(p.advance(settings.database,include_recent=True,runner=forbidden))
-    assert {key:blocked[key] for key in held}==held
-    assert blocked['blocked_scopes'][0]['hold_status']=='needs_repair'
-    assert blocked['blocked_scopes'][0]['batch_id']==held['batch_id']
+    assert blocked['status']=='current'
     retried=asyncio.run(p.advance(settings.database,include_recent=True,runner=forbidden,retry_repair=True))
-    assert retried['status']=='needs_repair' and 'no_active_leaf' in retried['reason']
+    assert retried['status']=='current'
     with Store(settings.database,read_only=True) as store:
         assert store.conn.execute('SELECT count(*) FROM fact_events').fetchone()[0]==1
         assert store.conn.execute('SELECT count(*) FROM raw_processing WHERE operation_id=?',(held['batch_id'],)).fetchone()[0]==0
         assert store.conn.execute('SELECT count(*) FROM pipeline_jobs WHERE batch_id=? AND output_json IS NULL',(held['batch_id'],)).fetchone()[0]==0
-    rebuilt=asyncio.run(recovery.rebuild(settings.database,held['batch_id'],'REBUILD_PIPELINE_BATCH'))
-    assert rebuilt['status']=='rebuilt'
+        retained=store.conn.execute('SELECT id,status,reason FROM pipeline_pending_materials WHERE batch_id=?',(held['batch_id'],)).fetchone()
+        assert retained['status']=='open' and 'no_active_leaf' in retained['reason']
+    from serein.extensions.pipeline_pending import resume
+    rebuilt=resume(settings.database,retained['id'],replan=True)
+    assert rebuilt['status']=='resumed'
     assert asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))['events']==1
     assert asyncio.run(p.advance(settings.database,include_recent=True,runner=forbidden))['status']=='current'
 

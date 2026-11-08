@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { narrativePreviewFailure } from './narrativeErrors.mjs';
 
 export function createNarrativePreviewJobs({ now = Date.now, ttlMs = 600_000, timeoutMs = 330_000 } = {}) {
   const jobs = new Map();
@@ -27,18 +28,7 @@ export function createNarrativePreviewJobs({ now = Date.now, ttlMs = 600_000, ti
       const fail = (error) => {
         if (job.state !== "pending") return;
         console.error("[serein-memory-bridge] Narrative preview failed", error);
-        const writerTimeout = error?.message === "narrative_writer_timeout";
-        const timedOut = writerTimeout || ["AbortError", "TimeoutError"].includes(error?.name);
-        finish({
-          statusCode: timedOut ? 504 : 502,
-          payload: {
-            status: "error",
-            reason: "narrative_preview_failed",
-            message: writerTimeout ? "叙事卷生成超过 5 分钟，请重新预览。"
-              : timedOut ? "预览请求超时，请重新预览。" : "暂时没有生成叙事卷预览。",
-            writes_performed: [],
-          },
-        });
+        finish(narrativePreviewFailure(error));
       };
       const timer = setTimeout(() => {
         const error = new Error("narrative_writer_timeout");

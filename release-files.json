@@ -626,5 +626,14 @@
   "web/src/components/OriginalArchive.jsx",
   "web/src/components/original-archive.css",
   "src/serein/source_time.py",
-  "tests/test_pipeline_source_time.py"
+  "tests/test_pipeline_source_time.py",
+  "constraints-runtime.txt",
+  "src/serein/extensions/pipeline_pending.py",
+  "web/src/components/PendingMaterials.jsx",
+  "web/server/narrativeErrors.mjs",
+  "web/src/storage/narrativeErrors.js",
+  "tests/test_narrative_delete.py",
+  "tests/test_narrative_rename.py",
+  "web/tests/narrative-errors.test.mjs",
+  "web/tests/narrative-flow.test.mjs"
 ]

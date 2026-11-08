@@ -9,7 +9,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .raw_text import strip_worldbook_context
+from .raw_text import strip_worldbook_context, strip_kelivo_memory_context, strip_rikkahub_time_context
 
 
 logger = logging.getLogger("serein_brain.raw_events")
@@ -44,7 +44,7 @@ CLIENT_CONTEXT_BLOCK_TITLES = {
 
 
 def strip_raw_client_context(text: str) -> str:
-    cleaned = strip_worldbook_context(text)
+    cleaned = strip_kelivo_memory_context(strip_rikkahub_time_context(strip_worldbook_context(text)))
     cleaned = WORKSPACE_ATTACHMENT_RE.sub("", cleaned)
     cleaned = CLIENT_ATTACHMENT_RE.sub("", cleaned)
     cleaned = SELF_CLOSING_ATTACHMENT_RE.sub("", cleaned)

@@ -78,9 +78,32 @@ def test_curator_mcp_packet_has_one_copy_of_current_text_and_no_old_originals(se
         assert base['source_message_ids'] == next(b['source_message_ids'] for b in component['base_event_candidates'] if b['event_id'] == base['event_id'])
 
 
-def test_reduction_defaults_off_and_preserves_full_old_reading_until_enabled(settings):
+def test_summary_first_is_standard_for_new_batches_and_legacy_settings(settings):
     from serein.deployment import read_settings
-    assert read_settings(settings.database)['pipeline']['curator_summary_first'] is False
+    assert read_settings(settings.database)['pipeline']['curator_summary_first'] is True
+    with Store(settings.database) as store:
+        store.conn.execute("INSERT INTO background_state(name,value_json) VALUES ('deployment_settings',?)",
+                           (encode({'pipeline': {'curator_summary_first': False}}),))
+    assert read_settings(settings.database)['pipeline']['curator_summary_first'] is True
+    ingest(settings)
+    p.initialize(settings.database)
+    new_batch = p.new_batch(settings.database, True)
+    assert json.loads(new_batch['input_json'])['input_policy']['curator_summary_first'] is True
+    saved = save_settings(settings.database, {'pipeline': {'curator_summary_first': False}})
+    assert saved['pipeline']['curator_summary_first'] is True
+    with Store(settings.database, read_only=True) as store:
+        stored = json.loads(store.conn.execute("SELECT value_json FROM background_state WHERE name='deployment_settings'").fetchone()[0])
+    assert stored['pipeline']['curator_summary_first'] is True
+    component = component_fixture()
+    batch = batch_fixture(settings, component)
+    small = p.request_for(settings.database, batch, 'event_curator', component=component)
+    assert 'OLD_ORIGINAL_' not in small['prompt']
+    for invalid in (1, 'false', None):
+        with pytest.raises(ValueError, match='boolean'):
+            save_settings(settings.database, {'pipeline': {'curator_summary_first': invalid}})
+
+
+def test_legacy_frozen_component_keeps_full_old_reading(settings):
     component = component_fixture()
     component['curator_summary_first'] = False
     batch = batch_fixture(settings, component)
@@ -89,16 +112,11 @@ def test_reduction_defaults_off_and_preserves_full_old_reading_until_enabled(set
     base = tag(full['prompt'], 'event_curator_input_json')['base_events'][0]
     assert [m['source_message_id'] for m in base['messages']] == list(range(1, 39))
     assert 'OLD_ORIGINAL_1:' in full['prompt']
-    assert '减小输入已关闭' in full['prompt']
-    save_settings(settings.database, {'pipeline': {'curator_summary_first': True}})
-    assert read_settings(settings.database)['pipeline']['curator_summary_first'] is True
+    assert '本批候选旧 Event 提供完整绑定原话' in full['prompt']
     component['curator_summary_first'] = True
     small = p.request_for(settings.database, batch, 'event_curator', component=component)
     assert 'OLD_ORIGINAL_' not in small['prompt']
     assert small['component']['base_event_candidates'] == full['component']['base_event_candidates']
-    for invalid in (1, 'false', None):
-        with pytest.raises(ValueError, match='boolean'):
-            save_settings(settings.database, {'pipeline': {'curator_summary_first': invalid}})
 
 
 def test_agent_returns_compact_packet_but_submission_uses_full_host_snapshot(settings):

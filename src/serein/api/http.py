@@ -4,6 +4,7 @@ import hmac
 import asyncio
 import os
 import sqlite3
+import logging
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -110,8 +111,25 @@ def create_app(settings, *, token: str, live: bool=False):
 
     @app.exception_handler(sqlite3.Error)
     @app.exception_handler(OSError)
-    async def storage_unavailable(_request, _exc):
-        return JSONResponse(status_code=503, content={'detail':'Memory storage unavailable'})
+    async def storage_unavailable(request, exc):
+        code = getattr(exc, 'sqlite_errorcode', 0) & 255
+        reason, message = 'storage_unavailable', '记忆存储暂不可用，请稍后重试。'
+        if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            reason, message = 'storage_busy', '记忆库正被其他写入占用，本次操作未完成，请稍后重试。'
+        elif code == sqlite3.SQLITE_FULL or getattr(exc, 'errno', None) == 28:
+            reason, message = 'storage_full', '服务器磁盘已满，无法保存，需要先清理服务器空间。'
+        elif code in (sqlite3.SQLITE_READONLY, sqlite3.SQLITE_PERM) or isinstance(exc, PermissionError):
+            reason, message = 'storage_read_only', '记忆库或目录没有写入权限，需要修复服务器权限。'
+        elif code in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
+            reason, message = 'storage_corrupt', '记忆库无法正常读取，需要检查数据库。'
+        elif code == sqlite3.SQLITE_CANTOPEN:
+            reason, message = 'storage_cannot_open', '无法打开记忆库文件，需要检查服务器路径或权限。'
+        elif code == sqlite3.SQLITE_IOERR:
+            reason, message = 'storage_io_error', '记忆库读写发生磁盘错误，需要检查服务器存储。'
+        logging.getLogger(__name__).error('Storage failure path=%s reason=%s sqlite=%s errno=%s',
+            request.url.path, reason, getattr(exc, 'sqlite_errorname', ''), getattr(exc, 'errno', None))
+        return JSONResponse(status_code=503, content={'status': 'error', 'reason': reason,
+            'message': message, 'detail': 'Memory storage unavailable'})
 
     @app.get('/health')
     def health():

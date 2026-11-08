@@ -1,5 +1,6 @@
 import { narrativeRolls as fallbackNarrativeRolls } from "../data/narrative.js";
 import { chronologicalSources } from "./narrativeAppearance.js";
+import { narrativeRequest } from './narrativeErrors.js';
 
 const romanVolumes = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
 const visualTones = ["paper", "mist", "white", "fog", "ink"];
@@ -137,12 +138,17 @@ function projectSources(item, fallback) {
     typeLabel: "Scene",
     status: "",
   }));
-  return written.length ? written : fallback?.sources || [];
+  const byId = new Map([...(fallback?.sources || []), ...written].map(source => [`${source.type || 'scene'}:${source.id}`, source]));
+  return Object.entries(sourceTypeLabels).flatMap(([type, typeLabel]) =>
+    (item[`linked_${type}_ids`] || []).map(id => ({
+      ...(byId.get(`${type}:${id}`) || {}), type, typeLabel, id: String(id),
+      title: byId.get(`${type}:${id}`)?.title || String(id),
+    })));
 }
 
-function projectLiveRoll(item, index, fallback) {
+export function projectLiveRoll(item, index = 0, fallback) {
   const parsedTitle = parseTitle(item.title);
-  const displayTitle = fallback?.displayTitle || parsedTitle.title;
+  const displayTitle = parsedTitle.title;
   const sources = chronologicalSources(projectSources(item, fallback));
   const paragraphs = splitParagraphs(item.body);
   const isUnwritten = item.publication_status === "collecting" && !String(item.body || "").trim();
@@ -188,7 +194,7 @@ function projectLiveRoll(item, index, fallback) {
 export async function previewNarrativeRoll(roll, mode, proposedMaterialIds, proposedBody = "") {
   const signal = AbortSignal.timeout(360_000);
   try {
-    let response = await fetch("/__serein/narrative-preview", {
+    let { response, payload } = await narrativeRequest("/__serein/narrative-preview", {
       method: "POST",
       signal,
       headers: { "Content-Type": "application/json" },
@@ -200,26 +206,17 @@ export async function previewNarrativeRoll(roll, mode, proposedMaterialIds, prop
         proposedMaterialIds,
         proposedBody,
       }),
-    });
-    const readPayload = (reply) => reply.json().catch(() => ({
-      status: "error",
-      message: reply.status === 504
-        ? "预览服务等待超时，请重新预览。"
-        : `预览服务返回了无法读取的响应（HTTP ${reply.status}）。`,
-      writes_performed: [],
-    }));
-    let payload = await readPayload(response);
+    }, mode === 'edit' ? '校验正文' : '书写正文', ['pending', 'ok', 'insufficient']);
     if (response.status === 202 && payload?.status === "pending") {
       const jobId = String(payload.job_id || "");
       if (!jobId) throw new Error("预览任务没有返回编号，请重新预览。");
       do {
         await new Promise((resolve) => setTimeout(resolve, 2_000));
         signal.throwIfAborted();
-        response = await fetch(`/__serein/narrative-preview?jobId=${encodeURIComponent(jobId)}`, {
+        ({ response, payload } = await narrativeRequest(`/__serein/narrative-preview?jobId=${encodeURIComponent(jobId)}`, {
           cache: "no-store",
           signal,
-        });
-        payload = await readPayload(response);
+        }, '读取书写结果', ['pending', 'ok', 'insufficient']));
       } while (response.status === 202 && payload?.status === "pending");
     }
     if (!response.ok || !["ok", "insufficient"].includes(payload?.status)) {
@@ -229,13 +226,13 @@ export async function previewNarrativeRoll(roll, mode, proposedMaterialIds, prop
     }
     return payload;
   } catch (error) {
-    if (signal.aborted) throw new Error("预览等待超时，请重新预览。", {cause: error});
+    if (signal.aborted) throw new Error("预览等待超时，请重新预览。", { cause: error });
     throw error;
   }
 }
 
 export async function saveNarrativeRollBody(roll, body, preview) {
-  const response = await fetch("/__serein/narrative-save", {
+  const { payload } = await narrativeRequest("/__serein/narrative-save", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -247,40 +244,40 @@ export async function saveNarrativeRollBody(roll, body, preview) {
       expectedMaterialSnapshotSha256: preview.material_snapshot_sha256,
       previewFingerprint: preview.preview_fingerprint,
     }),
-  });
-  const payload = await response.json().catch(() => ({
-    status: "error",
-    message: "保存返回了无法读取的内容。",
-  }));
-  if (!response.ok || !["created", "updated"].includes(payload?.status)) {
-    const error = new Error(payload?.message || payload?.reason || "这次正文没有保存。");
-    error.payload = payload;
-    throw error;
-  }
+  }, '保存正文', ['created', 'updated']);
   return payload;
 }
 
-export async function loadNarrativeRolls() {
-  try {
-    const response = await fetch("/__serein/live/narratives", {
+export async function loadNarrativeRolls({ signal } = {}) {
+    const { payload } = await narrativeRequest("/__serein/live/narratives", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
-    });
-    if (!response.ok) return fallbackNarrativeRolls.map(withMaterialIds);
-    const payload = await response.json();
-    if (payload?.status !== "ok" || !Array.isArray(payload.items) || !payload.items.length) {
-      return fallbackNarrativeRolls.map(withMaterialIds);
-    }
+      signal,
+    }, '读取书架', ['ok']);
+    if (!Array.isArray(payload.items)) throw new Error('读取书架失败：服务没有返回有效的书目列表，请重试。');
     const fallbackById = new Map(fallbackNarrativeRolls.map((roll) => [roll.id, roll]));
     return payload.items
       .filter((item) => item.publication_status === "collecting" || String(item.body || "").trim())
       .map((item, index) => (
         projectLiveRoll(item, index, fallbackById.get(item.narrative_id))
       ));
-  } catch {
-    return fallbackNarrativeRolls.map(withMaterialIds);
-  }
+}
+
+export async function deleteNarrativeRoll(roll) {
+  const { payload } = await narrativeRequest('/__serein/narrative-delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ narrative_id: roll.id, expected_revision: roll.revision, confirm: 'DELETE' }),
+  }, '删除叙事卷', ['deleted']);
+  return payload;
+}
+
+export async function renameNarrativeRoll(roll, title) {
+  const { payload } = await narrativeRequest('/__serein/narrative-rename', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ narrative_id: roll.id, expected_revision: roll.revision, title }),
+  }, '修改书名', ['updated', 'unchanged']);
+  return payload;
 }
 
 export function readFallbackNarrativeRolls() {

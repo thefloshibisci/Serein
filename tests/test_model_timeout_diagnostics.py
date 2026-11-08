@@ -92,7 +92,7 @@ def test_pipeline_persists_diagnostics_and_preserves_three_run_failure_budget(se
         with pytest.raises(httpx.ReadTimeout):asyncio.run(p.advance(settings.database,include_recent=True))
         assert len(calls)==number
     paused=asyncio.run(p.advance(settings.database,include_recent=True))
-    assert paused['status']=='paused' and paused['failures']==3 and len(calls)==3
+    assert paused['status']=='retained' and paused['failures']==3 and len(calls)==3
     with Store(settings.database,read_only=True) as store:
         attempts=[dict(row) for row in store.conn.execute('SELECT * FROM pipeline_attempts ORDER BY attempt')]
         assert len(attempts)==3

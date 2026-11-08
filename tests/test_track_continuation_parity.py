@@ -435,10 +435,10 @@ def test_track_anchor_continuation_and_parked_unused_state(settings):
         tracks.persist(store.conn, [unused], scope)
     ingest(settings, 2)
     task = asyncio.run(p.advance(settings.database, include_recent=True))
-    # Agent delivery keeps the full cards in the prompt, without a second copy
-    # of their evidence in the structured transport fields.
-    cards_json = task['request']['prompt'].split('<active_tracks_json>\n', 1)[1].split('\n</active_tracks_json>', 1)[0]
-    active = {c['track_id']: c for c in json.loads(cards_json)}
+    # Agent delivery keeps prose once in the prompt; side fields are ID refs.
+    payload = task['request']['prompt'].split('<active_tracks_json>\n',1)[1].split('\n</active_tracks_json>',1)[0]
+    active = {c['track_id']: c for c in json.loads(payload)}
+    assert {c['track_id'] for c in task['request']['active_tracks']} == set(active)
     assert all('recent_turns' not in c for c in task['request']['active_tracks'])
     assert active[key]['recent_turns'][0]['message_id'] == 2
     assert all(c['status'] == 'parked' for c in active.values())

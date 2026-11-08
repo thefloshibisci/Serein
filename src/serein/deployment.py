@@ -60,8 +60,8 @@ def read_from_store(store):
             'pipeline': {'auto_enabled':True,'execution_mode':legacy_mode,'max_input_chars':40000,'max_prompt_chars':200000,'timeout_seconds':600,'event_writer_concurrency':1,'track_lookback_days':3,
                          'track_candidates_enabled':False,'track_direct_hours':12,'track_candidate_limit':8,'router_compact_cards':False,
                          'joint_review_enabled':False,'material_review_enabled':False,'round_gate_enabled':False,
-                         'append_protected_enabled':False,'curator_summary_first':False,
-                         **saved.get('pipeline',{})},
+                         'append_protected_enabled':False,'event_history_enabled':True,
+                         **saved.get('pipeline',{}),'curator_summary_first':True},
             'assignments': {key:value for key,value in saved.get('assignments', {}).items() if key!='event_evidence'}}
 
 
@@ -233,9 +233,12 @@ def save_settings(database, changes):
         candidate_limit=current['pipeline'].get('track_candidate_limit',8)
         if type(candidate_limit) is not int or not 1<=candidate_limit<=50:
             raise ValueError('Track candidate limit must be an integer between 1 and 50')
-        for key in ('track_candidates_enabled','router_compact_cards','joint_review_enabled','material_review_enabled','round_gate_enabled','append_protected_enabled','curator_summary_first'):
+        for key in ('track_candidates_enabled','router_compact_cards','joint_review_enabled','material_review_enabled','round_gate_enabled','append_protected_enabled','curator_summary_first','event_history_enabled'):
             if type(current['pipeline'].get(key,False)) is not bool:
                 raise ValueError(f'{key} must be a boolean')
+        # Retain the legacy field for stored/frozen work; new batches always
+        # start with saved Event prose and request old originals only as needed.
+        current['pipeline']['curator_summary_first']=True
         mode=current['pipeline']['execution_mode']
         if mode not in ('legacy','api','agent'):raise ValueError('Unknown Event execution mode')
         if mode=='api':

@@ -7,6 +7,7 @@ import re, json, hashlib, time, logging
 from copy import deepcopy
 
 from typing import Any
+from .compat.germany.raw_text import strip_kelivo_memory_context, strip_rikkahub_time_context
 
 def count_tokens_approx(text: str) -> int:
     if not text:
@@ -316,6 +317,8 @@ class ClientContext:
         cleaned = EXTERNAL_CONTEXT_ATTACHMENT_RE.sub("", cleaned)
         cleaned = SELF_CLOSING_ATTACHMENT_RE.sub("", cleaned)
         cleaned = self._strip_leading_auto_context_markers(cleaned)
+        cleaned = strip_rikkahub_time_context(cleaned)
+        cleaned = strip_kelivo_memory_context(cleaned)
         return self._strip_external_context_blocks(cleaned)
 
     def _strip_leading_auto_context_markers(self, text: str) -> str:

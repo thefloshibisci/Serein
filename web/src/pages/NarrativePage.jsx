@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import {
   ArrowLeft,
@@ -6,18 +6,22 @@ import {
   CaretDown,
   CircleNotch,
   PencilSimple,
+  Trash,
   X,
 } from "@phosphor-icons/react";
 import {
   loadNarrativeRolls,
   previewNarrativeRoll,
-  readFallbackNarrativeRolls,
+  projectLiveRoll,
+  deleteNarrativeRoll,
+  renameNarrativeRoll,
   saveNarrativeRollBody,
   uploadNarrativeMaterial,
 } from "../storage/narrativeStore.js";
 import { bookAppearance, chronologicalSources } from "../storage/narrativeAppearance.js";
 import { NarrativeCreateDialog } from "../components/NarrativeCreateDialog.jsx";
 import { LinkCandidatePicker } from "../components/ResumeMemoryPicker.jsx";
+import { narrativeRequest } from '../storage/narrativeErrors.js';
 
 const transitionTo = (update) => {
   if (!document.startViewTransition) {
@@ -34,7 +38,15 @@ const formatRange = (roll) => `${roll.timeStart} — ${roll.timeEnd}`;
 
 export function NarrativePage() {
   const [createOpen, setCreateOpen] = useState(false);
-  const [narrativeRolls, setNarrativeRolls] = useState(readFallbackNarrativeRolls);
+  const libraryRead = useRef(null);
+  const [narrativeRolls, setNarrativeRolls] = useState([]);
+  const [libraryError, setLibraryError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+  const [titleEditing, setTitleEditing] = useState(false);
+  const [titleInput, setTitleInput] = useState('');
+  const [titleError, setTitleError] = useState('');
   const [selectedRollId, setSelectedRollId] = useState(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [previewBody, setPreviewBody] = useState("");
@@ -58,9 +70,15 @@ export function NarrativePage() {
 
   useEffect(() => {
     let cancelled = false;
-    const refreshRolls = () => loadNarrativeRolls().then((rolls) => {
-      if (!cancelled && rolls?.length) setNarrativeRolls(rolls);
-    });
+    const refreshRolls = () => {
+      libraryRead.current?.abort();
+      const controller = new AbortController();
+      libraryRead.current = controller;
+      return loadNarrativeRolls({ signal: controller.signal }).then((rolls) => {
+        if (!cancelled && !controller.signal.aborted) { setNarrativeRolls(rolls); setLibraryError(''); }
+      }).catch(error => { if (!cancelled && !controller.signal.aborted) setLibraryError(error.message); })
+        .finally(() => { if (!cancelled && !controller.signal.aborted) setLoading(false); });
+    };
     const openFromInbox = () => {
       if (window.location.hash === "#narrative" && window.sessionStorage.getItem("serein:narrative-open-intent")) refreshRolls();
     };
@@ -68,6 +86,7 @@ export function NarrativePage() {
     window.addEventListener("hashchange", openFromInbox);
     return () => {
       cancelled = true;
+      libraryRead.current?.abort();
       window.removeEventListener("hashchange", openFromInbox);
     };
   }, []);
@@ -75,8 +94,10 @@ export function NarrativePage() {
   useEffect(() => {
     if (!selectedRoll) return undefined;
     const closeOnEscape = (event) => {
-      if (event.key === "Escape") {
-        if (editorOpen) {
+      if (event.key === "Escape" && !previewing && !saving && !deleting && !writingNew) {
+        if (titleEditing) {
+          setTitleEditing(false);
+        } else if (editorOpen) {
           setEditorOpen(false);
         } else {
           transitionTo(() => setSelectedRollId(null));
@@ -85,14 +106,18 @@ export function NarrativePage() {
     };
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [editorOpen, selectedRoll]);
+  }, [editorOpen, selectedRoll, previewing, saving, deleting, writingNew, titleEditing]);
 
   const openRoll = (rollId) => {
+    setTitleEditing(false); setTitleError('');
+    setDeleteError('');
     setMaterialIds(null);
     transitionTo(() => setSelectedRollId(rollId));
   };
 
   const closeRoll = () => {
+    setTitleEditing(false); setTitleError('');
+    setDeleteError('');
     setEditorOpen(false);
     setPreviewBody("");
     setPreviewDiff("");
@@ -104,7 +129,35 @@ export function NarrativePage() {
     transitionTo(() => setSelectedRollId(null));
   };
 
+  const deleteRoll = async () => {
+    if (!selectedRoll || deleting || previewing || saving || writingNew || uploading) return;
+    if (!window.confirm(`删除《${selectedRoll.title}》？\n这本书的正文和材料关联会从书架移除，原始 Event、日记、Scene 和上传文件保留。`)) return;
+    setDeleting(true); setDeleteError('');
+    try {
+      await deleteNarrativeRoll(selectedRoll);
+      libraryRead.current?.abort(); setLoading(false);
+      setNarrativeRolls(rolls => rolls.filter(roll => roll.id !== selectedRoll.id));
+      closeRoll();
+    } catch (error) { setDeleteError(error.message); }
+    finally { setDeleting(false); }
+  };
+
+  const saveTitle = async (event) => {
+    event.preventDefault();
+    if (!selectedRoll || saving) return;
+    setSaving(true); setTitleError('');
+    try {
+      const result = await renameNarrativeRoll(selectedRoll, titleInput.trim());
+      libraryRead.current?.abort(); setLoading(false);
+      setNarrativeRolls(rolls => rolls.map((roll, index) => roll.id === selectedRoll.id
+        ? projectLiveRoll(result, index, roll) : roll));
+      setPreviewSeal(null); setTitleEditing(false);
+    } catch (error) { setTitleError(error.message); }
+    finally { setSaving(false); }
+  };
+
   const openEditor = () => {
+    setTitleEditing(false); setTitleError('');
     setMaterialIdInput("");
     setMaterialLabels({});
     setPreviewBody(selectedRoll?.body || selectedRoll?.paragraphs?.join("\n\n") || "");
@@ -130,6 +183,7 @@ export function NarrativePage() {
 
   const generatePreview = async (mode, targetRoll = selectedRoll, proposedBody = "") => {
     if (!targetRoll || previewing) return;
+    setTitleEditing(false); setTitleError('');
     const targetMaterialIds = (targetRoll.id === selectedRoll?.id ? materialIds : null) || targetRoll.materialIds;
     setMaterialIds(targetMaterialIds);
     setEditorOpen(true);
@@ -146,7 +200,8 @@ export function NarrativePage() {
         setPreviewBody(targetRoll.body || targetRoll.paragraphs.join("\n\n"));
         setPreviewDiff("");
         setPreviewMode(mode);
-        setPreviewError(result.issues?.join("；") || "当前绑定材料不足以生成可信正文。");
+        setPreviewError('书写未完成：' + (result.issues?.join("；") || "当前绑定材料不足以生成可信正文。")
+          + (targetRoll.isUnwritten ? '\n叙事线和材料已保存，正文仍然留白。' : '\n原正文未改变。'));
         return null;
       }
       setPreviewBody(result.body);
@@ -156,7 +211,8 @@ export function NarrativePage() {
       setPreviewSeal(result);
       return result;
     } catch (error) {
-      setPreviewError(error.message || "没有生成这次预览。");
+      setPreviewError((error.message || "没有生成这次预览。")
+        + (targetRoll.isUnwritten ? '\n叙事线和材料已保存，正文仍然留白。' : '\n原正文未改变。'));
       return null;
     } finally {
       setPreviewing(false);
@@ -171,16 +227,12 @@ export function NarrativePage() {
       if (!preview?.preview_fingerprint) return;
       setSaving(true);
       const result = await saveNarrativeRollBody(targetRoll, preview.body, preview);
-      setNarrativeRolls(rolls => rolls.map(roll => roll.id === targetRoll.id ? {
-        ...roll, body: preview.body, paragraphs: preview.body.trim().split(/\n\s*\n/),
-        materialIds: preview.proposed_material_ids, isUnwritten: false,
-        projectionStatus: "reviewed", revision: result.revision,
-        documentHash: result.document_sha256,
-      } : roll));
+      setNarrativeRolls(rolls => rolls.map((roll, index) => roll.id === targetRoll.id
+        ? projectLiveRoll(result, index, roll) : roll));
       setEditorOpen(false);
       setPreviewSeal(null);
     } catch (error) {
-      setPreviewError(error.message || "正文没有保存，叙事线和材料仍然保留。");
+      setPreviewError((error.message || "正文保存失败。") + '\n叙事线和材料已保存，这份正文仍留在编辑区。');
     } finally {
       setSaving(false);
       setWritingNew(false);
@@ -191,15 +243,15 @@ export function NarrativePage() {
     setSaving(true);
     setPreviewError("");
     try {
-      const response = await fetch("/__serein/memory/save-narrative-materials", {
+      const { payload: result } = await narrativeRequest("/__serein/memory/save-narrative-materials", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ narrative_id: selectedRoll.id, expected_revision: selectedRoll.revision,
           material_ids: materialIds || selectedRoll.materialIds }),
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.message || result.reason || "材料没有保存。");
-      const rolls = await loadNarrativeRolls();
-      if (rolls?.length) setNarrativeRolls(rolls);
+      }, '保存材料', ['updated']);
+      setNarrativeRolls(rolls => rolls.map((roll, index) => roll.id === selectedRoll.id
+        ? projectLiveRoll(result, index, { ...roll, sources: editableMaterials.map(source => ({
+          ...source, type: source.key.replace(/_ids$/, ''),
+        })) }) : roll));
       setPreviewSeal(null);
       setSaveMessage("材料已保存，正文仍然留白。");
     } catch (error) {
@@ -249,16 +301,11 @@ export function NarrativePage() {
     setSaveMessage("");
     try {
       const result = await saveNarrativeRollBody(selectedRoll, previewBody, previewSeal);
-      const paragraphs = previewBody
-        .replace(/\r\n?/g, "\n")
-        .trim()
-        .split(/\n\s*\n/)
-        .map((paragraph) => paragraph.trim())
-        .filter(Boolean);
-      const refreshed = await loadNarrativeRolls();
-      setNarrativeRolls(refreshed?.length ? refreshed : (rolls) => rolls.map((roll) => (
+      setNarrativeRolls((rolls) => rolls.map((roll, index) => (
         roll.id === selectedRoll.id
-          ? { ...roll, body: previewBody.trim(), paragraphs, revision: Number(result.revision || roll.revision + 1), documentHash: String(result.document_sha256 || roll.documentHash) }
+          ? projectLiveRoll(result, index, { ...roll, sources: editableMaterials.map(source => ({
+              ...source, type: source.key.replace(/_ids$/, ''),
+            })) })
           : roll
       )));
       setPreviewDiff("");
@@ -364,11 +411,12 @@ export function NarrativePage() {
 
   return (
     <div className={`narrative-experience${selectedRoll ? " is-reading" : ""}`}>
-      {createOpen && <NarrativeCreateDialog onClose={() => setCreateOpen(false)} onCreated={async (id, write) => {
-        const rolls = await loadNarrativeRolls();
-        const roll = rolls.find((item) => item.id === id);
-        if (!roll) throw new Error("叙事线已保存，但书架尚未刷新，请稍后重试。");
-        setNarrativeRolls(rolls); setCreateOpen(false); setSelectedRollId(id); setMaterialIds(roll.materialIds);
+      {createOpen && <NarrativeCreateDialog onClose={() => setCreateOpen(false)} onCreated={async (id, write, saved) => {
+        const roll = saved ? projectLiveRoll(saved, narrativeRolls.length) : (await loadNarrativeRolls()).find(item => item.id === id);
+        if (!roll) throw new Error("叙事线已保存，但书架尚未刷新。请关闭窗口后刷新书架。");
+        libraryRead.current?.abort(); setLoading(false);
+        setNarrativeRolls(rolls => [...rolls.filter(item => item.id !== id), roll]);
+        setCreateOpen(false); setSelectedRollId(id); setMaterialIds(roll.materialIds);
         if (write) await writeNewRoll(roll);
       }} />}
       {!selectedRoll ? (
@@ -384,6 +432,19 @@ export function NarrativePage() {
               <span>卷，仍在生长</span>
             </div>
           </header>
+
+          {loading && <p role="status">正在读取书架…</p>}
+          {libraryError && <div role="alert" style={{ whiteSpace: 'pre-line' }}>{libraryError}
+            <button type="button" disabled={loading} onClick={async () => {
+              libraryRead.current?.abort();
+              const controller = new AbortController(); libraryRead.current = controller;
+              setLoading(true);
+              try {
+                const rolls = await loadNarrativeRolls({ signal: controller.signal });
+                if (!controller.signal.aborted) { setNarrativeRolls(rolls); setLibraryError(''); }
+              } catch (error) { if (!controller.signal.aborted) setLibraryError(error.message); }
+              finally { if (!controller.signal.aborted) setLoading(false); }
+            }}>重新读取书架</button></div>}
 
           <div className="narrative-shelf-shell">
             <div
@@ -440,7 +501,7 @@ export function NarrativePage() {
       ) : (
         <article className="narrative-reader" aria-labelledby="narrative-reader-title">
           <nav className="narrative-reader__topbar" aria-label="叙事卷阅读导航">
-            <button className="narrative-reader__back" type="button" onClick={closeRoll}>
+            <button className="narrative-reader__back" type="button" disabled={previewing || saving || deleting || writingNew} onClick={closeRoll}>
               <ArrowLeft size={18} weight="light" aria-hidden="true" />
               回到书架
             </button>
@@ -454,7 +515,7 @@ export function NarrativePage() {
                 <button
                   className={editorOpen && !previewMode ? "is-active" : ""}
                   type="button"
-                  disabled={previewing || saving}
+                  disabled={previewing || saving || deleting}
                   onClick={openEditor}
                 >
                   <PencilSimple size={15} weight="light" aria-hidden="true" />
@@ -463,7 +524,7 @@ export function NarrativePage() {
                 <button
                   className={previewMode === "update" ? "is-active" : ""}
                   type="button"
-                  disabled={previewing || saving || selectedRoll.isUnwritten}
+                  disabled={previewing || saving || deleting || selectedRoll.isUnwritten}
                   onClick={() => generatePreview("update")}
                 >
                   {previewing && previewMode === "update" ? <CircleNotch className="is-spinning" size={15} aria-hidden="true" /> : null}
@@ -472,14 +533,17 @@ export function NarrativePage() {
                 <button
                   className={previewMode === "rewrite" ? "is-active" : ""}
                   type="button"
-                  disabled={previewing || saving}
+                  disabled={previewing || saving || deleting}
                   onClick={() => selectedRoll.isUnwritten ? writeNewRoll() : generatePreview("rewrite")}
                 >
                   {previewing && previewMode === "rewrite" ? <CircleNotch className="is-spinning" size={15} aria-hidden="true" /> : null}
                   {selectedRoll.isUnwritten ? "书写" : "重写"}
                 </button>
+                <button type="button" disabled={previewing || saving || writingNew || uploading || deleting} onClick={deleteRoll}>
+                  <Trash size={15} weight="light" aria-hidden="true" />{deleting ? '正在删除…' : '删除'}
+                </button>
                 {editorOpen ? (
-                  <button className="is-close" type="button" aria-label="关闭编辑区" onClick={closeEditor}>
+                  <button className="is-close" type="button" disabled={previewing || saving || deleting || writingNew} aria-label="关闭编辑区" onClick={closeEditor}>
                     <X size={15} weight="light" aria-hidden="true" />
                   </button>
                 ) : null}
@@ -491,11 +555,24 @@ export function NarrativePage() {
             className="narrative-reader__article"
             style={{ viewTransitionName: `roll-${selectedRoll.id}` }}
           >
+            {deleteError && <p className="narrative-editor__error" role="alert" style={{ whiteSpace: 'pre-line' }}>{deleteError}</p>}
             <header className="narrative-reader__article-header">
               <span>
                 NARRATIVE PROJECTION · {selectedRoll.scope?.toUpperCase() ?? "ARC"} · VOL. {selectedRoll.volume}
               </span>
               <h1 id="narrative-reader-title">{selectedRoll.title}</h1>
+              {titleEditing ? <form className="narrative-title-edit" onSubmit={saveTitle}>
+                <label htmlFor="narrative-book-title">书名</label>
+                <input id="narrative-book-title" autoFocus value={titleInput} disabled={saving}
+                  onChange={event => setTitleInput(Array.from(event.target.value).slice(0, 16).join(''))} />
+                <small>{Array.from(titleInput).length}/16</small>
+                <button type="submit" disabled={saving || !titleInput.trim() || Array.from(titleInput.trim()).length > 16}>{saving ? '正在保存…' : '保存书名'}</button>
+                <button type="button" disabled={saving} onClick={() => { setTitleEditing(false); setTitleError(''); }}>取消</button>
+              </form> : <button type="button" className="narrative-reader__rename"
+                disabled={editorOpen || previewing || saving || deleting || writingNew || uploading}
+                title={editorOpen ? '关闭正文编辑区后可修改书名' : undefined}
+                onClick={() => { setTitleInput(selectedRoll.title); setTitleEditing(true); setTitleError(''); }}>改书名</button>}
+              {titleError && <p role="alert" className="narrative-editor__error" style={{ whiteSpace: 'pre-line' }}>{titleError}</p>}
               <p>{selectedRoll.subtitle}</p>
               <small>{selectedRoll.description}</small>
               <dl className="narrative-reader__facts">
@@ -519,15 +596,17 @@ export function NarrativePage() {
                 <header>
                   <div>
                     <span>{previewMode ? "WRITER PREVIEW" : "BODY EDITOR"}</span>
-                    <h2>{previewMode ? (previewMode === "update" ? "更新预览" : previewMode === "rewrite" ? "重写预览" : "保存前校验") : "手改正文"}</h2>
+                    <h2>{selectedRoll.isUnwritten && previewMode === 'rewrite' ? '书写正文' : previewMode ? (previewMode === "update" ? "更新预览" : previewMode === "rewrite" ? "重写预览" : "保存前校验") : "手改正文"}</h2>
                   </div>
-                  <small>{writingNew ? "正在书写，完成后保存成卷；材料不足时会保留叙事线。" : previewMode ? "预览不会自动发布，确认后再保存" : "保存只改正文，不调用 Writer"}</small>
+                  <small>{writingNew ? "正在书写，完成后保存成卷；材料不足时会保留叙事线。" : selectedRoll.isUnwritten ? '材料已保存；书写成功后自动保存正文。' : previewMode ? "预览不会自动发布，确认后再保存" : "保存只改正文，不调用 Writer"}</small>
                 </header>
+                {previewError ? <p className="narrative-editor__error" role="alert" style={{ whiteSpace: 'pre-line' }}>{previewError}</p> : null}
                 <div className="narrative-editor__workspace">
                   <div className="narrative-editor__paper">
                     <textarea
                       aria-label="叙事卷正文预览"
                       value={previewBody}
+                      disabled={previewing || saving || writingNew || deleting}
                       onChange={(event) => {
                         setPreviewBody(event.target.value);
                         setSaveMessage("");
@@ -535,7 +614,6 @@ export function NarrativePage() {
                       }}
                       spellCheck="false"
                     />
-                    {previewError ? <p className="narrative-editor__error" role="alert">{previewError}</p> : null}
                     {saveMessage ? <p className="narrative-editor__saved" role="status">{saveMessage}</p> : null}
                   </div>
                   <aside className="narrative-editor__materials" aria-label="当前绑定材料">

@@ -13,17 +13,27 @@ const dom=new JSDOM('<div id="root"></div>',{url:'http://synthetic.invalid',pret
 for(const key of ['window','document','navigator','HTMLElement','Event','Node'])
   Object.defineProperty(globalThis,key,{value:dom.window[key],configurable:true});
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+const nativeChannel=globalThis.MessageChannel,channels=[];
+globalThis.MessageChannel=class extends nativeChannel {constructor(){super();channels.push(this);}};
 dom.window.HTMLDialogElement.prototype.showModal=function(){this.setAttribute('open','');};
 dom.window.HTMLDialogElement.prototype.close=function(){this.removeAttribute('open');};
 const interval=globalThis.setInterval,clear=globalThis.clearInterval;
 const keepAlive=interval(()=>{},1000);
 globalThis.setInterval=()=>1;globalThis.clearInterval=()=>{};
-let state,root;
+let state,root,recoveryBusy=false,unsplittable=false;
 const requests=[];
 globalThis.fetch=async(url,options={})=>{
   requests.push({url,body:options.body?JSON.parse(options.body):null});
   let result=state;
-  if(url.endsWith('/rebuild'))result={status:'rebuilt'};
+  if(url.endsWith('/recovery-preview')){
+    const body=JSON.parse(options.body),limit=body.max_input_chars||5000;
+    result={batch_id:body.batch_id,originals:8,original_chars:16000,first_at:'2025-01-01T00:00:00Z',last_at:'2025-01-01T00:07:00Z',
+      max_input_chars:limit,batches:unsplittable?1:limit===8000?2:4,batch_chars:unsplittable?[16000]:[limit===8000?8000:4000],
+      can_rebatch:!unsplittable,oversized_batches:unsplittable?1:0};
+  }
+  else if(url.endsWith('/skip-batch'))result=recoveryBusy?{status:'busy'}:{status:'skipped_batch',skipped_originals:8};
+  else if(url.endsWith('/rebatch'))result={status:'rebatched',batches:2};
+  else if(url.endsWith('/rebuild'))result={status:'rebuilt'};
   else if(url.endsWith('/retry-batch'))result={status:'resumed'};
   else if(url.endsWith('/next'))result={status:'queued',stage:'queued'};
   else assert.equal(url,'/__serein/pipeline/status');
@@ -44,6 +54,7 @@ const button=text=>[...document.querySelectorAll('button')].find(node=>node.text
 async function render(value){
   if(root)await act(async()=>{root.unmount();root=null;await wait();});
   state=value;requests.length=0;
+  recoveryBusy=false;unsplittable=false;
   await act(async()=>{root=mount();await wait();});
 }
 async function click(node){assert(node,'button exists');assert(!node.disabled);await act(async()=>{node.click();await wait();});}
@@ -92,10 +103,60 @@ test('each runtime hold is explained when ordinary and runtime repairs coexist',
   assert.match(document.body.textContent,/重新校验不会迁移旧计划/);
   assert(button('重新校验并继续'));
 });
+
+function paused(){return {status:'blocked',stage:'blocked',paused_batches:[{batch_id:'paused-synthetic',reason:'synthetic failure'}],
+  blocked_scopes:[{batch_id:'paused-synthetic',scope:'synthetic',hold_status:'paused_failure'}]};}
+test('skipping previews the exact scope, cancellation is harmless, and confirmation continues work',async()=>{
+  await render(paused());
+  await click(button('跳过本批，保留原话'));
+  assert.match(document.querySelector('#pipeline-recovery-title').closest('dialog').textContent,/8 条未整理原话，共 16000 字符/);
+  assert(!requests.some(item=>item.url.endsWith('/skip-batch')));
+  await click([...document.querySelectorAll('dialog[open] button')].find(node=>node.textContent==='取消'));
+  assert(!requests.some(item=>item.url.endsWith('/skip-batch')));
+  await click(button('跳过本批，保留原话'));
+  await click(button('确认跳过本批'));
+  assert.deepEqual(requests.find(item=>item.url.endsWith('/skip-batch')).body,{batch_id:'paused-synthetic',confirm:'SKIP_PIPELINE_BATCH'});
+  assert(requests.some(item=>item.url.endsWith('/next')));
+  assert.match(document.body.textContent,/已跳过本批 8 条原话/);
+});
+test('rebatching requires a fresh preview after editing the scoped input limit',async()=>{
+  await render(paused());
+  await click(button('按更小材料重新整理'));
+  const input=document.querySelector('#pipeline-recovery-title').closest('dialog').querySelector('input');
+  await act(async()=>{
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(input,'8000');
+    input.dispatchEvent(new Event('input',{bubbles:true}));await wait();
+  });
+  assert(button('确认拆小并整理').disabled);
+  assert(!requests.some(item=>item.url.endsWith('/rebatch')));
+  await click(button('查看拆分结果'));
+  assert.match(document.body.textContent,/按完整问答拆成 2 批/);
+  await click(button('确认拆小并整理'));
+  assert.deepEqual(requests.find(item=>item.url.endsWith('/rebatch')).body,
+    {batch_id:'paused-synthetic',confirm:'REBATCH_PIPELINE_BATCH',max_input_chars:8000});
+  assert(requests.some(item=>item.url.endsWith('/next')));
+});
+test('one oversized complete exchange is explained and cannot be submitted as smaller batches',async()=>{
+  await render(paused());unsplittable=true;
+  await click(button('按更小材料重新整理'));
+  assert(button('确认拆小并整理').disabled);
+  assert.match(document.body.textContent,/包含超长完整问答/);
+  assert(!requests.some(item=>item.url.endsWith('/rebatch')));
+});
+test('a busy recovery leaves confirmation open without starting another task',async()=>{
+  await render(paused());recoveryBusy=true;
+  await click(button('跳过本批，保留原话'));
+  await click(button('确认跳过本批'));
+  assert(document.querySelector('#pipeline-recovery-title').closest('dialog').open);
+  assert.match(document.body.textContent,/正在运行/);
+  assert(!requests.some(item=>item.url.endsWith('/next')));
+});
 after(async()=>{
   if(root)await act(async()=>root.unmount());
   dom.window.close();globalThis.setInterval=interval;globalThis.clearInterval=clear;
   clear(keepAlive);require('esbuild').stop();
+  for(const channel of channels){channel.port1.close();channel.port2.close();}
+  globalThis.MessageChannel=nativeChannel;
   const target=resolve(directory),parent=resolve(tmpdir());
   assert(target.startsWith(parent+sep)&&target!==parent);
   await rm(target,{recursive:true,force:true});
