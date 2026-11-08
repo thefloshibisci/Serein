@@ -1,6 +1,8 @@
 # GitHub 自动部署
 
-本 fork 的 `main` 推送后运行 **Test and deploy Serein**。作者上游更新需要先合入本 fork；其他分支和 PR 不部署。
+本 fork 的 `main` 推送后运行 **Test and deploy Serein**，也可手动运行。作者上游更新需要先合入本 fork；其他分支和 PR 不部署。部署基础设施变更另跑合成检查，也可手动运行 **Check Serein deployment infrastructure**。
+
+部署工作流不按文件路径过滤：即使上一轮构建期间只追加了文档提交，最新 `main` 仍会接续部署，避免旧构建因提交过时退出后没有后续运行。
 
 流程先执行离线行为回归、网页测试、构建及公开发行文件检查，再构建同一提交的记忆服务与网页网关镜像。GitHub 保存构建产物，服务器通过专用受限 SSH 入口核对大小、SHA256、镜像标签和提交。
 
@@ -11,3 +13,5 @@
 在 GitHub Actions 中确认 **test-and-build** 和 **Deploy tested pair to Tencent** 都成功。`skipped_main_advanced` 表示已有更新提交，应查看最新运行。服务器收据与冻结备份位于 `/opt/nanzhi-deploy/runs/`，凭据与生产配置留在服务器；部署密钥仅保存为该仓库的 `NANZHI_DEPLOY_KEY` Secret。
 
 服务器入口 `.github/deploy/receiver.py` 需要管理员初次安装，使用独立的 forced-command 密钥、固定主机公钥、既有全局部署锁与专用维护标志。应用更新不自动替换 root 接收器。更新接收器需重新测试、管理员安装；GitHub 任务无交互 shell 权限。
+
+副本检查结束并移除临时容器后自动清理生成的副本，避免每次部署重复占用磁盘。管理员可在服务器 `/opt/nanzhi-deploy/serein-archive-policy.json` 逐项登记已完成历史任务的备份目录；只有这些明确路径会从临时副本和新部署备份中排除，原历史目录保留不动，运行数据库、索引、原话、媒体及配置仍备份。每次部署将排除清单写入自己的收据目录。

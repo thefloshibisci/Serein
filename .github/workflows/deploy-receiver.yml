@@ -1,0 +1,27 @@
+name: Check Serein deployment infrastructure
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/deploy/receiver.py'
+      - '.github/deploy/test_receiver.py'
+      - '.github/workflows/deploy-*.yml'
+  pull_request:
+    paths:
+      - '.github/deploy/**'
+      - '.github/workflows/deploy-*.yml'
+permissions:
+  contents: read
+jobs:
+  synthetic-deployment-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install pytest
+      - run: python -m pytest -q .github/deploy/test_receiver.py
+      - run: python -m compileall -q .github/deploy

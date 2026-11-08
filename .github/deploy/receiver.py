@@ -29,6 +29,22 @@ REPOSITORY = 'thefloshibisci/Serein'
 MAINTENANCE = Path('/var/lib/nanzhi-deploy-gates/serein.maintenance')
 MAX_ARCHIVE = 2 * 1024**3
 CONFIRMATIONS = queue.Queue()
+ARCHIVE_POLICY = BASE / 'serein-archive-policy.json'
+
+
+def archive_exclusions(source):
+    """Only administrator-reviewed historical task directories, never live DBs."""
+    if not ARCHIVE_POLICY.exists():
+        return []
+    values = json.loads(ARCHIVE_POLICY.read_text()).get(str(source.resolve()), [])
+    result = []
+    for value in values:
+        relative = Path(value)
+        if (relative.is_absolute() or '..' in relative.parts or len(relative.parts) not in (1, 2)
+                or not re.fullmatch(r'(?:runtime/)?(?:user-[a-z0-9-]+|migration|source-upgrade|organization)-\d{8}(?:-[a-z0-9-]+)?', relative.as_posix())):
+            raise ValueError('invalid_historical_archive_path')
+        result.append(relative)
+    return result
 
 
 def call(args, timeout=180, **kwargs):
@@ -135,9 +151,14 @@ def download_artifact(dest, item, locations=None):
 
 def snapshot(source, dest):
     """Consistent individual SQLite copies, isolated rehearsal only."""
-    shutil.copytree(source, dest, symlinks=True)
+    excluded = archive_exclusions(source)
+    def is_archived(path):
+        return any(path.relative_to(source).is_relative_to(part) for part in excluded)
+    def ignore(folder, names):
+        return [name for name in names if is_archived(Path(folder) / name)]
+    shutil.copytree(source, dest, symlinks=True, ignore=ignore)
     for path in source.rglob('*'):
-        if not path.is_file() or path.is_symlink():
+        if is_archived(path) or not path.is_file() or path.is_symlink():
             continue
         with path.open('rb') as f:
             is_db = f.read(16) == b'SQLite format 3\0'
@@ -336,6 +357,30 @@ def rehearsal(doc, images, job):
         wait_ready(path)
     finally:
         call(compose(path, 'down', '--timeout', '60'), timeout=150)
+        cleanup_rehearsal(job)
+
+
+def cleanup_rehearsal(job):
+    # Called only after candidate containers are removed. Preserve original
+    # volumes and frozen deployment backups; discard these generated copies.
+    for name in SERVICES:
+        for folder in job.glob('test-data-' + name + '-*'):
+            if folder.is_symlink() or folder.resolve().parent != job.resolve():
+                raise ValueError('unexpected_rehearsal_copy')
+            shutil.rmtree(folder)
+
+
+def backup_arguments(sources, job):
+    exclusions = []
+    archive_policy = {}
+    for source in sources:
+        prefix = source.relative_to(PRODUCTION)
+        reviewed = archive_exclusions(source)
+        archive_policy[prefix.as_posix()] = [p.as_posix() for p in reviewed]
+        exclusions.extend('--exclude=' + (prefix / part).as_posix() for part in reviewed)
+    (job / 'excluded-historical-archives.json').write_text(json.dumps(archive_policy, indent=2))
+    return ['tar', '-czf', str(job / 'data-before.tar.gz'), *exclusions, '-C', str(PRODUCTION), '--',
+            *(str(p.relative_to(PRODUCTION)) for p in sources)]
 
 
 def latest_commit(commit):
@@ -378,8 +423,7 @@ def promote(doc, images, job, record):
     record('quiescing')
     call(compose(COMPOSE, 'stop', '--timeout', '60', *reversed(SERVICES)), timeout=180)
     record('backing_up')
-    call(['tar', '-czf', str(job / 'data-before.tar.gz'), '-C', str(PRODUCTION), '--',
-          *(str(p.relative_to(PRODUCTION)) for p in sources)], timeout=300)
+    call(backup_arguments(sources, job), timeout=300)
     call(['tar', '-tzf', str(job / 'data-before.tar.gz')], timeout=120)
     pending.replace(COMPOSE)
     record('starting')
@@ -406,9 +450,20 @@ def deploy(item, stream, locations):
             raise RuntimeError('insufficient_disk_space')
         archive = job / 'image.tar.gz'
         record('receiving')
-        if item['action'] == 'deploy_url':
+        cached = False
+        for previous in (BASE / 'runs').glob('*-serein-' + item['commit'][:12] + '/image.tar.gz'):
+            if previous == archive or previous.stat().st_size != item['bytes']:
+                continue
+            with previous.open('rb') as source:
+                if hashlib.file_digest(source, 'sha256').hexdigest() != item['sha256']:
+                    continue
+            archive.hardlink_to(previous)
+            status['verified_cached_archive'] = True
+            cached = True
+            break
+        if not cached and item['action'] == 'deploy_url':
             download_artifact(archive, item, locations)
-        else:
+        elif not cached:
             receive(stream, archive, item)
         images = validate_bundle(archive, item['commit'])
         call(['docker', 'load', '-i', str(archive)], timeout=300)

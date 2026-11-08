@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import io
+import hashlib
 import json
 import queue
 from pathlib import Path
@@ -192,3 +193,51 @@ def test_runner_answers_cutover_challenge_without_sending_github_token(tmp_path,
     assert sent[1]=={'action':'main_confirmation','commit':COMMIT,'nonce':nonce,'head':COMMIT}
     assert b'synthetic-github-secret' not in process.stdin.getvalue()
     assert sum(args[-1]=='.object.sha' for args in calls)==2
+
+
+def test_only_reviewed_archives_are_excluded_and_originals_survive(tmp_path,monkeypatch):
+    source=tmp_path/'data';source.mkdir()
+    archive=source/'runtime/user-repair-20261107-2158';archive.mkdir(parents=True)
+    (archive/'before.sqlite').write_bytes(b'synthetic old backup')
+    live=source/'runtime/serein.db';live.write_bytes(b'synthetic live data')
+    (source/'runtime/user-profile.json').write_text('{}')
+    policy=tmp_path/'policy.json';policy.write_text(json.dumps({str(source.resolve()):['runtime/user-repair-20261107-2158']}))
+    monkeypatch.setattr(r,'ARCHIVE_POLICY',policy)
+    monkeypatch.setattr(r.os,'chown',lambda *_a,**_k:None,raising=False)
+    job=tmp_path/'job';job.mkdir();dest=job/'test-data-serein-memory-0'
+    r.snapshot(source,dest)
+    assert (dest/'runtime/serein.db').read_bytes()==live.read_bytes()
+    assert (dest/'runtime/user-profile.json').exists()
+    assert not (dest/'runtime/user-repair-20261107-2158').exists()
+    r.cleanup_rehearsal(job)
+    assert not dest.exists() and live.exists() and archive.exists()
+    policy.write_text(json.dumps({str(source.resolve()):['runtime/serein.db']}))
+    with pytest.raises(ValueError,match='historical_archive'):r.archive_exclusions(source)
+
+
+def test_backup_excludes_exact_reviewed_path_not_entire_runtime(deployment,monkeypatch,tmp_path):
+    doc,_,job,_,_=deployment
+    sources=r.writable_sources(doc)
+    policy=tmp_path/'policy.json';policy.write_text(json.dumps({str(sources[0]):['runtime/user-repair-20261107-2158']}))
+    monkeypatch.setattr(r,'ARCHIVE_POLICY',policy)
+    args=r.backup_arguments(sources,job)
+    excludes=[a for a in args if a.startswith('--exclude=')]
+    assert excludes==['--exclude=data/serein-memory/runtime/user-repair-20261107-2158']
+    assert json.loads((job/'excluded-historical-archives.json').read_text())['data/serein-memory']==['runtime/user-repair-20261107-2158']
+
+
+def test_retry_reuses_only_digest_verified_same_commit_bundle(deployment,monkeypatch,tmp_path):
+    base=tmp_path/'deploy';runs=base/'runs';runs.mkdir(parents=True)
+    previous=runs/('previous-serein-'+COMMIT[:12]);previous.mkdir()
+    archive=previous/'image.tar.gz';bundle(archive)
+    monkeypatch.setattr(r,'BASE',base)
+    monkeypatch.setattr(r,'call',lambda *_a,**_k:b'')
+    monkeypatch.setattr(r,'rehearsal',lambda *_a:None)
+    monkeypatch.setattr(r,'promote',lambda _d,_i,_j,record:record('deployed'))
+    monkeypatch.setattr(r,'download_artifact',lambda *_a:pytest.fail('Verified bundle should not be downloaded again'))
+    monkeypatch.setattr(r.shutil,'disk_usage',lambda _:types.SimpleNamespace(free=10*1024**3))
+    item={'action':'deploy_url','commit':COMMIT,'bytes':archive.stat().st_size,
+          'sha256':hashlib.sha256(archive.read_bytes()).hexdigest()}
+    result=r.deploy(item,None,{})
+    assert result['phase']=='deployed' and result['verified_cached_archive']
+    assert archive.exists()
