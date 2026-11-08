@@ -36,6 +36,8 @@ import { MarkdownProjection } from "../components/MarkdownProjection.jsx";
 import { SceneCueEditor } from "../components/SceneCueEditor.jsx";
 import { SceneEvidenceEditor } from "../components/SceneEvidenceEditor.jsx";
 import { PreferenceNotes } from "../components/PreferenceNotes.jsx";
+import { FeelSources, isFeeling } from "../components/FeelSources.jsx";
+import { authoredType } from "../storage/authoredTypes.js";
 import { compareFactEventsByEnd, factEventTimeLabel } from "../utils/factEventTime.js";
 import { applyEventBatch, runEventBatch } from "../utils/eventBatch.js";
 import { formatSourceTime } from "../utils/sourceTime.js";
@@ -794,6 +796,12 @@ export function MemoryPage() {
     setSceneActionMessage("");
     try {
       const responses = await Promise.all(targets.map(async (scene) => {
+        if (isFeeling(scene)) {
+          const payload = await authoredType("edit_feel", { feel_id: sereinSourceIdForScene(scene),
+            expected_revision: scene.revision, lifecycle: status === "已沉底" ? "archived" : "active",
+            ...(status === "已沉底" ? {} : { can_surface: true }) });
+          return [scene.id, payload.document.updated_at, payload.document.revision];
+        }
         const response = await fetch("/__serein/memory/set-scene-status", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -810,10 +818,11 @@ export function MemoryPage() {
         }
         return [scene.id, payload.updated_at || scene.sourceUpdatedAt];
       }));
-      const revisions = new Map(responses);
+      const revisions = new Map(responses.map(([id, updatedAt, revision]) => [id, { updatedAt, revision }]));
       setSceneRecords((current) => current.map((scene) => (
         revisions.has(scene.id)
-          ? { ...scene, status, sourceUpdatedAt: revisions.get(scene.id) }
+          ? { ...scene, status, sourceUpdatedAt: revisions.get(scene.id).updatedAt,
+              revision: revisions.get(scene.id).revision ?? scene.revision }
           : scene
       )));
       setSelectedSceneIds(new Set());
@@ -891,6 +900,19 @@ export function MemoryPage() {
 
   const saveEditedScene = async () => {
     if (!selectedScene || !editDraft) return;
+    if (isFeeling(selectedScene)) {
+      if (!editDraft.bodyText.trim()) return;
+      setSceneActionState("saving"); setSceneActionMessage("");
+      try {
+        const saved = await authoredType("edit_feel", { feel_id: sereinSourceIdForScene(selectedScene),
+          expected_revision: selectedScene.revision, content: editDraft.bodyText });
+        const body = saved.document.body_md.split(/\n\s*\n/).filter(Boolean);
+        updateScene(selectedScene.id, () => ({ body, excerpt: sceneExcerpt(body), revision: saved.document.revision,
+          sourceUpdatedAt: saved.document.updated_at, feel_sources: saved.feel_sources }));
+        cancelEditingScene(); setSceneActionState("saved"); setSceneActionMessage("感受已保存，当时的来源保持原样。");
+      } catch (error) { setSceneActionState("error"); setSceneActionMessage(error.message); }
+      return;
+    }
     const title = editDraft.title.trim();
     const date = editDraft.date.trim();
     const body = editDraft.bodyText
@@ -1340,11 +1362,12 @@ export function MemoryPage() {
                       <time dateTime={scene.date}>{scene.date}</time>
                       <span className="scene-entry__title">
                         <strong>{scene.title}</strong>
+                        {isFeeling(scene) ? <small className="scene-feel-label">感受</small> : null}
                         {scene.favorite ? <Heart size={15} weight="fill" aria-label="已收藏" /> : null}
                       </span>
                       <p className="scene-entry__excerpt">{scene.excerpt}</p>
                       <span className="scene-entry__meta" aria-label="Scene 信息">
-                        <span><LinkSimple size={15} weight="light" aria-hidden="true" />{scene.sourceCount} 条原文</span>
+                        <span><LinkSimple size={15} weight="light" aria-hidden="true" />{isFeeling(scene) ? `${scene.feel_sources?.length || 0} 个来源` : `${scene.sourceCount} 条原文`}</span>
                         <span><ShareNetwork size={15} weight="light" aria-hidden="true" />{scene.relationCount} 个关联</span>
                         <span>
                           {scene.status === "已沉底"
@@ -1454,7 +1477,7 @@ export function MemoryPage() {
 
               <header className="scene-detail__header">
                 <div className="scene-detail__header-top">
-                  {selectedSceneIsEditing ? (
+                  {selectedSceneIsEditing && !isFeeling(selectedScene) ? (
                     <input
                       className="scene-editor__date"
                       type="date"
@@ -1482,7 +1505,7 @@ export function MemoryPage() {
                     )}
                   </div>
                 </div>
-                {selectedSceneIsEditing ? (
+                {selectedSceneIsEditing && !isFeeling(selectedScene) ? (
                   <input
                     className="scene-editor__title"
                     aria-label="记忆标题"
@@ -1492,8 +1515,9 @@ export function MemoryPage() {
                 ) : (
                   <h2>{selectedScene.title}</h2>
                 )}
+                {isFeeling(selectedScene) ? <span className="scene-feel-label">感受 · 非事实证据</span> : null}
                 <div className="scene-detail__meta" aria-label="Scene 信息">
-                  <span><LinkSimple size={15} weight="light" aria-hidden="true" />{selectedScene.sourceCount} 条原文</span>
+                  <span><LinkSimple size={15} weight="light" aria-hidden="true" />{isFeeling(selectedScene) ? `${selectedScene.feel_sources?.length || 0} 个来源` : `${selectedScene.sourceCount} 条原文`}</span>
                   <span><ShareNetwork size={15} weight="light" aria-hidden="true" />{selectedScene.relationCount} 个关联</span>
                   {selectedScene.narrativeRefs.length ? (
                     <span><BookOpenText size={15} weight="light" aria-hidden="true" />{selectedScene.narrativeRefs.length} 个叙事卷引用</span>
@@ -1509,11 +1533,11 @@ export function MemoryPage() {
                   </button>
                 </div>
                 {sceneActionMessage ? <p className={`fact-event-detail__message${sceneActionState === "error" ? " is-error" : ""}`}>{sceneActionMessage}</p> : null}
-                <SceneDomainEditor
+                {!isFeeling(selectedScene) && <SceneDomainEditor
                   key={`scene-domain-${selectedScene.id}-${selectedScene.bucketDomain}`}
                   scene={selectedScene}
                   onSaved={(bucketDomain) => updateScene(selectedScene.id, () => ({ bucketDomain }))}
-                />
+                />}
               </header>
 
               {selectedSceneIsEditing ? (
@@ -1535,7 +1559,7 @@ export function MemoryPage() {
                 />
               )}
 
-              <SceneCueEditor
+              {isFeeling(selectedScene) ? <FeelSources scene={selectedScene} /> : <><SceneCueEditor
                 key={`scene-cues-${selectedScene.id}`}
                 scene={selectedScene}
                 onSaved={(cues) => updateScene(selectedScene.id, () => ({ cues }))}
@@ -1545,7 +1569,7 @@ export function MemoryPage() {
                 key={`scene-evidence-${selectedScene.id}`}
                 sceneId={sereinSourceIdForScene(selectedScene)}
                 sceneTitle={selectedScene.title}
-              />
+              /></>}
 
               <section className="scene-annotations" aria-labelledby={`scene-annotations-${selectedScene.id}`}>
                 <header className="scene-annotations__header">

@@ -851,6 +851,24 @@ function sereinMemoryBridge() {
           response.statusCode=result.status;response.end(JSON.stringify(result.payload));
         } catch {response.statusCode=502;response.end(JSON.stringify({error:"import_unavailable"}));}
       });
+      server.middlewares.use("/__serein/authored-types", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.setHeader("Cache-Control", "no-store");
+        if (request.method !== "POST" || !String(request.headers["content-type"]).startsWith("application/json")) {
+          response.statusCode=405; response.end(JSON.stringify({detail:"method_not_allowed"})); return;
+        }
+        if (request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) {
+          response.statusCode=403; response.end(JSON.stringify({detail:"origin_not_allowed"})); return;
+        }
+        try {
+          const body=await readJsonBody(request,500_000);
+          if (!['read_feel','edit_feel','list_plans','read_plan','create_plan','update_plan'].includes(body.tool)) {
+            response.statusCode=404; response.end(JSON.stringify({detail:"tool_not_available"})); return;
+          }
+          const result=await callSereinBackend('/api/authored-types',{method:'POST',body});
+          response.statusCode=result.status; response.end(JSON.stringify(result.payload));
+        } catch { response.statusCode=502; response.end(JSON.stringify({detail:"连接暂不可用，请刷新确认当前内容后重试。"})); }
+      });
       server.middlewares.use("/__serein/companion", async (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         const url = new URL(request.url, "http://localhost");

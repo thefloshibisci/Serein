@@ -44,7 +44,7 @@ def test_receipt_is_idempotent_projected_with_details_and_supports_refresh(clien
 
 
 @pytest.mark.parametrize('status,recall,outcome', [('failed','ready','failed'),('interrupted','ready','failed'),
-    ('completed','empty','no_match'),('completed','timeout','failed'),('completed','ready','skip')])
+    ('incomplete','ready','failed'),('completed','empty','no_match'),('completed','timeout','failed'),('completed','ready','skip')])
 def test_candidates_are_never_promoted_to_delivered(client, status, recall, outcome):
     payload = receipt(); payload['delivered_ids'] = []
     payload['observation'].update(request_status=status, recall_status=recall)

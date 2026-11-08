@@ -11,7 +11,7 @@ function newerRow(previous, incoming) {
   const next = incoming.payload;
   if (old?.observation_version && next?.observation_version) {
     if (Number(old.observation_revision || 0) > Number(next.observation_revision || 0)) return previous;
-    const final = new Set(['completed', 'failed', 'interrupted']);
+    const final = new Set(['completed', 'failed', 'interrupted', 'incomplete']);
     if (final.has(old.request_status) && !final.has(next.request_status)) return previous;
   }
   return incoming;

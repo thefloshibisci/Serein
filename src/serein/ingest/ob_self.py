@@ -12,7 +12,9 @@ from ..legacy_migration.scan import is_old_self_anchor
 def is_self_record(raw):
     meta = raw.get('metadata') or {}
     return isinstance(meta, dict) and (is_old_self_anchor(meta) or is_old_self_anchor(raw)
-        or any(level.get('self_anchor') not in (None, False, 0, '') for level in (meta, raw)))
+        or any(level.get('self_anchor') not in (None, False, 0, '')
+               or str(level.get('type', '')).lower() == 'i'
+               or str(level.get('source_tool', '')).lower() == 'i' for level in (meta, raw)))
 
 
 def read_saved(store, key, kind):
@@ -129,6 +131,7 @@ def assert_unreferenced(store, key):
         ('SELECT 1 FROM scene_relations WHERE source_scene_id=? OR target_scene_id=?', (key, key)),
         ('SELECT 1 FROM scene_proposals WHERE source_scene_id=? OR target_scene_id=?', (key, key)),
         ('SELECT 1 FROM personal_records WHERE document_id=?', (key,)),
+        ('SELECT 1 FROM personal_records p,json_tree(p.payload_json) j WHERE j.atom=? OR j.key=?', (key, key)),
         ('SELECT 1 FROM evidence_bindings WHERE document_id=?', (key,)),
         ('SELECT 1 FROM revisions r,json_tree(r.metadata_json) j WHERE r.document_id!=? AND j.atom=?', (key, key)),
         ('SELECT 1 FROM historical_works w,json_tree(w.metadata_json) j WHERE w.id!=? AND j.atom=?', (key, key)),

@@ -20,11 +20,17 @@ export function hostObservationDetails(row) {
     invalid_response:'召回响应格式不匹配', unavailable:'召回未完成'};
   const status = row.recall_status;
   const result = states[status] || (/^http_\d{3}$/.test(status || '') ? `召回接口返回 ${status.slice(5)}` : '召回未成功');
+  const replyLabels = {completed:'回复已完成', interrupted:'APP 上报回复中断',
+    failed:'APP 上报回复失败', incomplete:'回复未完成'};
   const completion = row.request_status === 'completed'
     ? row.gateway_memory_injected_ids?.length ? '有效回复已完成，APP 确认交付；不代表模型使用了记忆' : '有效回复已完成，无确认交付的记忆'
-    : row.request_status === 'interrupted' ? '回复已中断，未确认交付' : '回复失败，未确认交付';
+    : row.request_status === 'interrupted' ? 'APP 上报回复中断，旧版本也可能缺少完成凭据；未确认交付'
+    : row.request_status === 'incomplete' ? '回复未完成（可能仍在等待工具），未确认交付'
+    : row.request_status === 'failed' ? 'APP 上报回复失败，未确认交付' : '回复状态未确认';
   return {
     requestLabel: `OrangeChat · ${result} · ${row.elapsed_ms ?? 0}ms；${completion}`,
+    recallLabel: result,
+    replyLabel: replyLabels[row.request_status] || '回复状态未确认',
     prepared: (Array.isArray(row.prepared_items) ? row.prepared_items : []).map(item => ({
       id:item.id, title:item.title || item.id, sourceKind:item.source_kind,
       score:typeof item.score === 'number' && Number.isFinite(item.score) ? `${(item.score * 100).toFixed(1)}%` : '',
@@ -34,7 +40,7 @@ export function hostObservationDetails(row) {
 
 export function resolveGatewayObservationOutcome(payload, legacyOutcome) {
   if (!payload?.observation_version) return legacyOutcome;
-  if (['failed', 'interrupted'].includes(payload.request_status)) return 'failed';
+  if (['failed', 'interrupted', 'incomplete'].includes(payload.request_status)) return 'failed';
   if (payload.request_status !== 'completed') return 'pending';
   if (payload.injected_bucket_ids?.length) return 'injected';
   return payload.recall_state === 'no_match' ? 'no_match' : 'skip';

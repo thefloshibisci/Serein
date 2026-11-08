@@ -129,7 +129,7 @@ def test_read_only_mcp_has_no_writing_tools(tmp_path):
     server = create_server(Application(Settings(tmp_path / "not-opened.db")))
     names = {tool.name for tool in asyncio.run(server.list_tools())}
     assert names == {"read_memory", "recall_memory", "find_arc", "read_arc_materials", "read_diary", "read_preferences",
-                     "read_feel", "find_feelings", "read_plan", "list_plans"}
+                     "read_feel", "find_feelings", "read_plan", "list_plans", "list_ob_archive", "read_ob_archive"}
 
 
 @pytest.mark.parametrize('selected', [['save_memory'], ['write_scene'], ['edit_scene']])

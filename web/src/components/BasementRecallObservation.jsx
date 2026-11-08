@@ -42,7 +42,7 @@ const outcomeLabels = {
   injected: "已注入",
   no_match: "未命中",
   skip: "已跳过",
-  failed: "失败／中断",
+  failed: "召回／回复异常",
   pending: "未完成",
 };
 
@@ -532,7 +532,7 @@ export function BasementRecallObservation() {
           ["no_match", "未命中", counts.no_match],
           ["skip", "已跳过", counts.skip],
           ["pending", "进行中／未完成", counts.pending],
-          ["failed", "失败／中断", counts.failed],
+          ["failed", "召回／回复异常", counts.failed],
           ["all", "全部", items.length],
         ].map(([key, label, count]) => (
           <button type="button" className={filter === key ? "is-active" : ""} key={key} onClick={() => setFilter(key)}>
@@ -597,10 +597,11 @@ export function BasementRecallObservation() {
                     <h3>{item.query}</h3>
                     {item.requestLabel && <p className="observation-request-status">{item.requestLabel}</p>}
                   </div>
-                  <span className={`observation-outcome observation-outcome--${item.outcome}`}>{outcomeLabels[item.outcome]}</span>
+                  <span className={`observation-outcome observation-outcome--${item.outcome}`}>{item.recallLabel || outcomeLabels[item.outcome]}</span>
                 </header>
 
                 <dl className="observation-route-facts">
+                  {item.replyLabel && <div><dt>聊天回复</dt><dd>{item.replyLabel}</dd></div>}
                   <div><dt>Router 路线</dt><dd>{item.route ? publishedRouteLabels[item.route] || item.route : "未记录／本次未执行"}</dd></div>
                   <div><dt>{item.source === "hook" ? "Gateway trigger" : "动作"}</dt><dd>{item.source === "hook" ? item.trigger || "未记录" : item.action || "未执行"}</dd></div>
                   <div><dt>{item.source === "hook" ? "Hook outcome" : "置信度"}</dt><dd>{item.source === "hook" ? item.hookOutcome || "未记录" : item.confidence || "未记录"}</dd></div>

@@ -32,7 +32,7 @@ def routes(settings,services,auth):
         with Reader(settings.database) as reader:
             items=[]
             for row in reader.store.conn.execute("SELECT id FROM documents WHERE kind='scene' AND lifecycle!='deleted'"):
-                obj=reader.read(row[0],with_evidence=False)
+                obj=reader.read(row[0],with_evidence=False,with_related=False)
                 if not obj['readable']:continue
                 if not include_archive and obj['status']!='active':continue
                 doc=obj['document'];items.append({**scene_payload(doc)['metadata'],'id':row[0],'name':doc['title']})
@@ -48,12 +48,13 @@ def routes(settings,services,auth):
             for r in reader.store.conn.execute("SELECT * FROM personal_records WHERE scope='annotation' AND deleted=0 ORDER BY created_at,key"):
                 annotations.setdefault(r['document_id'],[]).append({**json.loads(r['payload_json']),'id':r['key'],'revision':r['revision']})
             for row in reader.store.conn.execute("SELECT id FROM documents WHERE kind='scene' AND lifecycle!='deleted'"):
-                obj=reader.read(row[0],with_evidence=False)
+                obj=reader.read(row[0],with_evidence=False,with_related=False)
                 if not obj['readable']:continue
                 doc=obj['document'];meta=scene_payload(doc)['metadata']
                 items.append({'source_id':row[0],'title':doc['title'],'date':str(meta.get('date') or meta.get('event_date') or meta.get('created') or '')[:10],
                     'content':doc['body_md'].strip(),'author':str(meta.get('author') or names['ai_name']),'object_kind':'scene',
                     'memory_role':meta.get('memory_role', 'scene'), 'semantic_kind':meta.get('memory_role', 'scene'),
+                    'feel_sources':obj.get('feel_sources', []), 'revision':doc['revision'],
                     'status':'已沉底' if obj['status']=='archived' else '可浮现','storage_status':obj['status'],
                     'type':meta['type'],'active':meta['active'],'scene_status':meta['scene_status'],'status_consistent':True,
                     'bucket_domain':canonical_domain(meta),
@@ -65,7 +66,7 @@ def routes(settings,services,auth):
             edges=[]
             for row in reader.store.conn.execute("SELECT * FROM scene_relations WHERE active=1 AND lifecycle='active'"):
                 edge=json.loads(row['metadata_json'])
-                owners=[reader.read(row[field],kind='scene',with_evidence=False) for field in ('source_scene_id','target_scene_id')]
+                owners=[reader.read(row[field],kind='scene',with_evidence=False,with_related=False) for field in ('source_scene_id','target_scene_id')]
                 if not all(o['readable'] and o['status']=='active' for o in owners):continue
                 from ..compat.germany.scene_linker import SceneEdgeStore
                 if not SceneEdgeStore._current_edge_error(edge,*(scene_payload(obj['document']) for obj in owners)):

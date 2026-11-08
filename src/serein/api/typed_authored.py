@@ -3,6 +3,7 @@ from typing import Literal
 from ..core.feelings import Feelings
 from ..core.plans import Plans
 from ..deployment import read_settings
+from ..ingest.ob_archive import list_records, read_record
 
 
 def tools_for(settings):
@@ -26,7 +27,15 @@ def tools_for(settings):
         """Find active/resolved/abandoned intentions; they are never evidence of completed events."""
         return plans.list(status=status, query=query, limit=limit, offset=offset)
 
-    tools = {fn.__name__: fn for fn in (read_feel, find_feelings, read_plan, list_plans)}
+    def list_ob_archive(namespace: str, genre: str = '', limit: int = 20, offset: int = 0):
+        """List retained OB archive identities without bodies. Letters keep locks; You/Them need a reviewed instance scope. Archives never enter fact recall."""
+        return list_records(settings.database, namespace, genre=genre, limit=limit, offset=offset)
+
+    def read_ob_archive(namespace: str, record_id: str):
+        """Read one retained OB genre as historical material. AI-side permissions are fixed; deleted, human-locked and unbound-scope content stays hidden."""
+        return read_record(settings.database, namespace, record_id)
+
+    tools = {fn.__name__: fn for fn in (read_feel, find_feelings, read_plan, list_plans, list_ob_archive, read_ob_archive)}
     if not settings.writable:
         return tools
 

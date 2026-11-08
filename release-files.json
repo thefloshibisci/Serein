@@ -654,5 +654,18 @@
   "docs/github-deployment.md",
   "tests/test_arc_menu_lean_reads.py",
   "tests/test_refresh_event_eligibility.py",
-  "tests/test_snapshot_vector_efficiency.py"
+  "tests/test_snapshot_vector_efficiency.py",
+  "scripts/ob_backup.py",
+  "src/serein/host_persona.py",
+  "src/serein/ingest/ob_archive.py",
+  "src/serein/ingest/ob_backup.py",
+  "src/serein/ingest/ob_migration.py",
+  "tests/test_feel_projection.py",
+  "tests/test_host_persona.py",
+  "tests/test_ob_backup.py",
+  "tests/test_ob_backup_migration.py",
+  "web/src/components/FeelSources.jsx",
+  "web/src/components/PlanNotes.jsx",
+  "web/src/storage/authoredTypes.js",
+  "web/tests/authored-companion.dom.mjs"
 ]

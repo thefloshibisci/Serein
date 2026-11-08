@@ -1575,6 +1575,11 @@ label:has(input:focus-visible) {
   font-size: 11px;
 }
 .scene-entry__meta span { display: inline-flex; align-items: center; gap: 5px; }
+.scene-feel-label { display: inline-block; border: 1px solid var(--line, #dce3df); border-radius: 4px; padding: 2px 7px; color: var(--text-secondary, #63756a); font-size: 12px; font-weight: 400; white-space: nowrap; }
+.feel-sources { padding: 20px 0; }
+.feel-sources p { font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.feel-sources ul { padding-left: 20px; }
+.feel-sources li { margin: 14px 0; font-size: 13px; }
 .scene-detail__veil {
   position: fixed;
   z-index: 20;

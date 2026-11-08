@@ -133,11 +133,11 @@ def delivered(database, window_id, receipt):
             ('feature_round:'+window_id,encode(receipt.get('round',0))))
 
 
-async def after_reply(database, window_id, query, message, messages, round_id=None, recalled_ids=None):
+async def after_reply(database, window_id, query, message, messages, round_id=None, recalled_ids=None, force_persona=False):
     state = read_settings(database)
     async def evaluate_persona():
         engine=persona_engine(database,'persona',state)
-        if round_id is None or round_id % engine.evaluation_interval_rounds == 0:
+        if force_persona or round_id is None or round_id % engine.evaluation_interval_rounds == 0:
             await engine.update_from_exchange(window_id,query,message,
                 recalled_memory_ids=recalled_ids or [],recent_conversation_turns=conversation_turns(messages))
     tasks=[]
@@ -145,9 +145,12 @@ async def after_reply(database, window_id, query, message, messages, round_id=No
         if state['features']['persona']:tasks.append(evaluate_persona())
         if state['features']['anti_retreat']:
             tasks.append(evaluate_retreat(database,window_id,query,message,messages,round_id or current_round(database,window_id),state))
+    failed = False
     for result in await asyncio.gather(*tasks,return_exceptions=True):
         if isinstance(result,Exception):
+            failed = True
             logging.getLogger(__name__).warning('Post-reply evaluation failed: %s',type(result).__name__)
+    return not failed
 
 
 async def evaluate_retreat(database,window_id,query,message,messages,round_id,state):

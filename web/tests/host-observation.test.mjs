@@ -7,11 +7,24 @@ test('host diagnostics show time, outcome and prepared details without inventing
     gateway_memory_injected_ids:[], prepared_items:[{id:'scene:test',title:'Synthetic title',score:.91,source_kind:'scene'}]};
   const view = hostObservationDetails(row);
   assert.match(view.requestLabel, /123ms/);
-  assert.match(view.requestLabel, /回复已中断/);
+  assert.match(view.requestLabel, /APP 上报回复中断/);
+  assert.match(view.requestLabel, /旧版本也可能缺少完成凭据/);
   assert.equal(view.prepared[0].title, 'Synthetic title');
   assert.equal(resolveBridgeObservationOutcome({hookOutcome:'failed',injected:[{id:'scene:test'}]}),'failed');
   assert.equal(resolveBridgeObservationOutcome({hookOutcome:'no_match'}),'no_match');
   assert.deepEqual(hostObservationDetails({}),{});
+});
+test('recall timeout and a completed reply remain separate', () => {
+  const view = hostObservationDetails({observation_version:1,recall_status:'timeout',request_status:'completed'});
+  assert.equal(view.recallLabel, '召回超时');
+  assert.equal(view.replyLabel, '回复已完成');
+  assert.doesNotMatch(view.requestLabel, /回复中断/);
+});
+test('tool approval without a final generation is incomplete, never interrupted', () => {
+  const view = hostObservationDetails({observation_version:1,recall_status:'ready',request_status:'incomplete'});
+  assert.equal(view.replyLabel, '回复未完成');
+  assert.match(view.requestLabel, /等待工具/);
+  assert.doesNotMatch(view.requestLabel, /回复中断/);
 });
 test('successful receipt means completed delivery, not proof of model use', () => {
   const view = hostObservationDetails({observation_version:1,recall_status:'ready',request_status:'completed',gateway_memory_injected_ids:['scene:test']});

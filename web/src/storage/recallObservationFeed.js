@@ -1,7 +1,7 @@
 import { mergeObservationRows, normalizeObservationPage, reviewedObservationIds } from './recallObservationPagination.js';
 
 export const observationSources = ['hook', 'gateway'];
-export const terminalObservationStates = new Set(['completed', 'failed', 'interrupted']);
+export const terminalObservationStates = new Set(['completed', 'failed', 'interrupted', 'incomplete']);
 export const emptyObservationFeed = () => ({
   loaded: false, rows: [], buffered: [], reviewed: [], afterId: 0,
   hasMore: false, nextBeforeId: null, loading: false, loadingEarlier: false, error: '',

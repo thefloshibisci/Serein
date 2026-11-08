@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { PersonaCardStack } from "../components/PersonaCardStack.jsx";
 import { ArrowClockwise } from "@phosphor-icons/react";
 import { memoDateParts, changeMemoDate } from "../utils/memoDate.js";
+import { PlanNotes } from "../components/PlanNotes.jsx";
 import "./companion-pages.css";
 
 async function request(path, method = "GET", body, signal) {
@@ -151,6 +152,8 @@ export function MemosPage() {
   const visible = items.filter(item => filter === "all" || item.status === filter);
   return <div className="companion-content memo-content">
     <FeatureHeader title="备忘" eyebrow="NOTES FOR LATER" description="留给未来的话。" feature="memos" setEnabled={setEnabled} />
+    <PlanNotes />
+    <h2 className="memo-reminders-heading">定时提醒</h2>
     <p className="companion-note">{enabled ? "按约定的时间，在下一次聊天里轻轻提起。" : "未启用时仍可整理备忘；不会带入聊天，也不注册 AI 的备忘工具。"}</p>
     <div className="memo-toolbar"><div className="companion-filters" role="group" aria-label="备忘状态">{Object.entries({ ...statusNames, all: "全部" }).map(([key, label]) => <button type="button" aria-pressed={filter === key} onClick={() => setFilter(key)} key={key}>{label}</button>)}</div>
       <div className="companion-actions"><button className="companion-primary" disabled={busy} type="button" onClick={() => edit()}>＋ 新增备忘</button><button type="button" disabled={busy} onClick={refresh}>刷新</button></div></div>

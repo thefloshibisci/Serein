@@ -54,7 +54,7 @@ test('gateway separates web auth from API auth, saves settings and streams respo
       if(req.url==='/diaries/999999'){res.statusCode=404;res.end('{"message":"Synthetic diary missing"}');return;}
       res.end('{"status":"deleted","recoverable":true}');return;
     }
-    if(['/api/fact-events/status','/api/fact-events/delete','/api/buckets/delete','/v1/tools/call','/v1/pipeline/rebuild','/v1/pipeline/retry-image','/v1/pipeline/retry-batch','/v1/pipeline/recovery-preview','/v1/pipeline/skip-batch','/v1/pipeline/rebatch','/v1/pipeline/resume-pending'].includes(req.url)){
+    if(['/api/authored-types','/api/fact-events/status','/api/fact-events/delete','/api/buckets/delete','/v1/tools/call','/v1/pipeline/rebuild','/v1/pipeline/retry-image','/v1/pipeline/retry-batch','/v1/pipeline/recovery-preview','/v1/pipeline/skip-batch','/v1/pipeline/rebatch','/v1/pipeline/resume-pending'].includes(req.url)){
       let raw='';req.on('data',chunk=>raw+=chunk);req.on('end',()=>{
         const body=JSON.parse(raw);requests.push({path:req.url,body});
         const payload=req.url==='/api/fact-events/status'
@@ -143,6 +143,18 @@ test('gateway separates web auth from API auth, saves settings and streams respo
       assert.ok(requests.some(r=>r.path===path.replace('/__serein/','/v1/')&&r.method==='GET'));
     }
     const postHeaders={...auth,'Content-Type':'application/json',Origin:base};
+    const plans=await fetch(base+'/__serein/authored-types',{method:'POST',headers:postHeaders,
+      body:JSON.stringify({tool:'list_plans',arguments:{status:'active',limit:50}})});
+    assert.equal(plans.status,200);assert.equal(plans.headers.get('cache-control'),'no-store');
+    assert.ok(requests.some(r=>r.path==='/api/authored-types'&&r.auth==='Bearer synthetic-api-key'));
+    assert.deepEqual(requests.findLast(r=>r.path==='/api/authored-types'&&r.body).body,{tool:'list_plans',arguments:{status:'active',limit:50}});
+    const typedCount=requests.length;
+    for(const [headers,tool,status] of [[{'Content-Type':'application/json'},'list_plans',401],
+      [{...postHeaders,Origin:'https://foreign.invalid'},'update_plan',403],
+      [postHeaders,'pipeline_next',404]]){
+      assert.equal((await fetch(base+'/__serein/authored-types',{method:'POST',headers,body:JSON.stringify({tool,arguments:{}})})).status,status);
+    }
+    assert.equal(requests.length,typedCount);
     const thresholdTrial=await fetch(base+'/__serein/gateway/recall',{method:'POST',headers:postHeaders,
       body:JSON.stringify({query:'Synthetic threshold trial',simulation:true,recall_mode:'full',direct_threshold:.6})});
     assert.equal(thresholdTrial.status,200);

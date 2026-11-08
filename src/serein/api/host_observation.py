@@ -18,7 +18,7 @@ def observation(body):
         require(isinstance(value, str) and len(value) <= limit)
         return value
     status = text('request_status', 32)
-    require(status in ('completed', 'failed', 'interrupted'))
+    require(status in ('completed', 'failed', 'interrupted', 'incomplete'))
     recall = text('recall_status', 64)
     ids = body['delivered_ids']
     require(len(ids) <= 2 and len(set(ids)) == len(ids))

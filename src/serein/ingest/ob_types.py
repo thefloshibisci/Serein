@@ -41,7 +41,8 @@ def _spec(store, raw, identity_map, namespace, self_mappings=None):
     if not isinstance(meta, dict):
         raise ValueError('Legacy metadata must be an object')
     values = {**meta, **raw}
-    if any(level.get('deleted_at') or level.get('deleted') or level.get('locked')
+    if any(level.get('deleted_at') or level.get('deleted') or level.get('tombstone') or level.get('erasure_mode') or level.get('locked')
+           or (level.get('lock_type') or 'none') != 'none'
            or level.get('unlock_at') or level.get('visibility') in ('locked', 'deleted')
            or level.get('lifecycle') in ('deleted', 'superseded') for level in (meta, raw)):
         return {'old_id': raw['id'], 'action': 'review', 'reason': 'restricted_or_deleted_legacy_record', 'original': raw}
