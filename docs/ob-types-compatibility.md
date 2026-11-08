@@ -8,6 +8,7 @@
 - 创建必须给真实 Event/Scene 或仍有效的原话 binding；源 ID、类型、版本、hash 固定于创建时。引发感受的来源保存在 `feel_sources`，不复制为证据，不创建 Event/原话，不改变源正文、digested 或 Persona。
 - 源版本修改后仍读当时版本；来源归档不影响感受自身状态。源删除、锁定、失去原话绑定或 hash 不一致时，不返回来源摘要，自动浮现关闭；感受自己仍可显式阅读。
 - `find_feelings` 是明确标注的字面检索，支持来源和作者日期过滤；不是已实现的独立语义搜索。语义自动召回复用已有混合候选、重排、卡片上限、冷却与交付登记，并始终标注“当时的主观感受，非事实证据”。
+- 普通记忆和材料读取不自动反查 feel/plan。需要按来源找感受时显式调用 `find_feelings(source_id=...)`；感受自身的冻结来源仍随显式读取返回。原生 Scene 关联、注脚和证据读取保持原契约。
 - 自动召回传输 ID 继续为 `scene:ID` 以兼容已交付去重，另带 `semantic_kind=feel`；专用显式入口接受 feel ID。感受和源同轮命中时不重复源正文；自动卡最多展开三个短来源摘要，更多来源显式读取。
 - 新建默认不自动浮现。历史 `manual_surface` 原值保留，缺值为未审阅；`dont_surface` / `digested` 阻止自动浮现，`pinned` / `protected` 保留但不自动开启。生命周期与开关分开。
 - 旧 annotation 不改；旧独立 feel 与 `kind=feel` 年轮均可预览为独立对象。缺源关联进入待补清单，既不丢正文也不猜关联。whisper/日印象/信件不自动改造成 feel。
@@ -15,7 +16,7 @@
 ## Plan
 
 - 独立表 `authored_plans` / `authored_plan_revisions`，不进入普通记忆索引和事实召回。提供 `create_plan`、`read_plan`、`list_plans`、`update_plan`。
-- 保留 active/resolved/abandoned、weight、原正文、相关对象、作者时间、新状态变更记录及旧 `legacy_history`。相关 Scene/Event 可反查计划。
+- 保留 active/resolved/abandoned、weight、原正文、相关对象、作者时间、新状态变更记录及旧 `legacy_history`。相关对象随显式计划读取返回，不在每次 Scene/Event 读取时反查。
 - 新建 active；完成、放弃、重新打开均需显式更新、当前版本、操作者和原因。没有后台推断完成的路径。
 - 可挂已有 reminder ID；不自动新建提醒。提醒过期、次数耗尽、关闭均不改变计划。完成计划也不擅自变更旧提醒或长期 Scene。
 

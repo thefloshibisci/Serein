@@ -149,15 +149,10 @@ class Reader:
         result = self._result(kind, target, current["lifecycle"], readable=True,
                               document=document, surface_state=self.store.surface_state(target),
                               evidence_scope="unavailable_for_revision" if historical else "current_bindings")
-        from .feelings import source_views, backlinks as feel_backlinks
-        from .plans import backlinks as plan_backlinks
         if is_feel:
+            from .feelings import source_views
             result.update(memory_role='feel', semantic_kind='feel', feel_sources=source_views(self.store, document),
                           evidence_scope='subjective_feeling_not_evidence')
-        elif with_related:
-            result['feelings'] = feel_backlinks(self.store, target)
-        if with_related:
-            result['plans'] = plan_backlinks(self.store, target)
         if with_related and self.store.conn.execute('PRAGMA user_version').fetchone()[0]>=9:
             result['annotations']=[{'id':r['key'],**json.loads(r['payload_json']),'created_at':r['created_at']}
                 for r in self.store.conn.execute("SELECT * FROM personal_records WHERE scope='annotation' AND document_id=? AND deleted=0 ORDER BY created_at,key",(target,))]

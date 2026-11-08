@@ -61,15 +61,20 @@ def menu_database(tmp_path):
     return database, feeling['id'], plan['id']
 
 
-def test_public_materials_and_explicit_picks_keep_full_associations(menu_database):
+def test_public_materials_and_explicit_picks_keep_annotations_without_reverse_links(menu_database, monkeypatch):
     database, feeling_id, plan_id = menu_database
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError('Default materials and explicit picks must not reverse-scan feel/plan')
+
+    monkeypatch.setattr('serein.core.feelings.backlinks', unexpected)
+    monkeypatch.setattr('serein.core.plans.backlinks', unexpected)
     with Reader(database) as reader:
         public = reader.materials('narrative_menu', limit=100, with_evidence=True)
         lean = reader.materials('narrative_menu', limit=100, with_evidence=True, with_related=False)
         assert without_enrichment(public) == lean
         item = public['items'][0]['object']
-        assert [row['id'] for row in item['feelings']] == [feeling_id]
-        assert [row['id'] for row in item['plans']] == [plan_id]
+        assert 'feelings' not in item and 'plans' not in item
         assert item['annotations'][0]['content'] == 'A separately authored note.'
         assert item['evidence'][0]['content'] == 'PRIVATE EVIDENCE BODY'
         assert not RELATED_FIELDS & lean['items'][0]['object'].keys()

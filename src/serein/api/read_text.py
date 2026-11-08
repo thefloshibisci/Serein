@@ -89,10 +89,6 @@ def memory_text(result: dict[str, Any], *, with_evidence: bool) -> str:
             lines.append(f"trigger: {source['kind']}:{source['id']} revision={source.get('revision')} sha256={source.get('sha256')} status={source['status']}")
             if source['status'] == 'available':
                 lines.append(source.get('summary', ''))
-    for feeling in result.get('feelings', []):
-        lines.append(f"feeling: feel:{feeling['id']} {feeling['created_at']} {feeling['title']}")
-    for plan in result.get('plans', []):
-        lines.append(f"plan: plan:{plan['id']} status={plan['status']}")
     lines.extend(comment_lines(result))
     if result.get("evidence_scope") == "unavailable_for_revision":
         lines.append("bound_sources: unavailable_for_revision")

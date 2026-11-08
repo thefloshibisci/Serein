@@ -63,7 +63,7 @@ def legacy():
           for status in ('active', 'resolved', 'abandoned')]]
 
 
-def test_independent_feelings_versions_backlinks_and_unchanged_source(runtime):
+def test_independent_feelings_versions_explicit_source_search_and_unchanged_source(runtime):
     with Reader(runtime.database) as reader:
         before = reader.read('event_rain')
     first = create(runtime, authored_at='2025-01-01T00:00:00+00:00')
@@ -74,7 +74,9 @@ def test_independent_feelings_versions_backlinks_and_unchanged_source(runtime):
     with Reader(runtime.database) as reader:
         after = reader.read('event_rain')
         assert after['document'] == before['document'] and after['evidence'] == before['evidence']
-        assert [f['id'] for f in after['feelings']] == [first['id'], second['id']]
+        assert 'feelings' not in after and 'plans' not in after
+    found = Feelings(runtime.database).search(source_id='event_rain')['items']
+    assert {item['id'] for item in found} == {first['id'], second['id']}
     with Store(runtime.database) as store:
         store.revise('event_rain', expected_revision=1, title='Corrected', body_md='Later correction')
     saved = Feelings(runtime.database).read(first['id'])
@@ -161,7 +163,7 @@ def test_plan_lifecycle_is_explicit_and_reminder_expiry_is_independent(runtime):
     with pytest.raises(Conflict):
         plans.update(first['id'], 1, actor='user', reason='Stale', status='resolved')
     with Reader(runtime.database) as reader:
-        assert reader.read('event_rain')['plans'][0]['id'] == first['id']
+        assert 'plans' not in reader.read('event_rain')
         assert not reader.read(first['id'])['surface_state']['can_surface']
     with Store(runtime.database, read_only=True) as store:
         assert not store.read(first['id'])

@@ -31,14 +31,24 @@ def runtime(tmp_path):
     return settings, feeling['id'], plan['id']
 
 
-def test_reader_keeps_default_associations_and_lean_reads_keep_core_state(runtime):
+def test_reader_keeps_annotations_and_sources_without_automatic_reverse_links(runtime, monkeypatch):
     settings, feeling_id, plan_id = runtime
+    statements = []
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError('Ordinary reads must never scan reverse feel/plan links')
+
+    monkeypatch.setattr('serein.core.feelings.backlinks', unexpected)
+    monkeypatch.setattr('serein.core.plans.backlinks', unexpected)
     with Reader(settings.database) as reader:
+        reader.store.conn.set_trace_callback(statements.append)
         full = reader.read('event_rain', with_evidence=False)
         lean = reader.read('event_rain', with_evidence=False, with_related=False)
         feeling = reader.read(feeling_id, with_evidence=False, with_related=False)
-    assert [item['id'] for item in full['feelings']] == [feeling_id]
-    assert [item['id'] for item in full['plans']] == [plan_id]
+        plan = reader.read(plan_id)
+    assert 'feelings' not in full and 'plans' not in full
+    assert not any('json_each' in statement for statement in statements)
+    assert plan['plan']['related'][0]['id'] == 'event_rain'
     assert [item['id'] for item in full['annotations']] == ['note']
     assert lean == {key: value for key, value in full.items()
                     if key not in {'feelings', 'plans', 'annotations', 'annotations_scope'}}
@@ -171,6 +181,9 @@ def test_cancelled_scan_finishes_local_stage_without_starting_cue_models(runtime
 
 def test_concurrent_refreshes_keep_sqlite_connections_in_their_own_threads(runtime, monkeypatch):
     settings, _feeling_id, _plan_id = runtime
+    # Test connection ownership over an initialized index. Simultaneous first
+    # schema creation has a separate file-exists/table-creation race.
+    legacy_indexes.lexical_index(settings).sync([])
     rendezvous = threading.Barrier(2, timeout=5)
     threads = set()
     lock = threading.Lock()
