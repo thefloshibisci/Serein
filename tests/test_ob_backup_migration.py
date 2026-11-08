@@ -241,3 +241,50 @@ def test_guarded_undo_preserves_objects_reused_by_other_import_receipts(tmp_path
     else:
         ob_migration.undo(database, 'later-source-only')
     assert ob_migration.undo(database, data['namespace'])['status'] == 'undone'
+
+
+def test_preservation_import_suppresses_only_its_triggered_generation_jobs_and_undo_keeps_old_work(tmp_path):
+    database = tmp_path/'target.db'
+    data = envelope(tmp_path)
+    with Store(database) as store:
+        store.conn.executescript('CREATE TABLE tagging_outbox(document_id TEXT PRIMARY KEY); '
+            'CREATE TRIGGER tagging_revision_insert AFTER INSERT ON revisions BEGIN '
+            'INSERT OR IGNORE INTO tagging_outbox(document_id) VALUES (NEW.document_id); END;')
+        original = store.create('scene_original', 'scene', 'Original', 'Preserve me')
+        old_jobs = [tuple(row) for row in store.conn.execute('SELECT * FROM scene_jobs')]
+        old_tagging = [tuple(row) for row in store.conn.execute('SELECT * FROM tagging_outbox')]
+    report = ob_migration.preview(database, data)
+    assert report['suppressed_background_jobs'] == {'scene_jobs': 3, 'tagging_outbox': 3, 'index_outbox': 1}
+    ob_migration.apply(database, data, expected_preview_sha256=report['preview_sha256'], backup_path=tmp_path/'before.db')
+    with Store(database, read_only=True) as store:
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM scene_jobs')] == old_jobs
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM tagging_outbox')] == old_tagging
+        assert store.conn.execute('SELECT count(*) FROM index_outbox').fetchone()[0] == 0
+    ob_migration.undo(database, data['namespace'])
+    with Store(database, read_only=True) as store:
+        assert store.read('scene_original') == original
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM scene_jobs')] == old_jobs
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM tagging_outbox')] == old_tagging
+        assert store.conn.execute('SELECT count(*) FROM index_outbox').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('queue', ['scene_jobs', 'tagging_outbox', 'index_outbox'])
+def test_later_processing_request_blocks_undo_without_dropping_the_request(tmp_path, queue):
+    database = tmp_path/'target.db'
+    data = envelope(tmp_path)
+    with Store(database) as store:
+        store.conn.execute('CREATE TABLE tagging_outbox(document_id TEXT PRIMARY KEY)')
+    report = ob_migration.preview(database, data)
+    receipt = ob_migration.apply(database, data, expected_preview_sha256=report['preview_sha256'], backup_path=tmp_path/'before.db')
+    key = receipt['created'][0]['id']
+    with Store(database) as store:
+        if queue == 'scene_jobs':
+            store.conn.execute('INSERT INTO scene_jobs(scene_id) VALUES (?)', (key,))
+        else:
+            store.conn.execute('INSERT INTO '+queue+'(document_id) VALUES (?)', (key,))
+    with pytest.raises(Conflict, match='later queued processing'):
+        ob_migration.undo(database, data['namespace'])
+    with Store(database, read_only=True) as store:
+        assert store.read(key)
+        column = 'scene_id' if queue == 'scene_jobs' else 'document_id'
+        assert store.conn.execute('SELECT 1 FROM '+queue+' WHERE '+column+'=?', (key,)).fetchone()

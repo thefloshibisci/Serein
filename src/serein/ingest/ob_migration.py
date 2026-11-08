@@ -108,13 +108,28 @@ def _execute(store, envelope):
     catalog = {key: value for key, value in envelope.items() if key != 'backup_b64'}
     store.save_import_record(origin, 'backup.zip', base64.b64decode(envelope['backup_b64'], validate=True))
     store.save_import_record(origin, 'catalog.json', encode(catalog).encode())
+    # Runtime SQLite triggers queue relationship generation and paid tagging on
+    # ordinary Scene writes. A historical preservation import must not invoke
+    # those pipelines. Remove only rows for objects created by this transaction;
+    # existing/reused objects and their queued work remain untouched. Embedding
+    # indexing is also deferred: all new objects stay out of automatic recall.
+    suppressed = {'scene_jobs': 0, 'tagging_outbox': 0, 'index_outbox': 0}
+    has_tagging = store.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tagging_outbox'").fetchone()
+    for item in created:
+        if item['kind'] == 'plan':
+            continue
+        suppressed['scene_jobs'] += store.conn.execute('DELETE FROM scene_jobs WHERE scene_id=?', (item['id'],)).rowcount
+        suppressed['index_outbox'] += store.conn.execute('DELETE FROM index_outbox WHERE document_id=?', (item['id'],)).rowcount
+        if has_tagging:
+            suppressed['tagging_outbox'] += store.conn.execute('DELETE FROM tagging_outbox WHERE document_id=?', (item['id'],)).rowcount
     return {'sources': source_items, 'typed': typed_items, 'created': created,
             'counts': {'sources': dict(Counter(item['action'] for item in source_items)),
                        'typed': dict(Counter(item['action'] for item in typed_items)),
                        'created_kinds': dict(Counter(item['kind'] for item in created)),
                        'archived_originals': len(envelope['records']),
                        'erased_originals': sum(row['genre'] == 'erased' for row in envelope['records'])},
-            'identity_map': mapping, 'auto_surface_enabled': 0, 'events_created': 0}
+            'identity_map': mapping, 'auto_surface_enabled': 0, 'events_created': 0,
+            'suppressed_background_jobs': suppressed}
 
 
 def _receipt_path(namespace):
@@ -205,6 +220,12 @@ def undo(database, namespace):
                 raise Conflict('Imported object changed; guarded undo refuses to discard later work')
             if store.conn.execute('SELECT 1 FROM deletions WHERE document_id=?', (key,)).fetchone():
                 raise Conflict('Imported object was deleted; guarded undo requires review')
+            if item['kind'] != 'plan':
+                has_tagging = store.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tagging_outbox'").fetchone()
+                if store.conn.execute('SELECT 1 FROM scene_jobs WHERE scene_id=?', (key,)).fetchone() or (has_tagging and
+                        store.conn.execute('SELECT 1 FROM tagging_outbox WHERE document_id=?', (key,)).fetchone()) or \
+                        store.conn.execute('SELECT 1 FROM index_outbox WHERE document_id=?', (key,)).fetchone():
+                    raise Conflict('Imported object has later queued processing; guarded undo requires review')
         try:
             for item in receipt['created']:
                 key = item['id']
