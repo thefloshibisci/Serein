@@ -51,7 +51,8 @@ class Reader:
         return {"kind": kind, "id": target, "status": status, "readable": False,
                 "document": None, "evidence": [], "comments": [], **extra}
 
-    def read(self, identifier, *, kind=None, revision=None, with_evidence=True, include_blob=False, at=None):
+    def read(self, identifier, *, kind=None, revision=None, with_evidence=True, include_blob=False, at=None,
+             with_related=True):
         kind, target = self._identity(identifier, kind)
         if kind == 'plan':
             from .plans import read_plan, public_plan
@@ -153,10 +154,11 @@ class Reader:
         if is_feel:
             result.update(memory_role='feel', semantic_kind='feel', feel_sources=source_views(self.store, document),
                           evidence_scope='subjective_feeling_not_evidence')
-        else:
+        elif with_related:
             result['feelings'] = feel_backlinks(self.store, target)
-        result['plans'] = plan_backlinks(self.store, target)
-        if self.store.conn.execute('PRAGMA user_version').fetchone()[0]>=9:
+        if with_related:
+            result['plans'] = plan_backlinks(self.store, target)
+        if with_related and self.store.conn.execute('PRAGMA user_version').fetchone()[0]>=9:
             result['annotations']=[{'id':r['key'],**json.loads(r['payload_json']),'created_at':r['created_at']}
                 for r in self.store.conn.execute("SELECT * FROM personal_records WHERE scope='annotation' AND document_id=? AND deleted=0 ORDER BY created_at,key",(target,))]
             result['annotations_scope']='current_personal_notes_not_evidence'

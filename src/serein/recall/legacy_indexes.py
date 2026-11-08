@@ -66,14 +66,15 @@ def cue_index(settings, *, writable=False, profile=None):
     return CuePassageShadowIndex(cfg,Embedding(),binder=binder)
 
 
-async def refresh(settings, *, dry_run=False, retry_failed=False):
+def _prepare_refresh(settings, *, dry_run=False):
+    """Keep full-corpus SQLite reads and lexical writes off the HTTP loop."""
     from .policy import RecallPolicy
     from ..configured_models import recall_settings
     passages_enabled = RecallPolicy.from_config(recall_settings(settings)).passages_enabled
     scenes, events, passages = [], [], {}
     with Search(settings.database,settings.index) as search:
         for row in search.conn.execute("SELECT * FROM documents WHERE kind IN ('scene','event')"):
-            obj=search.reader.read(row['id'],with_evidence=False)
+            obj=search.reader.read(row['id'],with_evidence=False,with_related=False)
             if not obj['readable'] or obj['document']['lifecycle']!='active':continue
             doc=obj['document']
             if content_stamp(doc)!=row['stamp']:continue
@@ -87,6 +88,21 @@ async def refresh(settings, *, dry_run=False, retry_failed=False):
                         'SELECT ordinal,start_offset,end_offset,text FROM passages WHERE document_id=? AND stamp=? ORDER BY ordinal',
                         (doc['id'],row['stamp']))]
     lexical=lexical_index(settings).sync(events,dry_run=dry_run)
+    return passages_enabled, scenes, passages, lexical
+
+
+async def refresh(settings, *, dry_run=False, retry_failed=False):
+    # Connections belong to the worker thread. Finish this local disk stage
+    # before propagating cancellation, without starting any provider calls.
+    preparing=asyncio.create_task(asyncio.to_thread(_prepare_refresh,settings,dry_run=dry_run))
+    try:
+        passages_enabled, scenes, passages, lexical=await asyncio.shield(preparing)
+    except asyncio.CancelledError:
+        try:
+            await preparing
+        except Exception:
+            pass
+        raise
     if not passages_enabled:
         return {'lexical':lexical,'cues':{'status':'disabled'},'canonical_writes':0}
     cues=cue_index(settings,writable=not dry_run)
