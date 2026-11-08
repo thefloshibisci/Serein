@@ -927,10 +927,12 @@ def test_failed_image_finishes_summary_and_manual_retry_remains_available(settin
         {'source_event_id':'other-a','session_id':'other','role':'assistant','text':'Independent synthetic answer','created_at':'2025-01-01T00:03:00Z'}],source='test')
     assert asyncio.run(p.advance(settings.database,include_recent=True,runner=failing))['events']==1
     assert asyncio.run(p.advance(settings.database,include_recent=True,runner=failing))['status']=='current'
-    # Full-original mode reads the old candidate again; summary-first mode does
-    # not retry an image from an old candidate whose original was not requested.
-    attempts = 1 if summary_first else 2
+    # A presence-only fallback is durable for this configured routing model.
+    # Reading an old candidate in either mode must not repeat the failed call.
+    attempts = 1
     assert len(calls)==attempts
+    payload=raw_archive(settings).get_event(1)['image_transcription']
+    assert payload['fallback_mode']=='presence_only' and payload['items']==[]
     from fastapi.testclient import TestClient
     from serein.api.http import create_app
     client=TestClient(create_app(settings,token='test',live=True),headers={'Authorization':'Bearer test'})
