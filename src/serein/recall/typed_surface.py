@@ -11,6 +11,7 @@ from copy import copy
 from functools import lru_cache
 import json
 import math
+from operator import mul
 import re
 from threading import Lock
 import time
@@ -101,13 +102,20 @@ def _decode_vector(raw):
     return decoded
 
 
+def _dot(left, right):
+    # Keep the same ordered Python float products and builtin sum arithmetic.
+    # map avoids a Python generator frame for each coordinate; unlike sumprod,
+    # it does not introduce a higher-precision accumulation or alter rounding.
+    return sum(map(mul, left, right))
+
+
 def _cosine(left, right):
     if len(left) != len(right) or not left:
         return None
     right_norm = math.sqrt(sum(value * value for value in right))
     if not right_norm:
         return None
-    return sum(a * b for a, b in zip(left, right)) / right_norm
+    return _dot(left, right) / right_norm
 
 
 def _rows_for_ids(conn, statement, identifiers):
@@ -229,7 +237,7 @@ class Snapshot:
                     self.suppressed['invalid_whole_vector'] += 1
                     continue
                 if len(stored_vector) == len(vector):
-                    self.whole[row['id']] = round(sum(a*b for a,b in zip(vector,stored_vector)),4)
+                    self.whole[row['id']] = round(_dot(vector,stored_vector),4)
         if use_passages and search.has_passages:
             for row in _rows_for_ids(search.conn,
                     'SELECT * FROM passages WHERE document_id IN ({}) AND embedding IS NOT NULL', stamps):
@@ -244,7 +252,7 @@ class Snapshot:
                     continue
                 self.passages.setdefault(row['document_id'], []).append({k:row[k] for k in
                     ('ordinal','start_offset','end_offset','text') } | {
-                    'score': round(sum(a*b for a,b in zip(vector,stored_vector)),4)})
+                    'score': round(_dot(vector,stored_vector),4)})
         for rows in self.passages.values():
             rows.sort(key=lambda row:(-row['score'],row['ordinal']))
         self.cue_allowed=set()

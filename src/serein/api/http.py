@@ -55,6 +55,9 @@ def create_app(settings, *, token: str, live: bool=False):
     @asynccontextmanager
     async def lifespan(_app):
         from ..lifecycle import lifespan as application_lifespan
+        if live:
+            from ..recall.warmup import startup_prepare
+            _app.state.recall_warmup = await startup_prepare(settings)
         async with application_lifespan(application):
             async with mcp_server.session_manager.run():
                 yield

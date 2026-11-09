@@ -125,3 +125,61 @@ def test_fast_numeric_payload_does_not_use_stdlib_json(monkeypatch):
     typed_surface._VECTOR_CACHE.clear()
     monkeypatch.setattr(typed_surface.json, 'loads', lambda *_args, **_kwargs: pytest.fail('slow vector parser'))
     assert typed_surface._decode_vector('[0.25,-0.5]').tolist() == [0.25, -0.5]
+
+
+def previous_dot(left, right):
+    return sum(a * b for a, b in zip(left, right))
+
+
+def double_bytes(value):
+    return struct.pack('!d', value)
+
+
+@pytest.mark.parametrize('left,right', [
+    ([], []), ([1], []), ([], [1]), ([1, 2, 3], [4, 5]),
+    ([1], [2, 3]), ([0., -0.], [-0., 0.]), ([-0.], [1.]),
+    ([5e-324, -5e-324], [.5, .5]), ([1e-200, -1e-200], [1e-200, 1e-200]),
+    ([1e300, 1., -1e300], [1., 1., 1.]),
+    ([1e308, 1e308], [1e308, -1e308]),
+])
+def test_dot_keeps_sum_bits_and_zip_length_behavior(left, right):
+    assert double_bytes(typed_surface._dot(left, right)) == double_bytes(previous_dot(left, right))
+    assert double_bytes(typed_surface._dot(array('d', left), array('d', right))) == double_bytes(previous_dot(left, right))
+
+
+def test_dot_keeps_random_vector_scores_and_four_decimal_thresholds():
+    rng = random.Random(1109)
+    thresholds = (.5, .55, .65)
+    for _ in range(160):
+        query = [rng.uniform(-1, 1) for _ in range(256)]
+        norm = math.hypot(*query)
+        query = [value / norm for value in query]
+        right = [rng.uniform(-1, 1) for _ in range(256)]
+        expected = previous_dot(query, right)
+        actual = typed_surface._dot(query, array('d', right))
+        assert double_bytes(actual) == double_bytes(expected)
+        assert round(actual, 4) == round(expected, 4)
+        assert [round(actual, 4) >= threshold for threshold in thresholds] == [
+            round(expected, 4) >= threshold for threshold in thresholds]
+    for target in (.49995, .50005, .54995, .55005, .64995, .65005):
+        for shifted in (math.nextafter(target, -math.inf), target, math.nextafter(target, math.inf)):
+            query = [1. / 64] * 4096
+            side = math.sqrt(1 - shifted * shifted)
+            right = [(shifted + side) / 64] * 2048 + [(shifted - side) / 64] * 2048
+            expected = previous_dot(query, right)
+            actual = typed_surface._dot(query, array('d', right))
+            assert double_bytes(actual) == double_bytes(expected)
+            assert round(actual, 4) == round(expected, 4)
+
+
+def test_cosine_preserves_original_norm_and_dot_bits():
+    rng = random.Random(81109)
+    for dimension in (1, 2, 17, 256, 4096):
+        for _ in range(5):
+            left = [rng.uniform(-1, 1) for _ in range(dimension)]
+            right = array('d', (rng.uniform(-1, 1) for _ in range(dimension)))
+            expected = previous_dot(left, right) / math.sqrt(sum(value * value for value in right))
+            assert double_bytes(typed_surface._cosine(left, right)) == double_bytes(expected)
+    assert typed_surface._cosine([], []) is None
+    assert typed_surface._cosine([1], [1, 2]) is None
+    assert typed_surface._cosine([1, 2], [0, 0]) is None

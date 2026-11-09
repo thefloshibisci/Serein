@@ -670,5 +670,7 @@
   "web/tests/authored-companion.dom.mjs",
   "tests/test_snapshot_document_efficiency.py",
   "tests/test_observed_entity_matching_efficiency.py",
-  "tests/test_vector_decode_validation.py"
+  "tests/test_vector_decode_validation.py",
+  "src/serein/recall/warmup.py",
+  "tests/test_recall_warmup.py"
 ]
