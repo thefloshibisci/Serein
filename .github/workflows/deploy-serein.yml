@@ -39,6 +39,8 @@ jobs:
           tests/test_background_recall_refresh.py
           tests/test_arc_menu_lean_reads.py tests/test_refresh_event_eligibility.py
           tests/test_snapshot_vector_efficiency.py tests/test_surface_selection.py
+          tests/test_snapshot_document_efficiency.py tests/test_observed_entity_matching_efficiency.py
+          tests/test_vector_decode_validation.py
           tests/test_recall_candidate_budget.py tests/test_passages_entities.py
           tests/test_personal.py
           tests/test_host_persona.py tests/test_host_observation.py tests/test_live_raw_archive.py

@@ -667,5 +667,8 @@
   "web/src/components/FeelSources.jsx",
   "web/src/components/PlanNotes.jsx",
   "web/src/storage/authoredTypes.js",
-  "web/tests/authored-companion.dom.mjs"
+  "web/tests/authored-companion.dom.mjs",
+  "tests/test_snapshot_document_efficiency.py",
+  "tests/test_observed_entity_matching_efficiency.py",
+  "tests/test_vector_decode_validation.py"
 ]

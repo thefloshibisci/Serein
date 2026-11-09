@@ -7,22 +7,64 @@ import sqlite3
 import unicodedata
 from collections import defaultdict
 from contextlib import closing
+from functools import lru_cache
+from itertools import islice
 from pathlib import Path
 from typing import Any
 from typing import Iterable
 from ..identity import identity_names
 from ..query_terms import GENERIC_LEXICAL_STOPWORDS
 _INTENT_PATTERNS = (('entity_detail', 'none', re.compile('是谁|是什么人|什么来头|指的是谁|是哪位|怎么评价|如何评价|怎么看待|说过什么|说了什么|提到过什么|聊过什么|指什么|是什么意思')), ('progress', 'latest_relevant_member', re.compile('看到哪|读到哪|做到哪|进行到哪|进展(?:到哪|如何|怎么样)|追到哪')), ('timeline', 'timeline', re.compile('后来|后续|之后|怎么发展|如何发展|发展成|演变|时间线')), ('recent', 'latest_relevant_member', re.compile('最近(?:怎么样|如何|发生了什么|有什么)')), ('member_search', 'member_search', re.compile('第(?:一|1)次|初次|最初|刚开始')), ('member_search', 'member_search', re.compile('哪一段|那一段|这段|其中一段|某一段|提到.+(?:那段|一段)')), ('recall_reference', 'arc_index', re.compile('还记得|记得|想起|回忆|上次(?:聊|说|看|读|做)')))
+_ASCII_TERM = re.compile('[A-Za-z0-9_.-]+\\Z')
+_ASCII_BOUNDARY = re.compile('[A-Za-z0-9_.-]', re.IGNORECASE)
+_CASEFOLD_SPECIAL_I = str.maketrans({'İ': 'i', 'ı': 'i'})
 
 def _key(value: Any) -> str:
     normalized = unicodedata.normalize('NFKC', str(value or '')).casefold()
     return re.sub('[\\W_]+', '', normalized, flags=re.UNICODE)
 
-def _term_spans(text: str, term: str, *, limit: int=8) -> list[tuple[int, int]]:
-    if not text or not term:
+@lru_cache(maxsize=4096)
+def _term_pattern(term: str):
+    pattern = f'(?<![A-Za-z0-9_.-]){re.escape(term)}(?![A-Za-z0-9_.-])' if _ASCII_TERM.fullmatch(term) else re.escape(term)
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def _regex_casefold(text: str) -> str:
+    # Python IGNORECASE also treats dotted/dotless I as plain I. This fold is
+    # only an absence prefilter; original regexes still decide every match.
+    return text.translate(_CASEFOLD_SPECIAL_I).casefold()
+
+
+def _term_spans(text: str, term: str, *, limit: int=8,
+                _folded_text: str | None=None) -> list[tuple[int, int]]:
+    if not text or not term or limit == 0:
         return []
-    pattern = f'(?<![A-Za-z0-9_.-]){re.escape(term)}(?![A-Za-z0-9_.-])' if re.fullmatch('[A-Za-z0-9_.-]+', term) else re.escape(term)
-    return [match.span() for match in list(re.finditer(pattern, text, re.IGNORECASE))[:limit]]
+    # Han names, digits and punctuation have no case variants. Avoid compiling
+    # one regex per distinct entity while scanning a large observed catalog.
+    if term.lower() == term.upper() and term.casefold() == term:
+        bounded = bool(_ASCII_TERM.fullmatch(term))
+        spans = []
+        offset = 0
+        while (start := text.find(term, offset)) != -1:
+            end = start + len(term)
+            if bounded and ((start and _ASCII_BOUNDARY.fullmatch(text[start - 1]))
+                            or (end < len(text) and _ASCII_BOUNDARY.fullmatch(text[end]))):
+                offset = start + 1
+                continue
+            spans.append((start, end))
+            if limit > 0 and len(spans) >= limit:
+                return spans
+            offset = end
+        return spans[:limit] if limit < 0 else spans
+    folded_text = _regex_casefold(text) if _folded_text is None else _folded_text
+    if _regex_casefold(term) not in folded_text:
+        return []
+    matches = _term_pattern(term).finditer(text)
+    # Keep Python's Unicode IGNORECASE semantics for cased names (including
+    # dotted/dotless I and long s), and stop once the requested spans are found.
+    if limit < 0:
+        return [match.span() for match in list(matches)[:limit]]
+    return [match.span() for match in islice(matches, limit)]
 
 def _query_intent(query: str) -> tuple[str, str]:
     for intent, operator, pattern in _INTENT_PATTERNS:
@@ -69,6 +111,7 @@ class ObservedEntityShadowIndex:
         occupied_spans: list[tuple[int, int]] = []
         output: list[dict[str, Any]] = []
         bounded_limit = max(1, min(100, int(limit or 24)))
+        folded_text = _regex_casefold(text)
         for row in rows:
             owner_key = (str(row['owner_kind']), str(row['owner_id']))
             if allowed is not None and owner_key not in allowed:
@@ -78,7 +121,7 @@ class ObservedEntityShadowIndex:
                 continue
             span = matched_spans.get(entity_key)
             if span is None:
-                spans = _term_spans(text, str(row['entity_text']), limit=1)
+                spans = _term_spans(text, str(row['entity_text']), limit=1, _folded_text=folded_text)
                 if not spans:
                     rejected_entity_keys.add(entity_key)
                     continue
@@ -112,10 +155,11 @@ class ObservedEntityShadowIndex:
                 entity_order.append(entity_key)
             grouped[entity_key].append(row)
         entity_order.sort(key=lambda key: (-len(str(grouped[key][0]['entity_text'])), key))
+        folded_text = _regex_casefold(text)
         for entity_key in entity_order:
             mappings = grouped[entity_key]
             entity = str(mappings[0]['entity_text'])
-            for start, end in _term_spans(text, entity, limit=4):
+            for start, end in _term_spans(text, entity, limit=4, _folded_text=folded_text):
                 if any((not (end <= old_start or start >= old_end) for old_start, old_end in occupied)):
                     continue
                 occupied.append((start, end))

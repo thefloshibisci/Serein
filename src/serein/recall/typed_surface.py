@@ -8,6 +8,7 @@ from array import array
 from collections import Counter, OrderedDict
 from contextlib import closing
 from copy import copy
+from functools import lru_cache
 import json
 import math
 import re
@@ -33,6 +34,30 @@ _VECTOR_CACHE_LIMIT = 4096
 _VECTOR_CACHE: OrderedDict[str, array] = OrderedDict()
 _VECTOR_CACHE_LOCK = Lock()
 
+try:
+    import orjson as _vector_json
+except ImportError:
+    _vector_json = None
+
+
+@lru_cache(maxsize=4096)
+def _document_stamp(identifier, kind, revision, title, body_md, metadata_json):
+    """Cache only a pure digest, keyed by every exact canonical input value."""
+    return content_stamp({'id': identifier, 'kind': kind, 'revision': revision,
+                          'title': title, 'body_md': body_md,
+                          'metadata': json.loads(metadata_json)})
+
+
+def _document_payloads(conn, identifiers):
+    """Do not materialize current bodies for inactive or unselected owners."""
+    identifiers = tuple(identifiers)
+    for start in range(0, len(identifiers), 400):
+        batch = identifiers[start:start + 400]
+        yield from conn.execute(
+            "SELECT d.*,r.number AS body_revision,r.title,r.body_md,r.body_sha256,r.metadata_json "
+            "FROM documents d JOIN revisions r ON r.document_id=d.id AND r.number=d.revision "
+            "WHERE d.id IN ({})".format(','.join('?' for _ in batch)), batch)
+
 
 def _decode_vector(raw):
     """Decode a stored JSON vector once, keyed by its exact serialized value."""
@@ -42,10 +67,28 @@ def _decode_vector(raw):
         if cached is not None:
             _VECTOR_CACHE.move_to_end(key)
             return cached
-    values = json.loads(key)
-    if not isinstance(values, list) or any(type(value) not in (int, float) or not math.isfinite(value) for value in values):
+    # HTTP/embedding installs use the fast parser only for vector payloads.
+    # CLI-only installs and legacy inputs unsupported by it retain stdlib
+    # parsing, including its validation and exception types.
+    if _vector_json is None:
+        values = json.loads(key)
+    else:
+        try:
+            values = _vector_json.loads(key)
+        except _vector_json.JSONDecodeError:
+            values = json.loads(key)
+    # JSON produces only builtin types. The array conversion rejects strings,
+    # nulls and containers in C; reject JSON booleans explicitly because their
+    # numeric conversion would otherwise accept them as 0/1. Numeric JSON text
+    # cannot contain either literal, so this also safely covers nested values.
+    if not isinstance(values, list) or 'true' in key or 'false' in key:
         raise ValueError('Stored embedding is not a finite JSON number array')
-    decoded = array('d', values)
+    try:
+        decoded = array('d', values)
+    except TypeError:
+        raise ValueError('Stored embedding is not a finite JSON number array') from None
+    if not all(map(math.isfinite, decoded)):
+        raise ValueError('Stored embedding is not a finite JSON number array')
     with _VECTOR_CACHE_LOCK:
         existing = _VECTOR_CACHE.get(key)
         if existing is not None:
@@ -93,13 +136,19 @@ class Snapshot:
             "SELECT * FROM documents WHERE kind IN ('scene','event')")}
         canonical = search.reader.store.conn
         current_rows = canonical.execute(
-            "SELECT d.*,r.number AS body_revision,r.title,r.body_md,r.body_sha256,r.metadata_json "
+            "SELECT d.* "
             "FROM documents d JOIN revisions r ON r.document_id=d.id AND r.number=d.revision "
             "WHERE d.kind IN ('scene','event')").fetchall()
-        documents = {}
-        for row in current_rows:
+        # Coverage depends on every active Scene, including quiet and unindexed
+        # Scenes. Its skinny headers must therefore remain in this inventory.
+        documents = {row['id']: dict(row) for row in current_rows}
+        payload_ids = [key for key, doc in documents.items()
+                       if key in indexed and doc['lifecycle'] == 'active' and doc['manual_surface'] == 1]
+        raw_metadata = {}
+        for row in _document_payloads(canonical, payload_ids):
             doc = dict(row)
-            doc['metadata'] = json.loads(doc.pop('metadata_json'))
+            raw_metadata[doc['id']] = doc.pop('metadata_json')
+            doc['metadata'] = json.loads(raw_metadata[doc['id']])
             documents[doc['id']] = doc
         source_sets = {}
         for row in canonical.execute("SELECT document_id,source_id FROM evidence_bindings WHERE active=1"):
@@ -136,6 +185,9 @@ class Snapshot:
             if doc['manual_surface'] != 1:
                 self.suppressed['manual_surface_not_enabled'] += 1
                 continue
+            if document_id not in raw_metadata:
+                self.suppressed['missing_or_deleted'] += 1
+                continue
             if doc['metadata'].get('memory_role') == 'feel':
                 from ..core.feelings import surface_reasons
                 if surface_reasons(search.reader.store, doc):
@@ -153,7 +205,8 @@ class Snapshot:
             if scene.domain_rejection(doc, query, policy):
                 self.suppressed[doc['kind'] + '_domain_rejected'] += 1
                 continue
-            if content_stamp(doc) != indexed_row['stamp']:
+            if _document_stamp(doc['id'], doc['kind'], doc['revision'], doc['title'],
+                               doc['body_md'], raw_metadata[document_id]) != indexed_row['stamp']:
                 self.suppressed['stale_content_rebuild_required'] += 1
                 continue
             obj = {'kind': doc['kind'], 'id': doc['id'], 'status': doc['lifecycle'], 'readable': True,
