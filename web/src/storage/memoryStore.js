@@ -1,7 +1,8 @@
 import { initializePersonal } from "./personalStore.js";
+import { compareScenesByTime } from "../utils/sceneTime.js";
 const memoryScenesStorageKey = "serein.memory.scene-records.v1";
 const retiredMemorySnapshotStorageKey = "serein.memory.snapshot.v1";
-const memoryLiveCacheAtStorageKey = "serein.memory.live-cache-at.v1";
+const memoryLiveCacheAtStorageKey = "serein.memory.live-cache-at.v2";
 const memorySceneTombstonesStorageKey = "serein.memory.scene-tombstones.v1";
 const memoryLiveCacheMaxAgeMs = 5 * 60 * 1000;
 let memorySnapshotLoadInFlight = null;
@@ -64,7 +65,10 @@ function mergeLiveMemoryProjection(snapshotScenes, liveProjection, { includeSnap
     mergedById.set(sceneId, {
       ...fallback,
       id: sceneId,
-      date: String(liveScene.date || fallback?.date || "").slice(0, 10),
+      date: String(liveScene.date ?? fallback?.date ?? "").slice(0, 10),
+      memoryTime: String(liveScene.memory_time ?? liveScene.date ?? ""),
+      memoryTimeBasis: String(liveScene.memory_time_basis || ""),
+      recordedAt: String(liveScene.recorded_at || ""),
       title: String(liveScene.title || fallback?.title || "没有题目的一幕"),
       excerpt: excerptFrom(body) || fallback?.excerpt || "",
       body: body.length ? body : fallback?.body || [],
@@ -139,9 +143,7 @@ function mergeLiveMemoryProjection(snapshotScenes, liveProjection, { includeSnap
     });
   }
 
-  return [...mergedById.values()].sort((left, right) => (
-    `${right.date}:${right.id}`.localeCompare(`${left.date}:${left.id}`)
-  ));
+  return [...mergedById.values()].sort(compareScenesByTime);
 }
 
 function readMemorySceneTombstones() {
@@ -216,7 +218,7 @@ export function readMemoryScenes() {
         && scene?.title
         && Array.isArray(scene?.body)
         && !tombstonedSceneIds.has(scene.id)
-      ));
+      )).sort(compareScenesByTime);
   } catch {
     return [];
   }

@@ -44,7 +44,7 @@ jobs:
           tests/test_recall_candidate_budget.py tests/test_passages_entities.py
           tests/test_personal.py
           tests/test_host_persona.py tests/test_host_observation.py tests/test_live_raw_archive.py
-          tests/test_feel_projection.py tests/test_companion_wiring.py tests/test_companion_pages.py
+          tests/test_feel_projection.py tests/test_memory_order_projection.py tests/test_companion_wiring.py tests/test_companion_pages.py
           tests/test_ob_backup.py tests/test_ob_backup_migration.py
       - run: python -m compileall -q src .github/deploy
       - run: npm ci --ignore-scripts
@@ -56,6 +56,8 @@ jobs:
       - run: node tests/resume-page.dom.mjs
         working-directory: web
       - run: node tests/authored-companion.dom.mjs && node tests/scene-restore.dom.mjs
+        working-directory: web
+      - run: node tests/memory-order.dom.mjs
         working-directory: web
       - run: python scripts/release.py /tmp/serein-public.zip
       - name: Build exact tested revision

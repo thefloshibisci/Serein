@@ -5,6 +5,7 @@ from ..core.domains import canonical_domain
 import json
 import re
 import asyncio
+from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Query
 
 from ..compat.scenes import Scenes, scene_payload
@@ -12,6 +13,51 @@ from ..compat.events import Events
 from ..core.reader import Reader
 from ..core.store import digest,encode
 from ..deployment import identity
+
+
+def _memory_clock(value, basis):
+    """Return an original clock and its display day without rewriting storage."""
+    raw = str(value or '').strip()
+    try:
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', raw):
+            return raw, date.fromisoformat(raw).isoformat(), basis, 'day'
+        if not re.match(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}', raw):
+            return None
+        stamp = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        if stamp.tzinfo is None:
+            # Match the UI's existing sourceTime convention; do not change the
+            # original value or claim a known historical source timezone.
+            stamp = stamp.replace(tzinfo=timezone.utc)
+            basis += ':assumed_utc'
+        day = stamp.astimezone(timezone(timedelta(hours=8))).date().isoformat()
+        return raw, day, basis, 'timestamp'
+    except (ValueError, OverflowError):
+        return None
+
+
+def memory_time_projection(doc):
+    """Separate authored/declared memory time from import and revision clocks."""
+    meta = doc['metadata']
+    authored = next((clock for value, basis in (
+        (meta.get('authored_at'), 'authored_at'),
+        (meta.get('created'), 'created'),
+    ) if (clock := _memory_clock(value, basis)) is not None), None)
+    original = meta.get('authored_time')
+    if authored is None and isinstance(original, dict):
+        authored = _memory_clock(original.get('value'), 'authored_time:' + str(original.get('basis') or 'recorded'))
+    legacy = bool(meta.get('import_format') or meta.get('imported_at') or meta.get('legacy_id')
+                  or meta.get('legacy_ombre_metadata') or isinstance(original, dict)
+                  or str(meta.get('memory_value_source') or '').startswith('legacy_'))
+    if authored is None and not legacy:
+        authored = _memory_clock(doc['created_at'], 'stored_at')
+    declared = next((clock for field in ('date', 'event_date')
+                     if (clock := _memory_clock(meta.get(field), field)) is not None), None)
+    selected = declared or authored
+    return {'date': selected[1] if selected else '',
+            'memory_time': selected[0] if selected else '',
+            'memory_time_basis': selected[2] if selected else 'unknown',
+            'memory_time_precision': selected[3] if selected else 'unknown',
+            'recorded_at': authored[0] if authored else ''}
 
 
 def routes(settings,services,auth):
@@ -51,7 +97,7 @@ def routes(settings,services,auth):
                 obj=reader.read(row[0],with_evidence=False,with_related=False)
                 if not obj['readable']:continue
                 doc=obj['document'];meta=scene_payload(doc)['metadata']
-                items.append({'source_id':row[0],'title':doc['title'],'date':str(meta.get('date') or meta.get('event_date') or meta.get('created') or '')[:10],
+                items.append({'source_id':row[0],'title':doc['title'],**memory_time_projection(doc),
                     'content':doc['body_md'].strip(),'author':str(meta.get('author') or names['ai_name']),'object_kind':'scene',
                     'memory_role':meta.get('memory_role', 'scene'), 'semantic_kind':meta.get('memory_role', 'scene'),
                     'feel_sources':obj.get('feel_sources', []), 'revision':doc['revision'],

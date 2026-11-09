@@ -672,5 +672,9 @@
   "tests/test_observed_entity_matching_efficiency.py",
   "tests/test_vector_decode_validation.py",
   "src/serein/recall/warmup.py",
-  "tests/test_recall_warmup.py"
+  "tests/test_recall_warmup.py",
+  "tests/test_memory_order_projection.py",
+  "web/src/utils/sceneTime.js",
+  "web/tests/memory-time.test.mjs",
+  "web/tests/memory-order.dom.mjs"
 ]

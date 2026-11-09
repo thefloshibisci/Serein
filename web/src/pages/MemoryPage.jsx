@@ -41,6 +41,7 @@ import { authoredType } from "../storage/authoredTypes.js";
 import { compareFactEventsByEnd, factEventTimeLabel } from "../utils/factEventTime.js";
 import { applyEventBatch, runEventBatch } from "../utils/eventBatch.js";
 import { formatSourceTime } from "../utils/sourceTime.js";
+import { compareScenesByTime, sceneTimeLabel, sceneTimeValue } from "../utils/sceneTime.js";
 
 const relationLabels = {
   continues: {
@@ -666,7 +667,7 @@ export function MemoryPage() {
         ...scene.annotations.map((annotation) => `${annotation.author} ${annotation.content}`),
       ].join(" ").toLocaleLowerCase("zh-CN");
       return matchesView && (!normalizedQuery || haystack.includes(normalizedQuery));
-    });
+    }).sort(compareScenesByTime);
   }, [
     query,
     sceneRecords,
@@ -941,6 +942,8 @@ export function MemoryPage() {
       }
       updateScene(selectedScene.id, () => ({
         date,
+        memoryTime: date,
+        memoryTimeBasis: "date",
         title,
         excerpt: sceneExcerpt(body),
         body,
@@ -1225,9 +1228,9 @@ export function MemoryPage() {
             <div>
               <h1 id="memory-title">记忆</h1>
               <p>{memoryType === "scene"
-                ? "Scene 按发生时间排列，保留它们原来的语气。"
+                ? "Scene 按记忆日期和原始时间倒序，最新的在上。"
                 : memoryType === "event"
-                  ? "事件只记录经过，不替我们判断它意味着什么。"
+                  ? "事件按结束时间倒序，最新的在上。"
                   : "事实保持短小、独立，并带着它来自哪一刻。"}</p>
             </div>
             <div className="memory-stream__header-actions">
@@ -1359,7 +1362,7 @@ export function MemoryPage() {
                         else setSelectedSceneId(scene.id);
                       }}
                     >
-                      <time dateTime={scene.date}>{scene.date}</time>
+                      <time dateTime={sceneTimeValue(scene) || undefined}>{sceneTimeLabel(scene)}</time>
                       <span className="scene-entry__title">
                         <strong>{scene.title}</strong>
                         {isFeeling(scene) ? <small className="scene-feel-label">感受</small> : null}
@@ -1486,7 +1489,7 @@ export function MemoryPage() {
                       onChange={(event) => setEditDraft((current) => ({ ...current, date: event.target.value }))}
                     />
                   ) : (
-                    <time dateTime={selectedScene.date}>{selectedScene.date}</time>
+                    <time dateTime={sceneTimeValue(selectedScene) || undefined}>{sceneTimeLabel(selectedScene)}</time>
                   )}
                   <div className="scene-detail__edit-actions">
                     {selectedSceneIsEditing ? (
