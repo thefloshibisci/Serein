@@ -54,6 +54,7 @@ class Services:
         if self._settings.index is None:
             raise ValueError("Search requires a configured index")
         with Search(self._settings.database, self._settings.index) as search:
+            options.setdefault('keyword_fallback', options.get('mode') == 'lookup')
             return search.search(query, **options)
 
     def recall(self, query, *, threshold_override=None, manual_fallback=False, **options):

@@ -122,7 +122,7 @@ class Store:
                manual_surface=True, metadata=None, revision=1, created_at=None,
                updated_at=None):
         timestamp = now()
-        with self.transaction():
+        with self.transaction(immediate=True):
             if self.read(document_id) or self.conn.execute(
                 "SELECT 1 FROM deletions WHERE document_id=?", (document_id,)
             ).fetchone():
@@ -157,7 +157,7 @@ class Store:
         return result
 
     def revise(self, document_id, *, expected_revision, title, body_md, metadata=None):
-        with self.transaction():
+        with self.transaction(immediate=True):
             current = self.read(document_id)
             if not current or current["revision"] != expected_revision:
                 raise Conflict("Document revision changed or does not exist")
@@ -174,7 +174,7 @@ class Store:
         return self.read(document_id)
 
     def set_lifecycle(self, document_id, lifecycle):
-        with self.transaction():
+        with self.transaction(immediate=True):
             row = self.read(document_id)
             if row is None:
                 raise KeyError(document_id)
@@ -205,7 +205,7 @@ class Store:
     def bind(self, document_id, source_id, *, binding_id=None, metadata=None,
              active=True, record_action=True, actor="user"):
         binding_id = binding_id or "binding_" + digest(encode([document_id, source_id]))
-        with self.transaction():
+        with self.transaction(immediate=True):
             old = self.conn.execute("SELECT * FROM evidence_bindings WHERE id=?",
                                     (binding_id,)).fetchone()
             if old and (old["document_id"] != document_id or old["source_id"] != source_id):

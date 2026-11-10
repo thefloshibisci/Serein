@@ -34,6 +34,8 @@ jobs:
           tests/test_pipeline_admission.py tests/test_pipeline_queue_fairness.py
           tests/test_pipeline_range_fallback.py tests/test_pipeline_route_history.py
           tests/test_pipeline_late_arrival.py tests/test_route_scope_holds.py tests/test_pipeline_observation.py
+          tests/test_memory_lookup_keywords.py tests/test_manual_recall_fallback.py tests/test_recall_policy.py
+          tests/test_store_write_contention.py tests/test_store.py tests/test_writer.py tests/test_authored_mcp_parity.py
           tests/test_model_json_fence.py tests/test_resume_shadows.py tests/test_chat_resume.py
           tests/test_pipeline_limits.py
           tests/test_pipeline_prompt_budget_recovery.py tests/test_pipeline_batch_recovery.py tests/test_pipeline_pending.py

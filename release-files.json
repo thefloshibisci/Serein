@@ -680,5 +680,7 @@
   "src/serein/pipeline_observation.py",
   "tests/test_pipeline_range_fallback.py",
   "tests/test_pipeline_late_arrival.py",
-  "tests/test_pipeline_observation.py"
+  "tests/test_pipeline_observation.py",
+  "tests/test_memory_lookup_keywords.py",
+  "tests/test_store_write_contention.py"
 ]
