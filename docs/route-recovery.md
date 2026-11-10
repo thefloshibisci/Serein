@@ -62,3 +62,6 @@ HTTP 使用 `POST /v1/pipeline/retry-batch` 和 `{batch_id}`，随后调用继�
 Curator 提议更新已有待补写材料预留的 Event 时，host 会优先读取本轮目录中可核验的一份前置待办，交给 Curator 再审阅。仍由模型明确选择整份承接；不会仅凭同一 Track 或目录编号自动取得原话所有权。此读取沿用既有一次上下文补读与提示词预算，超限仍保留材料。
 
 没有承接的冲突 Event 在 Writer 前转为保留，其原话及共享桥接来源不被结算。无依赖的独立 Event 可以继续保存，最终保存前仍核验预留，防止审阅之后状态变化。已有冻结任务需通过明确重新切分生成当前版本计划，不直接改写旧 job。
+When a read pending material reserves a candidate Event, Curator receives the exact
+pending ID and reserved Event IDs. It must explicitly adopt the whole material to
+update that Event, or defer the affected new material. Independent Events continue.

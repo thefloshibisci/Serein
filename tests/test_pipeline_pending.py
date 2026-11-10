@@ -28,6 +28,10 @@ def test_reserved_target_reads_predecessor_before_writer_without_forcing_adoptio
         out=output_for(role,request)
         if role=='event_curator' and request.get('context_read'):
             assert request['component']['pending_material_read']['id']==item['id']
+            assert '旧 Event 的前置待办预留' in request['prompt']
+            assert 'reserved_event_ids' in request['prompt']
+            assert all(base in request['prompt'] for base in out['events'][0]['base_event_ids'])
+            assert '不要返回未承接却继续修改上述 Event 的原方案' in request['prompt']
             if adopt:
                 out['adopt_pending_material_ids']=[item['id']]
                 out['events'][0]['owned_unit_roots']=[u['unit_root_message_id'] for u in request['component']['memberships']]
@@ -434,6 +438,7 @@ def test_optional_pending_checks_agent_delivery_size(settings):
     component=data['components'][0];component['pending_materials']=pending.catalog(settings.database,component)
     component=pending.read_material(settings.database,component,item['id'])
     request=p.request_for(settings.database,batch,'event_curator',component=component,context_read=True)
+    assert '旧 Event 的前置待办预留' not in request['prompt']
     limit=len(request['prompt'])+len(request['rules'])
     save_settings(settings.database,{'pipeline':{'max_prompt_chars':limit}})
     assert p.context_request_fits(settings.database,batch,request,'event_curator:0:context',synthetic_runner)

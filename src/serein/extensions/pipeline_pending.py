@@ -330,6 +330,17 @@ def dependency_context(database,batch_id,component,output):
     return next(({'pending_material_id':i,'reason':'continue_pending'} for i in blockers if i in eligible),None)
 
 
+def read_dependency_targets(database,batch_id,component):
+    """Explain reservations of the material actually read, without granting ownership."""
+    reading=component.get('pending_material_read')
+    if not reading:return []
+    candidates={b.get('event_id') or b.get('item_id') or b.get('id')
+                for b in component.get('base_event_candidates',[])}-{None}
+    with Store(database,read_only=True) as store:
+        return sorted(base for base in candidates
+                      if reading['id'] in target_dependencies(store.conn,batch_id,{base}))
+
+
 def defer_blocked_targets(database,batch_id,component,plan):
     """Preserve blocked ownership while allowing independent Events to settle."""
     result=deepcopy(plan);events=[];deferred=set(result['defer_source_message_ids'])

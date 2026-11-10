@@ -983,6 +983,10 @@ def request_for(database,batch,role,**fields):
                 prompt+='\n整份待办加入后超出本轮完整提示词预算，本轮未提供其原话，不可承接；原待办仍保留，可单独补写。请只处理已提供的新原话。'
             if component.get('pending_material_read'):
                 prompt+='\n已读取待办 '+str(component['pending_material_read']['id'])+'。仅作背景时保持 context_only；明确 adopt_pending_material_ids 时，host 会将该待办全部 units 转为 owned，owned_unit_roots 须覆盖其完整编号。'
+                reserved=pending_materials.read_dependency_targets(database,batch['id'],component)
+                if reserved:
+                    prompt+='\n旧 Event 的前置待办预留：'+encode({'pending_material_id':component['pending_material_read']['id'],'reserved_event_ids':reserved})
+                    prompt+='\n这些旧 Event 尚有本次已读取待办的原话未处理，不能绕过它直接 extend/rewrite/merge。请共同审阅新旧原话：若属于同一活动且证据支持，明确 adopt_pending_material_ids 并将该待办全部 owned_unit_roots 纳入 Event；否则 defer 受影响的新材料。不要返回未承接却继续修改上述 Event 的原方案。无需承接的独立 Event 正常处理；不得为了结清待办编造事实或放宽准入。'
             if component.get('missing_images'):
                 prompt+='\n以下附件原图缺失，host 已跳过附件。它们没有转录，也不代表图片为空。只整理已有文字与可用材料，不得猜补图片、声称看过图片或把图片内容写成事实：\n'+encode(component['missing_images'])
             if fields.get('pretranscribed'):
