@@ -15,6 +15,57 @@ async def insufficient(role,request):
     return {'evidence_sufficient':False,'self_review':{}} if role=='event_writer' else output_for(role,request)
 
 
+@pytest.mark.parametrize('adopt',[False,True])
+def test_reserved_target_reads_predecessor_before_writer_without_forcing_adoption(settings,adopt):
+    ingest(settings)
+    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))['events']==1
+    ingest(settings,2)
+    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=insufficient))['pending']==2
+    with Store(settings.database) as store:item=pending.entries(store.conn)[0]
+    ingest(settings,3);calls=[]
+    async def run(role,request):
+        calls.append((role,request.get('context_read',False)))
+        out=output_for(role,request)
+        if role=='event_curator' and request.get('context_read'):
+            assert request['component']['pending_material_read']['id']==item['id']
+            if adopt:
+                out['adopt_pending_material_ids']=[item['id']]
+                out['events'][0]['owned_unit_roots']=[u['unit_root_message_id'] for u in request['component']['memberships']]
+        return out
+    result=asyncio.run(p.advance(settings.database,include_recent=True,runner=run))
+    assert ('event_curator',True) in calls
+    assert result['status']=='processed' and result['events']==int(adopt)
+    assert result['processed_originals']==(4 if adopt else 0)
+    if not adopt:assert not any(role=='event_writer' for role,_ in calls)
+    with Store(settings.database) as store:
+        old=next(i for i in pending.entries(store.conn) if i['id']==item['id'])
+        assert old['status']==('resolved' if adopt else 'open')
+        assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==6
+
+
+def test_dependency_deferral_keeps_unrelated_create_and_final_race_guard(settings):
+    item=retained(settings)
+    with Store(settings.database) as store:
+        store.conn.execute("UPDATE pipeline_jobs SET output_json=? WHERE batch_id=? AND role='event_curator:0'",
+            (json.dumps({'events':[{'base_event_ids':['reserved']}]}),item['batch_id']))
+    component={'messages':[{'id':3},{'id':4}],'adopted_pending_ids':[]}
+    plan={'events':[{'base_event_ids':['reserved'],'source_message_ids':[1,3]},
+                    {'base_event_ids':[],'source_message_ids':[4]}],
+          'defer_source_message_ids':[],'skip_source_message_ids':[]}
+    actual=pending.defer_blocked_targets(settings.database,'new',component,plan)
+    assert actual['events']==[plan['events'][1]] and actual['defer_source_message_ids']==[3]
+    assert actual['host_deferrals'][0]['pending_material_ids']==[item['id']]
+    assert plan['defer_source_message_ids']==[]
+    shared={**plan,'events':[plan['events'][0],{'base_event_ids':[],'source_message_ids':[3,4]}]}
+    shared_result=pending.defer_blocked_targets(settings.database,'new',component,shared)
+    assert shared_result['events']==[] and shared_result['defer_source_message_ids']==[3,4]
+    from serein.compat.germany.fact_events import FactEventSettlementBlockedError
+    with Store(settings.database) as store:
+        with pytest.raises(FactEventSettlementBlockedError):
+            pending.assert_targets_available(store.conn,'new',[(component,plan,[])])
+        pending.assert_targets_available(store.conn,'new',[(component,actual,[])])
+
+
 @pytest.mark.parametrize('legacy_replacement',[False,True])
 @pytest.mark.parametrize('retained_count',[2,12])
 def test_replan_unrouted_pending_builds_complete_event_input(settings,monkeypatch,legacy_replacement,retained_count):

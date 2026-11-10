@@ -56,3 +56,9 @@ HTTP：`POST /v1/pipeline/rebuild`，请求包含 `batch_id` 和 `confirm="REBUI
 needs_repair 表示无法证明旧归线可以安全恢复，需要先校验或明确重建，不自动跳过或猜补。paused_failure 表示文字 job 累计失败三次：点“重试此批次”保留冻结材料和成功结果，只重新开放未完成步骤的预算。其他聊天可继续，同一聊天后续等待恢复；绕行不适用于 needs_repair。
 
 HTTP 使用 `POST /v1/pipeline/retry-batch` 和 `{batch_id}`，随后调用继续接口。与重建共用 pipeline 执行锁，已有 queued/running 任务时返回 busy。
+
+## 同一 Event 的待补写依赖
+
+Curator 提议更新已有待补写材料预留的 Event 时，host 会优先读取本轮目录中可核验的一份前置待办，交给 Curator 再审阅。仍由模型明确选择整份承接；不会仅凭同一 Track 或目录编号自动取得原话所有权。此读取沿用既有一次上下文补读与提示词预算，超限仍保留材料。
+
+没有承接的冲突 Event 在 Writer 前转为保留，其原话及共享桥接来源不被结算。无依赖的独立 Event 可以继续保存，最终保存前仍核验预留，防止审阅之后状态变化。已有冻结任务需通过明确重新切分生成当前版本计划，不直接改写旧 job。

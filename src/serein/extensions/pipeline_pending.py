@@ -306,19 +306,59 @@ def resume(database,pending_id,*,replan=False):
         return {'status':'resumed','batch_id':batch_id}
 
 
-def assert_targets_available(conn,batch_id,plans):
-    """An unrelated job must not overtake a pending update of the same Event."""
-    from ..compat.germany.fact_events import FactEventSettlementBlockedError
-    adopting={i for component,_,_ in plans for i in component.get('adopted_pending_ids',[])}
-    bases={b for _,plan,_ in plans for event in plan['events'] for b in event['base_event_ids']}
-    if not bases:return
+def target_dependencies(conn,batch_id,bases,adopting=()):
+    dependencies=[]
+    if not bases:return dependencies
     for row in conn.execute("SELECT id,batch_id FROM pipeline_pending_materials WHERE status IN ('open','running') AND batch_id<>?",(batch_id,)):
         if row['id'] in adopting:continue
         for job in conn.execute("SELECT output_json,request_json FROM pipeline_jobs WHERE batch_id=? AND (role LIKE 'event_curator:%' OR role LIKE 'event_writer:%')",(row['batch_id'],)):
             output=json.loads(job['output_json'] or '{}');request=json.loads(job['request_json'])
             reserved={b for e in output.get('events',[]) for b in e.get('base_event_ids',[])}
             reserved.update(request.get('event',{}).get('base_event_ids',[]))
-            if bases & reserved:raise FactEventSettlementBlockedError('旧 Event 仍有待补写材料，请先承接或完成待办 '+str(row['id']))
+            if set(bases) & reserved:
+                dependencies.append(row['id']);break
+    return dependencies
+
+
+def dependency_context(database,batch_id,component,output):
+    """Read one eligible predecessor before Writer; adoption stays a model decision."""
+    if output.get('context_request') is not None or component.get('pending_material_read'):return None
+    bases={b for e in output.get('events',[]) for b in e.get('base_event_ids',[])}
+    eligible={r['pending_material_id'] for r in component.get('pending_materials',[])}
+    with Store(database,read_only=True) as store:
+        blockers=target_dependencies(store.conn,batch_id,bases)
+    return next(({'pending_material_id':i,'reason':'continue_pending'} for i in blockers if i in eligible),None)
+
+
+def defer_blocked_targets(database,batch_id,component,plan):
+    """Preserve blocked ownership while allowing independent Events to settle."""
+    result=deepcopy(plan);events=[];deferred=set(result['defer_source_message_ids'])
+    owned={m['id'] for m in component['messages']}
+    with Store(database,read_only=True) as store:
+        for event in result['events']:
+            blockers=target_dependencies(store.conn,batch_id,event['base_event_ids'],component.get('adopted_pending_ids',[]))
+            if not blockers:events.append(event);continue
+            ids=owned.intersection(event['source_message_ids']);deferred.update(ids)
+            result.setdefault('host_deferrals',[]).append({'reason':'pending_target_dependency',
+                'pending_material_ids':blockers,'source_message_ids':sorted(ids)})
+    # A bridge may be shared by multiple Events in this corridor. Never save
+    # an Event containing a source that another blocked Event still defers.
+    while True:
+        overlapping=[e for e in events if deferred.intersection(e['source_message_ids'])]
+        if not overlapping:break
+        for event in overlapping:
+            deferred.update(owned.intersection(event['source_message_ids']));events.remove(event)
+    result['events']=events;result['defer_source_message_ids']=sorted(deferred)
+    return result
+
+
+def assert_targets_available(conn,batch_id,plans):
+    """Final race check; an unrelated job cannot overtake a retained update."""
+    from ..compat.germany.fact_events import FactEventSettlementBlockedError
+    adopting={i for component,_,_ in plans for i in component.get('adopted_pending_ids',[])}
+    bases={b for _,plan,_ in plans for event in plan['events'] for b in event['base_event_ids']}
+    blockers=target_dependencies(conn,batch_id,bases,adopting)
+    if blockers:raise FactEventSettlementBlockedError('旧 Event 仍有待补写材料，请先承接或完成待办 '+str(blockers[0]))
 
 
 def router_context(database,cards,recent,before_id):

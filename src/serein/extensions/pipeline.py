@@ -1984,9 +1984,10 @@ async def _advance_frozen(database,*,include_recent=False,runner=None,retry_repa
             with Store(database) as store:store.conn.execute('UPDATE pipeline_batches SET input_json=? WHERE id=?',(encoded_data,batch['id']))
             output=await job(database,batch,request,f'event_curator:{index}',runner)
             component=request['component']
-            if output.get('context_request') is not None:
+            context_request=output.get('context_request') or pending_materials.dependency_context(database,batch['id'],component,output)
+            if context_request is not None:
                 previous_component=component
-                component=extend_context(database,component,output['context_request'],curator=True)
+                component=extend_context(database,component,context_request,curator=True)
                 pretranscribed=await transcribe_component(database,batch,component,f'{index}:context',runner)
                 request=request_for(database,batch,'event_curator',component=component,context_read=True,pretranscribed=pretranscribed)
                 if component.get('pending_material_read') and not context_request_fits(database,batch,request,f'event_curator:{index}:context',runner):
@@ -2010,6 +2011,7 @@ async def _advance_frozen(database,*,include_recent=False,runner=None,retry_repa
             plan=latest.normalize_event_curator_output(decision(output),component);event_results=[]
             from .pipeline_admission import apply_gate
             plan=apply_gate(plan,component)
+            plan=pending_materials.defer_blocked_targets(database,batch['id'],component,plan)
             rewrite_ids={sid for event in plan['events'] if event['action'] in ('rewrite','merge')
                          for sid in event['source_message_ids']}
             if rewrite_ids:
