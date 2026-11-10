@@ -15,6 +15,46 @@ async def insufficient(role,request):
     return {'evidence_sufficient':False,'self_review':{}} if role=='event_writer' else output_for(role,request)
 
 
+@pytest.mark.parametrize('legacy_replacement',[False,True])
+@pytest.mark.parametrize('retained_count',[2,12])
+def test_replan_unrouted_pending_builds_complete_event_input(settings,monkeypatch,legacy_replacement,retained_count):
+    from test_route_scope_holds import seed,api
+    seed(settings,count=6)
+    api(settings,monkeypatch,lambda request:pytest.fail('Partial route cache must be held'))
+    p.initialize(settings.database)
+    with Store(settings.database) as store:
+        store.conn.execute("INSERT INTO pipeline_routes VALUES (1,'{}')")
+    asyncio.run(p.flush_routes(settings.database))
+    with Store(settings.database) as store:
+        item=pending.entries(store.conn)[0]
+        assert item['kind']=='unrouted' and item['batch_status']=='needs_repair'
+        item['source_ids']=item['source_ids'][:retained_count]
+        store.conn.execute('UPDATE pipeline_pending_materials SET source_ids_json=? WHERE id=?',
+                           (json.dumps(item['source_ids']),item['id']))
+        old=item['batch_id'];assert old.startswith('route:')
+        if legacy_replacement:
+            # A prior recovery version changed the prefix but omitted the
+            # settlement inputs. Upgrade recovery must repair that shape too.
+            store.conn.execute('UPDATE pipeline_batches SET id=? WHERE id=?',('pipeline:old-recovery',old))
+            old='pipeline:old-recovery'
+        originals=[tuple(row) for row in store.conn.execute('SELECT * FROM raw_events ORDER BY id')]
+        jobs=[tuple(row) for row in store.conn.execute('SELECT * FROM pipeline_jobs ORDER BY rowid')]
+    resumed=pending.resume(settings.database,item['id'],replan=True)
+    assert resumed['batch_id'].startswith('pipeline:')
+    with Store(settings.database) as store:
+        fresh=json.loads(store.conn.execute('SELECT input_json FROM pipeline_batches WHERE id=?',(resumed['batch_id'],)).fetchone()[0])
+        assert [m['id'] for m in fresh['messages']]==item['source_ids']
+        assert [m['id'] for m in fresh['parked']]==list(range(retained_count+1,13))
+        assert store.conn.execute('SELECT status FROM pipeline_batches WHERE id=?',(old,)).fetchone()[0]=='superseded_repair'
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM raw_events ORDER BY id')]==originals
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM pipeline_jobs ORDER BY rowid')]==jobs
+    result=asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
+    assert result['events']==1 and result['processed_originals']==retained_count
+    with Store(settings.database) as store:
+        assert pending.entries(store.conn)[0]['status']=='resolved'
+        assert [row[0] for row in store.conn.execute('SELECT raw_id FROM raw_processing ORDER BY raw_id')]==item['source_ids']
+
+
 def test_curator_unknown_field_is_retained_without_writing(settings):
     ingest(settings)
     calls=[]

@@ -449,10 +449,13 @@ def _rebuild(database, batch_id, *, recovery_action=None, max_input_chars=None, 
             batch, data, _, _ = _recovery_scope(store, batch_id)
         elif batch is None or batch['status'] != 'needs_repair':
             raise Conflict('此批已不处于待修复状态，请刷新后确认')
-        if resume_pending_id is not None and not store.conn.execute(
-                "SELECT 1 FROM pipeline_pending_materials WHERE id=? AND batch_id=? AND status='open' AND kind='unrouted'",
-                (resume_pending_id,batch_id)).fetchone():
-            raise Conflict('待办已被领取或完成，请刷新')
+        resumed_sources=None
+        if resume_pending_id is not None:
+            retained=store.conn.execute(
+                "SELECT source_ids_json FROM pipeline_pending_materials WHERE id=? AND batch_id=? AND status='open' AND kind='unrouted'",
+                (resume_pending_id,batch_id)).fetchone()
+            if retained is None:raise Conflict('待办已被领取或完成，请刷新')
+            resumed_sources=set(json.loads(retained['source_ids_json']))
         data = json.loads(batch['input_json'])
         split = _recovery_chunks(data, max_input_chars) if recovery_action == 'rebatch' else None
         if split is not None and len(split) < 2:
@@ -522,6 +525,14 @@ def _rebuild(database, batch_id, *, recovery_action=None, max_input_chars=None, 
         fresh['queue_order'] = data.get('queue_order', batch['queue_order'])
         if resume_pending_id is not None:
             fresh.update(resume_pending_id=resume_pending_id,pending_previous_batch_id=batch_id)
+            if 'messages' not in fresh:
+                # A route-only producer has no settlement ownership fields.
+                # Explicit pending recovery creates an Event plan, so carry
+                # its retained originals and keep other routed context parked.
+                if not resumed_sources or not resumed_sources.issubset(m['id'] for m in routing):
+                    raise Conflict('待处理原话不在冻结归线范围内')
+                fresh['messages']=[deepcopy(m) for m in routing if m['id'] in resumed_sources]
+                fresh['parked']=[deepcopy(m) for m in routing if m['id'] not in resumed_sources]
         route_only=batch_id.startswith('route:') and not recovery_action and resume_pending_id is None
         replacement = ('route:' if route_only else 'pipeline:')+digest(encode([batch_id, uuid4().hex]))
         audit = {'status': 'superseded_repair', 'replacement_batch_id': replacement,
