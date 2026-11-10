@@ -14,8 +14,16 @@ _resources = Path(__file__).parent / 'resources'
 
 def recall_resource_version():
     """Changing published examples or gates requires explicit re-preparation."""
-    return hashlib.sha256(b''.join((_resources/name).read_bytes() for name in
-        ('route-examples.json','recall-policy.json'))).hexdigest()
+    return _recall_resource_versions()[0]
+
+
+def _recall_resource_versions():
+    # Git checkouts and source archives can differ only in line endings. Keep
+    # accepting both historical byte hashes, but write one stable LF version.
+    data=b''.join((_resources/name).read_bytes().replace(b'\r\n',b'\n') for name in
+        ('route-examples.json','recall-policy.json'))
+    return (hashlib.sha256(data).hexdigest(),
+            hashlib.sha256(data.replace(b'\n',b'\r\n')).hexdigest())
 
 
 def model_index(settings, model):
@@ -39,7 +47,7 @@ def effective_settings(settings, *, preparing=False):
         root=model_index(settings,embedding)
         if not preparing:
             ready=json.loads((root/'ready.json').read_text('utf-8')) if (root/'ready.json').is_file() else {}
-            if ready.get('recall_resources') != recall_resource_version() or not (root/'scope.sqlite').is_file() or not (root/'policy.json').is_file():
+            if ready.get('recall_resources') not in _recall_resource_versions() or not (root/'scope.sqlite').is_file() or not (root/'policy.json').is_file():
                 raise ValueError('Prepare the selected embedding model in Settings before recall or indexing')
         changes.update(index=root/'index.sqlite',
             embedding={'endpoint':embedding['base_url']+'/embeddings','api_key':embedding.get('api_key',''),

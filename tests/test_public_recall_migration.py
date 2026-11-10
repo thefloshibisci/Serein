@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +20,33 @@ from serein.recall.scene import related_candidates
 from serein.recall.query import Query
 from serein.recall.surface_gate import load_gate
 from serein.recall.worker import update_pending
+
+
+@pytest.mark.parametrize('prepared_newline', [b'\n', b'\r\n'])
+@pytest.mark.parametrize('installed_newline', [b'\n', b'\r\n'])
+def test_prepared_recall_survives_line_endings_but_rejects_rule_changes(
+        deployment, monkeypatch, tmp_path, prepared_newline, installed_newline):
+    import serein.configured_models as models
+    from serein.deployment import task_model
+    settings,client=deployment
+    configure(client)
+    client.patch('/v1/settings',json={'assignments':{'embedding':'model-a'}}).raise_for_status()
+    resources=tmp_path/'resources';resources.mkdir()
+    names=('route-examples.json','recall-policy.json')
+    fixtures=[b'{\n"routes": []\n}\n',b'{\n"threshold": 0.72\n}\n']
+    for name,data in zip(names,fixtures):
+        (resources/name).write_bytes(data.replace(b'\n',installed_newline))
+    monkeypatch.setattr(models,'_resources',resources)
+    root=models.model_index(settings,task_model(settings.database,'embedding'))
+    root.mkdir(parents=True)
+    prepared=hashlib.sha256(b''.join(x.replace(b'\n',prepared_newline) for x in fixtures)).hexdigest()
+    (root/'ready.json').write_text(json.dumps({'recall_resources':prepared}))
+    (root/'scope.sqlite').touch();(root/'policy.json').write_text('{}')
+    assert effective_settings(settings).index==root/'index.sqlite'
+    assert models.recall_resource_version()==hashlib.sha256(b''.join(fixtures)).hexdigest()
+    (resources/names[1]).write_bytes(fixtures[1].replace(b'0.72',b'0.73'))
+    with pytest.raises(ValueError,match='Prepare the selected embedding model'):
+        effective_settings(settings)
 
 
 @pytest.mark.parametrize('metadata,excluded', [
