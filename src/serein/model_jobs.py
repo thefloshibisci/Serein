@@ -9,9 +9,13 @@ async def run(application):
     from .compat.jobs import BackgroundJobs
     from .extensions.pipeline import scheduled_advance, ROLES
     async def pipeline():
+        from .pipeline_observation import report
+        previous=None
         while True:
             try:
-                await scheduled_advance(settings.database)
+                result=await scheduled_advance(settings.database)
+                if result.get('status')!='busy':
+                    previous=report(result,previous,logging.getLogger(__name__))
             except Exception:
                 logging.getLogger(__name__).exception('Event pipeline failed; originals remain pending')
             await asyncio.sleep(30)

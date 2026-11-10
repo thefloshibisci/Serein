@@ -22,8 +22,13 @@ def factory(services,options):
     if not services._settings.writable:raise ValueError('event_pipeline requires writable storage')
     if options.get('command'):raise ValueError('Configure the agent through pipeline_next/pipeline_submit; the old one-shot Event command has been retired')
     async def run():
+        from ..pipeline_observation import report
+        previous=None
         while True:
-            try:await scheduled_advance(services._settings.database)
+            try:
+                result=await scheduled_advance(services._settings.database)
+                if result.get('status')!='busy':
+                    previous=report(result,previous,logging.getLogger(__name__))
             except Exception:logging.getLogger(__name__).exception('Event pipeline failed; originals remain pending')
             await asyncio.sleep(30)
     return Contributions(jobs={'event_pipeline':run})

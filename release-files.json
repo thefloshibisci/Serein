@@ -676,5 +676,9 @@
   "tests/test_memory_order_projection.py",
   "web/src/utils/sceneTime.js",
   "web/tests/memory-time.test.mjs",
-  "web/tests/memory-order.dom.mjs"
+  "web/tests/memory-order.dom.mjs",
+  "src/serein/pipeline_observation.py",
+  "tests/test_pipeline_range_fallback.py",
+  "tests/test_pipeline_late_arrival.py",
+  "tests/test_pipeline_observation.py"
 ]

@@ -58,6 +58,10 @@ class RoutingRecoveryError(ValueError):
     """A durable route cannot be proved safe to use for its frozen batch."""
 
 
+class RouteCacheRangeMismatch(RoutingRecoveryError):
+    """Verified producer frames read past this batch; reroute only fresh plans."""
+
+
 def initialize(database):
     with Store(database) as store:
         store.conn.executescript('''
@@ -1944,7 +1948,14 @@ async def _advance_frozen(database,*,include_recent=False,runner=None,retry_repa
             if router_jobs(database,batch):
                 routed=await route_batch(database,batch,data,runner)
             else:
-                routed=None if data.get('ignore_route_cache') else cached_route_result(database,data)
+                try:
+                    routed=None if data.get('ignore_route_cache') else cached_route_result(database,data)
+                except RouteCacheRangeMismatch:
+                    if 'components' in data:raise
+                    # The producer is intact, but its prose has seen later
+                    # sources. Route this exact input using its pre-routing
+                    # seed; never trim the cached card or reuse downstream jobs.
+                    routed=None
                 if routed is None:
                     if data.get('routing_evidence_error'):
                         raise RoutingRecoveryError(data['routing_evidence_error'])
@@ -2197,10 +2208,15 @@ async def _scheduled_advance(database):
     with Store(database,read_only=True) as store:
         row=store.conn.execute('SELECT completed FROM pipeline_schedule WHERE day=?',(day,)).fetchone()
     held=held_result(database)
-    if row and row[0] and not held:return {'status':'settled_today'}
     if held:
         with Store(database) as store:store.conn.execute('INSERT OR REPLACE INTO pipeline_schedule VALUES (?,0)',(day,))
+    # A completed day is an observation, not a fence against late uploads or
+    # explicitly resumed pending work. new_batch's durable review receipts
+    # already suppress unchanged material without any model call.
     result=await _advance(database)
     if result['status']=='current' and not held_result(database):
         with Store(database) as store:store.conn.execute('INSERT OR REPLACE INTO pipeline_schedule VALUES (?,1)',(day,))
+        if row and row[0]:return {'status':'settled_today'}
+    elif row and row[0]:
+        with Store(database) as store:store.conn.execute('INSERT OR REPLACE INTO pipeline_schedule VALUES (?,0)',(day,))
     return result

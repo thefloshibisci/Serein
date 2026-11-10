@@ -188,6 +188,8 @@ def _frames(database, batch):
         used = {key for a in assignments for key in [a['primary_track_id'], *a['context_track_ids']]}
         frames.append({'batch_id': batch['id'], 'job_id': row['id'], 'messages': messages,
                        'assignments': assignments, 'tracks': [c for c in cards if c['track_id'] in used],
+                       'source_proof_complete': set(request.get('routing_frame', {}).get('source_hashes', {}))
+                           == {str(m['id']) for m in messages},
                        'next_track_ordinal': ordinal})
     return frames
 
@@ -240,6 +242,7 @@ def recover_cached_routes(database, data, assignments):
     if len(candidates) > MAX_HISTORY_BATCHES:
         raise p.RoutingRecoveryError('route history exceeds bounded producer recovery limit')
     possibilities = {key: {} for key in expected}
+    wider_frames = {key: {} for key in expected}
     for batch in candidates.values():
         try:
             frames = _frames(database, batch)
@@ -248,11 +251,8 @@ def recover_cached_routes(database, data, assignments):
                 raise p.RoutingRecoveryError('cannot verify recorded route producer: '+str(error)) from error
             continue  # Unlinked malformed history is not evidence.
         for frame in frames:
-            # Never trim future anchors off a card whose prose was generated
-            # using future material. Such a frame is not usable for this batch.
-            if max(m['id'] for m in frame['messages']) > upper:
-                continue
             source_messages = {m['id']: m for m in frame['messages']}
+            wider = max(source_messages) > upper
             overlap = expected.keys() & source_messages.keys()
             actual = {a['source_message_id']: a for a in frame['assignments']}
             if ([key for key in expected if key in overlap] !=
@@ -268,10 +268,20 @@ def recover_cached_routes(database, data, assignments):
                 signature = encode({'messages': [_message_key(m) for m in frame['messages']],
                                     'assignments': frame['assignments'], 'tracks': frame['tracks'],
                                     'next_track_ordinal': frame['next_track_ordinal']})
-                possibilities[key][signature] = frame
-    if any(len(values) > 1 for values in possibilities.values()):
+                if wider:
+                    # A validated accepted job can prove a cache range miss,
+                    # never a usable early card. Jobless legacy snapshots lack
+                    # the per-request source/frame proof needed for fallback.
+                    if frame.get('source_proof_complete'):
+                        wider_frames[key][signature] = frame
+                else:
+                    possibilities[key][signature] = frame
+    if any(len(set(possibilities[key]) | set(wider_frames[key])) > 1 for key in expected):
         raise p.RoutingRecoveryError('ambiguous historical routes; explicit plan rebuild required')
     if any(not values for values in possibilities.values()):
+        if all(possibilities[key] or wider_frames[key] for key in expected):
+            raise p.RouteCacheRangeMismatch('recorded route history cannot prove the frozen input range: '
+                                           'verified producer frame extends beyond this batch')
         if linked:
             raise p.RoutingRecoveryError('recorded route history cannot prove the frozen input range')
         return None
