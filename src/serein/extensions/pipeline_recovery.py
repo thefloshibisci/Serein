@@ -111,7 +111,7 @@ def _frames(database, batch):
     queue_compatible = (batch['status'] in ('routed', 'done', 'superseded_input_budget')
         and original.get('runtime_revision') in QUEUE_COMPATIBLE_ROUTER_REVISIONS)
     if (original.get('contract') != p.CONTRACT
-            or (original.get('runtime_revision') != current_revision
+            or (not p.runtime_compatible(original)
                 and not published_replay
                 and not queue_compatible
                 and not (legacy_compacted and original.get('runtime_revision') in COMPACTED_ROUTER_REVISIONS))
@@ -178,6 +178,10 @@ def _frames(database, batch):
             break  # An unfinished suffix is never rerun by recovery.
         output = json.loads(row['output_json'])
         p.validate(request, output)
+        # Keep only the proved request projection, not today's mutable card.
+        # Consumers whose start lies inside this accepted frame can safely use
+        # this pre-frame state while excluding prose produced by the frame.
+        pre_tracks = deepcopy(request['active_tracks'])
         assignments, updates, ordinal = p.normalize_event_track_message_output(
             output, messages, request['active_tracks'], session_id=original['scope'],
             next_track_ordinal=request['next_track_ordinal'])
@@ -188,10 +192,112 @@ def _frames(database, batch):
         used = {key for a in assignments for key in [a['primary_track_id'], *a['context_track_ids']]}
         frames.append({'batch_id': batch['id'], 'job_id': row['id'], 'messages': messages,
                        'assignments': assignments, 'tracks': [c for c in cards if c['track_id'] in used],
+                       'pre_tracks': pre_tracks,
+                       'created_track_ids': sorted(used-{c['track_id'] for c in pre_tracks}),
                        'source_proof_complete': set(request.get('routing_frame', {}).get('source_hashes', {}))
                            == {str(m['id']) for m in messages},
                        'next_track_ordinal': ordinal})
     return frames
+
+
+def assert_published_frame_ledger(store,frame):
+    """An omitted future frame must not hide lost or fabricated route rows."""
+    from . import pipeline as p
+    replacements={}
+    for assignment in frame['assignments']:
+        raw_id=assignment['source_message_id']
+        route=store.conn.execute('SELECT route_json FROM pipeline_routes WHERE raw_id=?',(raw_id,)).fetchone()
+        proof=store.conn.execute('SELECT batch_id,route_json FROM pipeline_route_provenance WHERE raw_id=?',(raw_id,)).fetchone()
+        if route is None and proof is None:
+            if store.conn.execute('SELECT 1 FROM raw_processing WHERE raw_id=?',(raw_id,)).fetchone():continue
+            raise p.RoutingRecoveryError('No bounded historical pre-routing Track frame: accepted producer routing ledger is incomplete')
+        current=json.loads(route[0] if route else proof['route_json'])
+        if route is not None and proof is not None and current!=json.loads(proof['route_json']):
+            raise p.RoutingRecoveryError('pre-routing route ledger disagrees with its producer')
+        if current==assignment:continue
+        if proof is None:
+            raise p.RoutingRecoveryError('Changed pre-routing route has no replacement producer proof')
+        key=proof['batch_id']
+        if key not in replacements:
+            producer=store.conn.execute('SELECT * FROM pipeline_batches WHERE id=?',(key,)).fetchone()
+            if producer is None or producer['status'] not in SOURCE_STATES:
+                raise p.RoutingRecoveryError('Changed pre-routing route has no accepted replacement producer')
+            replacements[key]=_frames(store.conn.execute('PRAGMA database_list').fetchone()[2],dict(producer))
+        matched=[f for f in replacements[key] if current in f['assignments'] and f.get('source_proof_complete')]
+        if len(matched)!=1:
+            raise p.RoutingRecoveryError('Changed pre-routing route disagrees with replacement proof')
+        frozen=next(m for m in matched[0]['messages'] if m['id']==raw_id)
+        raw=store.conn.execute('SELECT * FROM raw_events WHERE id=?',(raw_id,)).fetchone()
+        if raw is None or _message_key(p.task_message(raw))!=_message_key(frozen):
+            raise p.RoutingRecoveryError('Changed pre-routing route source differs from replacement proof')
+
+
+def late_reply_route_receipts(database, units, cached):
+    """Prove a complete envelope grew after its accepted route publication.
+
+    This read-only gate permits the new whole envelope to be routed, without
+    discarding any old job or changing settlement. Missing ledger entries in an
+    old envelope are corruption, not new arrivals. Call before freezing a
+    daytime batch containing mixed cached/new units.
+    """
+    from . import pipeline as p
+    from .pipeline_rules import dialogue_unit_is_complete
+    from ..source_time import message_datetime
+    receipts=[];producers={}
+    with Store(database,read_only=True) as store:
+        for unit in units:
+            seen=[item['id'] in cached for item in unit]
+            if not any(seen) or all(seen):continue
+            split=seen.index(False)
+            if split==0 or any(seen[split:]) or not dialogue_unit_is_complete(unit):
+                raise p.RoutingRecoveryError('Partially cached dialogue unit; review the complete frozen envelope.')
+            old_ids={item['id'] for item in unit[:split]};new_ids={item['id'] for item in unit[split:]}
+            marks=','.join('?' for _ in unit)
+            ids=[item['id'] for item in unit]
+            if store.conn.execute('SELECT 1 FROM raw_processing WHERE raw_id IN ('+marks+') LIMIT 1',ids).fetchone():
+                raise p.RoutingRecoveryError('Expanded dialogue unit already has settlement ownership')
+            if store.conn.execute("SELECT 1 FROM pipeline_pending_materials pm,json_each(pm.source_ids_json) s "
+                    "WHERE pm.status IN ('open','running') AND s.value IN ("+marks+') LIMIT 1',ids).fetchone():
+                raise p.RoutingRecoveryError('Expanded dialogue unit belongs to retained material')
+            observed=set();producer_ids=set()
+            for item in unit[:split]:
+                proof=store.conn.execute('SELECT * FROM pipeline_route_provenance WHERE raw_id=?',(item['id'],)).fetchone()
+                route=store.conn.execute('SELECT route_json FROM pipeline_routes WHERE raw_id=?',(item['id'],)).fetchone()
+                if proof is None or route is None or json.loads(proof['route_json'])!=json.loads(route[0]):
+                    raise p.RoutingRecoveryError('Expanded dialogue unit has incomplete route provenance')
+                key=proof['batch_id'];producer_ids.add(key)
+                if key not in producers:
+                    batch=store.conn.execute('SELECT * FROM pipeline_batches WHERE id=?',(key,)).fetchone()
+                    if batch is None or batch['status'] not in SOURCE_STATES:
+                        raise p.RoutingRecoveryError('Expanded dialogue unit has an unfinished route producer')
+                    data=json.loads(batch['input_json'])
+                    frames=_frames(database,dict(batch))
+                    if not frames or not all(f.get('source_proof_complete') for f in frames):
+                        raise p.RoutingRecoveryError('Expanded dialogue unit lacks complete accepted frame proofs')
+                    for frame in frames:
+                        for frozen in frame['messages']:
+                            raw=store.conn.execute('SELECT * FROM raw_events WHERE id=?',(frozen['id'],)).fetchone()
+                            if raw is None or _message_key(p.task_message(raw))!=_message_key(frozen):
+                                raise p.RoutingRecoveryError('Expanded dialogue unit producer source changed')
+                        assert_published_frame_ledger(store,frame)
+                    producers[key]=(data,frames)
+                data,frames=producers[key]
+                if not _same_scope(data,unit) or min(new_ids)<=max(m['id'] for m in data['routing_messages']):
+                    raise p.RoutingRecoveryError('Partially cached dialogue unit is not a proved late arrival')
+                matches=[f for f in frames if any(a==json.loads(proof['route_json']) for a in f['assignments'])]
+                if len(matches)!=1:
+                    raise p.RoutingRecoveryError('Expanded dialogue unit has no unique accepted route frame')
+                frozen=next((m for m in matches[0]['messages'] if m['id']==item['id']),None)
+                if frozen is None or _message_key(frozen)!=_message_key(item):
+                    raise p.RoutingRecoveryError('Expanded dialogue unit changed its routed prefix')
+                observed.add(item['id'])
+            if observed!=old_ids or min(message_datetime(m) for m in unit[split:])<max(message_datetime(m) for m in unit[:split]):
+                raise p.RoutingRecoveryError('Expanded dialogue unit violates its original reply order')
+            receipts.append({'action':'reroute_expanded_dialogue_unit',
+                'source_message_ids':ids,'previously_routed_source_message_ids':sorted(old_ids),
+                'new_source_message_ids':sorted(new_ids),'producer_batch_ids':sorted(producer_ids),
+                'reason':'complete_late_reply_extends_accepted_envelope'})
+    return receipts
 
 
 def recover_cached_routes(database, data, assignments):

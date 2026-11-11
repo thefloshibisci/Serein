@@ -96,8 +96,7 @@ function sereinSourceIdForScene(scene) {
 
 const memoryTypeLabels = { scene: "Scene", event: "事件", fact: "事实", preference: "喜好" };
 const factEventCacheKey = "serein.memory.fact-events.v2";
-const factEventCacheMaxAgeMs = 5 * 60 * 1000;
-let factEventListLoadInFlight = null;
+const factEventRefreshIntervalMs = 15 * 1000;
 
 function factEventSummary(item) {
   if (!item || typeof item !== "object") return null;
@@ -140,37 +139,52 @@ function storeFactEventCache(items) {
 }
 
 async function requestFactEvents({ type, status, query = "", includeSources = false, signal }) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  let timedOut = false;
+  const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, 20_000);
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
   const items = [];
+  const seen = new Set();
   let offset = 0;
-  do {
-    const response = await fetch("/__serein/live/fact-events", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type, status, query, includeSources, limit: 500, offset }),
-      signal,
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.message || payload.error || "读取失败");
-    const page = Array.isArray(payload.items) ? payload.items : [];
-    items.push(...page);
-    offset += page.length;
-    if (!page.length || offset >= Number(payload.count || 0)) break;
-  } while (true);
-  return items;
-}
-
-function loadFactEventLists() {
-  if (!factEventListLoadInFlight) {
-    factEventListLoadInFlight = Promise.all(["fact", "event"].map(async (type) => [
-      type,
-      (await Promise.all(["active", "archived"].map((status) => (
-        requestFactEvents({ type, status })
-      )))).flat(),
-    ]))
-      .then((entries) => Object.fromEntries(entries))
-      .finally(() => { factEventListLoadInFlight = null; });
+  let expectedCount;
+  try {
+    do {
+      const response = await fetch("/__serein/live/fact-events", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, status, query, includeSources, limit: 500, offset }),
+        signal: controller.signal,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+      if (!response.ok) throw new Error(payload.message || payload.error || "读取失败");
+      if (!Array.isArray(payload.items) || !Number.isInteger(payload.count) || payload.count < 0) {
+        throw new Error("列表响应不完整，将自动重试。");
+      }
+      const page = payload.items;
+      if ((expectedCount !== undefined && expectedCount !== payload.count)
+        || (!page.length && offset < payload.count)
+        || new Set(page.map(item => item?.item_id)).size !== page.length
+        || page.some(item => !item?.item_id || seen.has(item.item_id))) {
+        throw new Error("列表读取期间发生变化，将自动重试。");
+      }
+      expectedCount = payload.count;
+      for (const item of page) seen.add(item.item_id);
+      items.push(...page);
+      offset += page.length;
+      if (!page.length || offset >= payload.count) break;
+    } while (true);
+    return items;
+  } catch (error) {
+    if (timedOut) throw new Error("读取超时，将自动重试。");
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+    signal?.removeEventListener("abort", abort);
   }
-  return factEventListLoadInFlight;
 }
 
 function sceneExcerpt(body) {
@@ -502,6 +516,12 @@ export function MemoryPage() {
   const [factEventDetails, setFactEventDetails] = useState({});
   const [factEventLoadState, setFactEventLoadState] = useState(initialFactEventCache ? "ready" : "loading");
   const [factEventError, setFactEventError] = useState("");
+  const [factEventRefreshing, setFactEventRefreshing] = useState(false);
+  const [factEventRefreshEpoch, setFactEventRefreshEpoch] = useState(0);
+  const factEventRefreshRef = useRef(null);
+  const factEventLoadedTypes = useRef({ fact: Boolean(initialFactEventCache), event: Boolean(initialFactEventCache) });
+  const factEventMutationVersion = useRef(0);
+  const factEventSearchRequest = useRef(null);
   const [factEventSearch, setFactEventSearch] = useState({
     type: "",
     query: "",
@@ -573,7 +593,11 @@ export function MemoryPage() {
 
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
-      setFactEventSearch({ type: memoryType, query: normalizedQuery, items: [], state: "loading", error: "" });
+      factEventSearchRequest.current = controller;
+      const version = factEventMutationVersion.current;
+      setFactEventSearch(current => current.type === memoryType && current.query === normalizedQuery && ["ready", "refreshing"].includes(current.state)
+        ? { ...current, state: "refreshing", error: "" }
+        : { type: memoryType, query: normalizedQuery, items: [], state: "loading", error: "" });
       try {
         const items = (await Promise.all((view === 'favorite' ? ['active','archived'] : [view === 'archived' ? 'archived' : 'active']).map(status=>requestFactEvents({
           type: memoryType,
@@ -581,6 +605,7 @@ export function MemoryPage() {
           query: normalizedQuery,
           signal: controller.signal,
         })))).flat();
+        if (controller.signal.aborted || version !== factEventMutationVersion.current) return;
         setFactEventSearch({
           type: memoryType,
           query: normalizedQuery,
@@ -589,49 +614,94 @@ export function MemoryPage() {
           error: "",
         });
       } catch (error) {
-        if (error.name === "AbortError") return;
-        setFactEventSearch({
-          type: memoryType,
-          query: normalizedQuery,
-          items: [],
-          state: "error",
-          error: error.message || "暂时没有完成正文搜索。",
+        if (controller.signal.aborted || error.name === "AbortError" || version !== factEventMutationVersion.current) return;
+        setFactEventSearch(current => {
+          const message = error.message || "暂时没有完成正文搜索。";
+          return current.type === memoryType && current.query === normalizedQuery && ["ready", "refreshing"].includes(current.state)
+            ? { ...current, state: "ready", error: message }
+            : { type: memoryType, query: normalizedQuery, items: [], state: "error", error: message };
         });
+      } finally {
+        if (factEventSearchRequest.current === controller) factEventSearchRequest.current = null;
       }
     }, 180);
 
     return () => {
       window.clearTimeout(timer);
       controller.abort();
+      if (factEventSearchRequest.current === controller) factEventSearchRequest.current = null;
     };
-  }, [memoryType, query, view]);
+  }, [memoryType, query, view, factEventRefreshEpoch]);
 
   useEffect(() => {
+    if (memoryType !== "event" && memoryType !== "fact") return undefined;
     let cancelled = false;
-    const load = async () => {
-      const cacheIsFresh = initialFactEventCache
-        && Date.now() - initialFactEventCache.cachedAt < factEventCacheMaxAgeMs;
-      if (cacheIsFresh) return;
-      if (!initialFactEventCache) setFactEventLoadState("loading");
-      setFactEventError("");
+    let running = false;
+    let timer;
+    let controller;
+    setFactEventError("");
+    if (!factEventLoadedTypes.current[memoryType]) setFactEventLoadState("loading");
+    else setFactEventLoadState("ready");
+    const refresh = async () => {
+      if (cancelled || document.hidden || running) return;
+      if (eventBatchRunning.current) {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(refresh, factEventRefreshIntervalMs);
+        return;
+      }
+      window.clearTimeout(timer);
+      running = true;
+      controller = new AbortController();
+      const version = factEventMutationVersion.current;
+      setFactEventRefreshing(true);
       try {
-        const nextItems = await loadFactEventLists();
-        if (!cancelled) {
-          setFactEvents(nextItems);
-          storeFactEventCache(nextItems);
+        const items = (await Promise.all(["active", "archived"].map(status => (
+          requestFactEvents({ type: memoryType, status, signal: controller.signal })
+        )))).flat();
+        if (!cancelled && !controller.signal.aborted && version === factEventMutationVersion.current && !eventBatchRunning.current) {
+          factEventLoadedTypes.current[memoryType] = true;
+          setFactEvents(current => {
+            const next = { ...current, [memoryType]: items };
+            storeFactEventCache(next);
+            return next;
+          });
           setFactEventLoadState("ready");
+          setFactEventError("");
+          // Refresh any active query too; unfiltered snapshots must not replace
+          // search results, details being read, or a draft being edited.
+          if (!document.hidden && !factEventSearchRequest.current) setFactEventRefreshEpoch(current => current + 1);
         }
       } catch (error) {
+        controller.abort();
+        if (!cancelled && error.name !== "AbortError" && version === factEventMutationVersion.current) {
+          setFactEventLoadState(factEventLoadedTypes.current[memoryType] ? "ready" : "error");
+          setFactEventError(error.message || "暂时没有读到事实和事件。");
+        }
+      } finally {
+        running = false;
         if (!cancelled) {
-          if (!initialFactEventCache) setFactEventLoadState("error");
-          else setFactEventLoadState("ready");
-          setFactEventError(initialFactEventCache ? "" : (error.message || "暂时没有读到事实和事件。"));
+          setFactEventRefreshing(false);
+          if (!document.hidden) timer = window.setTimeout(refresh, factEventRefreshIntervalMs);
         }
       }
     };
-    load();
-    return () => { cancelled = true; };
-  }, [initialFactEventCache]);
+    const resume = () => {
+      window.clearTimeout(timer);
+      if (!document.hidden) refresh();
+    };
+    factEventRefreshRef.current = refresh;
+    refresh();
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("focus", resume);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      controller?.abort();
+      factEventRefreshRef.current = null;
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("focus", resume);
+    };
+  }, [memoryType]);
 
   useEffect(() => {
     const openFromRecall = (event) => {
@@ -684,8 +754,9 @@ export function MemoryPage() {
     return candidates.filter((item) => {
       const matchesView = view === 'favorite' ? favoriteIds.has(item.item_id) && ['active','archived'].includes(item.status)
         : view === "archived" ? item.status === "archived" : item.status === "active";
-      const haystack = `${item.title || ""} ${item.body || ""}`.toLocaleLowerCase("zh-CN");
-      return matchesView && (!normalizedQuery || haystack.includes(normalizedQuery));
+      // The server searches individual terms across the title, body and
+      // evidence. A second exact-phrase filter would discard valid matches.
+      return matchesView;
     }).sort(compareFactEventsByEnd);
   }, [factEventSearch, factEvents, memoryType, query, view, favoriteIds]);
   const factEventSearchIsCurrent = memoryType !== "scene"
@@ -702,6 +773,9 @@ export function MemoryPage() {
   const factEventDisplayError = view==='favorite' && favoriteError ? favoriteError : query.trim()
     ? factEventSearchError
     : (factEventLoadState === "error" ? factEventError : "");
+  const factEventStaleError = query.trim()
+    ? (factEventSearchIsCurrent && factEventSearch.state !== "error" ? factEventSearch.error : "")
+    : (factEventLoadState !== "error" ? factEventError : "");
 
   const selectedScene = sceneRecords.find((scene) => scene.id === selectedSceneId) ?? null;
   const selectedFactEvent = memoryType === "scene"
@@ -1026,6 +1100,8 @@ export function MemoryPage() {
   };
 
   const acceptFactEventRevision = (previousId, revisedItem) => {
+    factEventMutationVersion.current += 1;
+    setFactEventRefreshEpoch(current => current + 1);
     setFactEvents((current) => {
       const next = {
         ...current,
@@ -1041,6 +1117,8 @@ export function MemoryPage() {
   };
 
   const acceptFactEventStatus = (previousId, updatedItem) => {
+    factEventMutationVersion.current += 1;
+    setFactEventRefreshEpoch(current => current + 1);
     setFactEvents((current) => {
       const next = {
         ...current,
@@ -1055,6 +1133,8 @@ export function MemoryPage() {
   };
 
   const acceptFactEventDeletion = (deletedIds, itemType) => {
+    factEventMutationVersion.current += 1;
+    setFactEventRefreshEpoch(current => current + 1);
     const deleted = new Set(deletedIds);
     setFactEvents((current) => {
       const next = {
@@ -1084,6 +1164,7 @@ export function MemoryPage() {
       `永久删除选中的 ${ids.length} 条事件？它们的历史修订和来源副本也会删除，且无法撤销。原始聊天记录仍保留。`,
     )) return;
     eventBatchRunning.current = true;
+    factEventMutationVersion.current += 1;
     setEventAction({ busy: true, error: false, message: `正在处理 0 / ${ids.length} 条…` });
     try {
       const result = await runEventBatch(ids, action, {
@@ -1099,6 +1180,7 @@ export function MemoryPage() {
       setFactEventDetails(current => Object.fromEntries(
         applyEventBatch(Object.values(current), result.receipts).map(item => [item.item_id, item]),
       ));
+      setFactEventRefreshEpoch(current => current + 1);
       setSelectedEventIds(new Set(result.failures.map(failure => failure.itemId)));
       const labels = { archive: "归档", restore: "取消归档", mute: "设为不自动浮现", delete: "删除" };
       const succeeded = ids.filter(id => result.completed.has(id)).length;
@@ -1235,6 +1317,13 @@ export function MemoryPage() {
             </div>
             <div className="memory-stream__header-actions">
               <button type="button" disabled={exporting} onClick={exportMemories}>{exporting?"导出中…":"导出 Markdown"}</button>
+              {memoryType !== "scene" ? (
+                <button type="button" aria-label={`刷新${memoryTypeLabels[memoryType]}列表`}
+                  disabled={factEventRefreshing || eventAction.busy} onClick={() => factEventRefreshRef.current?.()}>
+                  <ArrowCounterClockwise size={15} weight="light" aria-hidden="true" />
+                  {factEventRefreshing ? "更新中…" : "刷新"}
+                </button>
+              ) : null}
               <span aria-live="polite">{memoryType === "scene" ? filteredScenes.length : activeFactEvents.length} 个{memoryTypeLabels[memoryType]}</span>
               {memoryType !== "fact" && !selectionMode ? (
                 <button type="button" onClick={enterSelectionMode}>
@@ -1244,6 +1333,11 @@ export function MemoryPage() {
               ) : null}
             </div>
           </header>
+          {memoryType !== "scene" && factEventStaleError ? (
+            <p className="memory-action-message is-error" role="status">
+              暂未更新，当前显示上次读取的内容。{factEventStaleError}
+            </p>
+          ) : null}
           {sceneActionMessage ? (
             <p className={`memory-action-message${sceneActionState === "error" ? " is-error" : ""}`} role={sceneActionState === "error" ? "alert" : "status"}>
               {sceneActionMessage}

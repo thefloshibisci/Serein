@@ -33,7 +33,89 @@ def assert_before(store, cards, before_id):
                 raise p.RoutingRecoveryError('Pre-routing Track contains future source material: '+card['track_id'])
 
 
-def load_tracks(store, source, session, before_id, message, *, lookback_days=3):
+def _historical_card(store, track_id, original, before_id, reference, message, cache, receipts):
+    """Choose only proved prose from before this new routing boundary.
+
+    A late reply may start inside an accepted frame that also read its earlier
+    question. That frame's resulting card is future context for this start. Its
+    verified input card is usable; a Track first created by that frame is simply
+    not an earlier candidate. Missing or damaged history is not this case.
+    """
+    from . import pipeline as p
+    from .pipeline_recovery import SOURCE_STATES, _frames, _message_key, assert_published_frame_ledger
+    provenance=store.conn.execute('SELECT * FROM pipeline_route_provenance WHERE raw_id=?',
+                                   (original['id'],)).fetchone()
+    if provenance is None:
+        raise p.RoutingRecoveryError('No bounded historical pre-routing Track frame: '+track_id)
+    if json.loads(provenance['route_json']) != json.loads(original['route_json']):
+        raise p.RoutingRecoveryError('pre-routing route disagrees with its recorded producer: '+track_id)
+    producer=store.conn.execute('SELECT * FROM pipeline_batches WHERE id=?',
+                               (provenance['batch_id'],)).fetchone()
+    if producer is None:
+        raise p.RoutingRecoveryError('pre-routing Track producer is missing: '+track_id)
+    if producer['id'] not in cache:
+        frames=_frames(store.conn.execute('PRAGMA database_list').fetchone()[2],dict(producer))
+        raw_ids=list({m['id'] for f in frames for m in f['messages']});raw_rows={}
+        for offset in range(0,len(raw_ids),400):
+            chunk=raw_ids[offset:offset+400];marks=','.join('?' for _ in chunk)
+            raw_rows.update((row['id'],row) for row in store.conn.execute('SELECT * FROM raw_events WHERE id IN ('+marks+')',chunk))
+        for frame in frames:
+            for frozen in frame['messages']:
+                raw=raw_rows.get(frozen['id'])
+                if raw is None or _message_key(message(raw)) != _message_key(frozen):
+                    raise p.RoutingRecoveryError('pre-routing producer source changed: '+str(frozen['id']))
+        cache[producer['id']]=frames
+    frames=cache[producer['id']]
+    linked=[frame for frame in frames if original['id'] in {m['id'] for m in frame['messages']}]
+    if len(linked)!=1:
+        raise p.RoutingRecoveryError('pre-routing Track has no unique accepted producer frame: '+track_id)
+    linked=linked[0]
+    assignment=next((a for a in linked['assignments'] if a['source_message_id']==original['id']),None)
+    if assignment != json.loads(provenance['route_json']):
+        raise p.RoutingRecoveryError('pre-routing route disagrees with accepted frame: '+track_id)
+    crosses_start=(max(m['id'] for m in linked['messages'])>=before_id
+                   or any(message_datetime(m)>reference for m in linked['messages']))
+    if crosses_start:
+        # A valid overlapping frame is different from a hole in the durable
+        # routing ledger. Never use omission/replay to silently recreate deleted
+        # assignments for still-unprocessed members of an accepted frame.
+        assert_published_frame_ledger(store,linked)
+    historical=None;selected=None;action='use_prior_frame';prefix_before=True
+    for frame in frames:
+        bounded=(max(m['id'] for m in frame['messages'])<before_id
+                 and all(message_datetime(m)<=reference for m in frame['messages']))
+        if prefix_before and bounded:
+            prior=next((card for card in frame['tracks'] if card['track_id']==track_id),None)
+            if prior is not None:historical=prior;selected=frame
+        elif prefix_before and frame is linked and frame.get('source_proof_complete'):
+            prior=next((card for card in frame.get('pre_tracks',[]) if card['track_id']==track_id),None)
+            if prior is not None:
+                assert_before(store,[prior],before_id)
+                historical=prior;selected=frame;action='use_pre_frame_track'
+        prefix_before=prefix_before and bounded
+        if frame is linked:break
+    if historical is not None:
+        assert_before(store,[historical],before_id)
+        # Ordinary exact history needs no special receipt. Boundary fallbacks
+        # keep IDs and proof bounds in the new frozen input, never model prose.
+        if action=='use_pre_frame_track' or not prefix_before:
+            receipts.append({'action':action,'track_id':track_id,'producer_batch_id':producer['id'],
+                'producer_job_id':selected['job_id'],'before_source_message_id':before_id,
+                'frame_source_message_ids':[m['id'] for m in linked['messages']],
+                'reason':'accepted_frame_crosses_routing_start'})
+        return historical
+    if (producer['status'] in SOURCE_STATES and linked.get('source_proof_complete')
+            and track_id in linked.get('created_track_ids',[]) and not prefix_before):
+        receipts.append({'action':'omit_future_track','track_id':track_id,
+            'producer_batch_id':producer['id'],'producer_job_id':linked['job_id'],
+            'before_source_message_id':before_id,
+            'frame_source_message_ids':[m['id'] for m in linked['messages']],
+            'reason':'track_created_in_accepted_frame_crossing_routing_start'})
+        return None
+    raise p.RoutingRecoveryError('No bounded historical pre-routing Track frame: '+track_id)
+
+
+def load_tracks(store, source, session, before_id, message, *, lookback_days=3, history_receipts=None):
     """Show tracks with proven routed activity in the preceding N days.
 
     Public API clients need not supply a window identity. The current raw
@@ -68,7 +150,7 @@ def load_tracks(store, source, session, before_id, message, *, lookback_days=3):
             previous=anchors.get(track_id)
             if previous is None or (stamp,row['id'])>(previous[0],previous[1]['id']):
                 anchors[track_id]=(stamp,row)
-    cards=[]
+    cards=[];history_cache={};receipts=[]
     for row in store.conn.execute('SELECT id,card_json,scope FROM pipeline_tracks ORDER BY id'):
         anchor=anchors.get(row['id'])
         if anchor is None:continue
@@ -76,34 +158,20 @@ def load_tracks(store, source, session, before_id, message, *, lookback_days=3):
         card.setdefault('last_session_id',row['scope'])
         match=re.fullmatch(r'session_(.+)_track_[0-9]+',card['track_id'])
         card.setdefault('origin_session_id',match[1] if match else row['scope'])
-        original=message(anchor[1])
+        original=anchor[1]
         try:assert_before(store,[card],before_id);bounded=True
         except ValueError:bounded=False
         # Never re-anchor prose that has read material beyond this routing start.
         # Recover the historical card from its accepted frame; a partial frame
         # cannot provide an earlier throughline, even when its raw route survives.
-        if not bounded:
-            from . import pipeline as p
-            from .pipeline_recovery import _frames
-            producer=store.conn.execute('SELECT b.* FROM pipeline_route_provenance r '
-                'JOIN pipeline_batches b ON b.id=r.batch_id WHERE r.raw_id=?',(original['id'],)).fetchone()
-            historical=None;future_pending_frame=False
-            if producer:
-                for frame in _frames(store.conn.execute('PRAGMA database_list').fetchone()[2],dict(producer)):
-                    if original['id'] not in {m['id'] for m in frame['messages']}:continue
-                    if (max(m['id'] for m in frame['messages'])>=before_id or
-                            any(message_datetime(m)>reference for m in frame['messages'])):
-                        future_pending_frame=True
-                        continue
-                    historical=next((c for c in frame['tracks'] if c['track_id']==card['track_id']),None)
-                    if historical:break
-            if historical is None:
-                if future_pending_frame and store.conn.execute("SELECT 1 FROM pipeline_pending_materials WHERE batch_id=? AND status IN ('open','running')",(producer['id'],)).fetchone():
-                    continue  # Retained frames become recallable only after their whole source window.
-                raise p.RoutingRecoveryError('No bounded historical pre-routing Track frame: '+card['track_id'])
-            card=historical
-            assert_before(store,[card],before_id)
+        has_provenance=store.conn.execute('SELECT 1 FROM pipeline_route_provenance WHERE raw_id=?',
+                                          (original['id'],)).fetchone()
+        if not bounded or has_provenance:
+            card=_historical_card(store,card['track_id'],original,before_id,reference,message,
+                                  history_cache,receipts)
+            if card is None:continue
         cards.append(card)
+    if history_receipts is not None:history_receipts.extend(receipts)
     all_ids=[{'track_id':row[0]} for row in store.conn.execute('SELECT id FROM pipeline_tracks')]
     return cards,next_ordinal(scope,all_ids)
 

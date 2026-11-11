@@ -34,6 +34,9 @@ jobs:
           tests/test_pipeline_admission.py tests/test_pipeline_queue_fairness.py
           tests/test_pipeline_range_fallback.py tests/test_pipeline_route_history.py
           tests/test_pipeline_late_arrival.py tests/test_route_scope_holds.py tests/test_pipeline_observation.py
+          tests/test_pipeline_service_reliability.py tests/test_work_queue_reliability.py
+          tests/test_pipeline_continuity.py tests/test_pipeline_snapshot_compaction.py tests/test_pipeline_upgrade_backlog.py
+          tests/test_requested_features.py tests/test_file_imports.py tests/test_image_transcription.py
           tests/test_memory_lookup_keywords.py tests/test_manual_recall_fallback.py tests/test_recall_policy.py
           tests/test_public_recall_migration.py tests/test_live_publication.py
           tests/test_store_write_contention.py tests/test_store.py tests/test_writer.py tests/test_authored_mcp_parity.py
@@ -63,6 +66,8 @@ jobs:
       - run: node tests/authored-companion.dom.mjs && node tests/scene-restore.dom.mjs
         working-directory: web
       - run: node tests/memory-order.dom.mjs
+        working-directory: web
+      - run: node tests/memory-refresh.dom.mjs
         working-directory: web
       - run: python scripts/release.py /tmp/serein-public.zip
       - name: Build exact tested revision

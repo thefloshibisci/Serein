@@ -55,6 +55,22 @@ def test_compaction_retains_complete_replay_seed_and_policy():
     assert 'components' not in compact and 'messages' not in compact
 
 
+def test_compaction_preserves_bounded_history_and_late_reply_audit_receipts():
+    history=[{'action':'omit_future_track','track_id':'track-one',
+              'producer_batch_id':'old','producer_job_id':'old:track_router:0',
+              'before_source_message_id':3,'frame_source_message_ids':[1,2,3]}]
+    late=[{'action':'reroute_expanded_dialogue_unit','source_message_ids':[3,4],
+           'previously_routed_source_message_ids':[3],'new_source_message_ids':[4],
+           'producer_batch_ids':['old']}]
+    data={'messages':[{'id':3},{'id':4}],'components':[{'private_body':'discarded'}],
+          'track_history_receipts':history,'late_reply_route_receipts':late}
+    compact=compact_batch_snapshot(data)
+    assert compact['track_history_receipts']==history
+    assert compact['late_reply_route_receipts']==late
+    assert 'messages' not in compact and 'components' not in compact
+    assert compact_batch_snapshot(compact)==compact
+
+
 def completed_history(settings,monkeypatch,legacy):
     from test_pipeline_route_history import freeze, history
     from serein.extensions import pipeline_track_candidates as candidates

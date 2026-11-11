@@ -592,6 +592,175 @@ def test_historical_track_loader_uses_accepted_early_frame_after_upgrade(setting
     assert cards[0]['recent_source_message_ids'] == [2]
 
 
+@pytest.mark.parametrize('status', ['routed','done','waiting_materials','superseded_input_budget'])
+@pytest.mark.parametrize('upgraded', [False,True])
+def test_accepted_frame_crossing_start_omits_only_new_future_track(settings,monkeypatch,status,upgraded):
+    ingest(settings)
+    _,data=freeze(settings)
+    routed=history(settings,data)
+    with Store(settings.database) as store:
+        store.conn.execute("UPDATE pipeline_batches SET status=? WHERE id='route:synthetic'",(status,))
+        before={table:[tuple(row) for row in store.conn.execute('SELECT * FROM '+table+' ORDER BY rowid')]
+                for table in ('raw_events','pipeline_routes','pipeline_route_provenance','pipeline_batches','pipeline_jobs','pipeline_tracks')}
+    if upgraded:monkeypatch.setattr(p,'runtime_revision',lambda:'synthetic-new-runtime')
+    receipts=[]
+    with Store(settings.database,read_only=True) as store:
+        cards,ordinal=p.track_state.load_tracks(store,'test','books',2,p.task_message,history_receipts=receipts)
+        after={table:[tuple(row) for row in store.conn.execute('SELECT * FROM '+table+' ORDER BY rowid')] for table in before}
+    assert cards==[] and ordinal==2 and before==after
+    assert receipts==[{'action':'omit_future_track','track_id':routed['tracks'][0]['track_id'],
+        'producer_batch_id':'route:synthetic','producer_job_id':'route:synthetic:track_router:0',
+        'before_source_message_id':2,'frame_source_message_ids':[1,2],
+        'reason':'track_created_in_accepted_frame_crossing_routing_start'}]
+
+
+def test_crossing_frame_uses_its_verified_prior_card_instead_of_future_prose(settings):
+    ingest(settings)
+    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))['events']==1
+    ingest(settings,2)
+    _,data=freeze(settings)
+    prior=deepcopy(data['tracks'][0])
+    async def router(role,request):
+        output=output_for(role,request)
+        output['track_updates'][0]['throughline']='FUTURE PROSE FROM WHOLE FRAME'
+        return output
+    history(settings,data,runner=router)
+    receipts=[]
+    with Store(settings.database,read_only=True) as store:
+        cards,_=p.track_state.load_tracks(store,'test','books',4,p.task_message,history_receipts=receipts)
+    assert len(cards)==1 and cards[0]['track_id']==prior['track_id']
+    assert cards[0]['throughline']==prior['throughline'] and cards[0]['recent_source_message_ids']==[2]
+    assert receipts[0]['action']=='use_pre_frame_track' and receipts[0]['frame_source_message_ids']==[3,4]
+
+
+def test_frame_source_clock_is_bounded_even_when_its_track_anchor_precedes_start(settings):
+    from serein.compat.raw_archive import raw_archive
+    raw_archive(settings).ingest([
+        {'source_event_id':'clock-user','session_id':'books','role':'user','text':'Earlier activity',
+         'created_at':'2025-01-01T00:00:00Z'},
+        {'source_event_id':'clock-assistant','session_id':'books','role':'assistant','text':'Future message',
+         'created_at':'2025-01-01T00:20:00Z'},
+    ],source='test')
+    _,data=freeze(settings)
+    routed=history(settings,data)
+    raw_archive(settings).ingest([{'source_event_id':'clock-backfill','session_id':'books','role':'assistant',
+        'text':'Backfilled before the future message','created_at':'2025-01-01T00:10:00Z'}],source='test')
+    with Store(settings.database) as store:
+        # The latest visible route anchor is raw1; the card also appears bounded
+        # by its own anchor. Its producing request nevertheless saw raw2.
+        card=deepcopy(routed['tracks'][0]);card['recent_source_message_ids']=[1]
+        store.conn.execute('UPDATE pipeline_tracks SET card_json=?',(encode(card),))
+    receipts=[]
+    with Store(settings.database,read_only=True) as store:
+        cards,_=p.track_state.load_tracks(store,'test','books',3,p.task_message,history_receipts=receipts)
+    assert cards==[] and receipts[0]['action']=='omit_future_track'
+
+
+@pytest.mark.parametrize('damage',['proof','source','route','producer','unfinished','jobless','unproved_replacement'])
+def test_crossing_frame_never_turns_missing_or_damaged_evidence_into_safe_omission(settings,damage):
+    ingest(settings)
+    _,data=freeze(settings)
+    history(settings,data)
+    with Store(settings.database) as store:
+        if damage in ('proof','jobless'):
+            job=store.conn.execute("SELECT * FROM pipeline_jobs WHERE batch_id='route:synthetic'").fetchone()
+            if damage=='jobless':store.conn.execute('DELETE FROM pipeline_jobs WHERE id=?',(job['id'],))
+            else:
+                request=json.loads(job['request_json']);request['routing_frame']['messages_sha256']='changed'
+                store.conn.execute('UPDATE pipeline_jobs SET request_json=? WHERE id=?',(encode(request),job['id']))
+        elif damage=='source':store.conn.execute("UPDATE raw_events SET text='Changed original' WHERE id=1")
+        elif damage=='producer':store.conn.execute("UPDATE pipeline_route_provenance SET batch_id='missing'")
+        elif damage=='unfinished':store.conn.execute("UPDATE pipeline_batches SET status='routing_only' WHERE id='route:synthetic'")
+        elif damage=='unproved_replacement':
+            route=json.loads(store.conn.execute('SELECT route_json FROM pipeline_route_provenance WHERE raw_id=2').fetchone()[0])
+            route['routing_role']='routine'
+            store.conn.execute('UPDATE pipeline_routes SET route_json=? WHERE raw_id=2',(encode(route),))
+            store.conn.execute('UPDATE pipeline_route_provenance SET route_json=? WHERE raw_id=2',(encode(route),))
+        else:
+            route=json.loads(store.conn.execute('SELECT route_json FROM pipeline_route_provenance WHERE raw_id=1').fetchone()[0])
+            route['routing_role']='routine'
+            store.conn.execute('UPDATE pipeline_route_provenance SET route_json=? WHERE raw_id=1',(encode(route),))
+    receipts=[]
+    with Store(settings.database,read_only=True) as store,pytest.raises(p.RoutingRecoveryError):
+        p.track_state.load_tracks(store,'test','books',2,p.task_message,history_receipts=receipts)
+    assert receipts==[]
+
+
+@pytest.mark.parametrize('damage',['none','source','missing_proof','unprocessed_hole','unfinished','retained','processed','not_late'])
+def test_late_reply_gate_requires_intact_accepted_prefix_and_new_suffix(settings,damage):
+    from serein.compat.raw_archive import raw_archive
+    archive=raw_archive(settings)
+    ingest(settings)
+    _,data=freeze(settings)
+    history(settings,data)
+    archive.ingest([{'source_event_id':'a-late-extra','session_id':'books','role':'assistant',
+        'text':'A second landing of the same response','created_at':'2025-01-01T00:02:00Z'}],source='test')
+    with Store(settings.database) as store:
+        if damage=='source':store.conn.execute("UPDATE raw_events SET text='mutated' WHERE id=1")
+        elif damage=='missing_proof':store.conn.execute('DELETE FROM pipeline_route_provenance WHERE raw_id=1')
+        elif damage=='unprocessed_hole':
+            store.conn.execute('DELETE FROM pipeline_routes WHERE raw_id=1')
+            store.conn.execute('DELETE FROM pipeline_route_provenance WHERE raw_id=1')
+        elif damage=='unfinished':store.conn.execute("UPDATE pipeline_batches SET status='pending' WHERE id='route:synthetic'")
+        elif damage=='processed':store.conn.execute("INSERT INTO raw_processing VALUES (1,'prior','settled')")
+        elif damage=='retained':
+            store.conn.execute("INSERT INTO pipeline_pending_materials(batch_id,scope,status,kind,source_ids_json,reason,updated_at) VALUES ('route:synthetic',?,'open','routing','[1,2]','synthetic','synthetic')",(data['scope'],))
+        elif damage=='not_late':store.conn.execute("UPDATE raw_events SET created_at='2024-12-31T23:59:00Z' WHERE id=3")
+        unit=[p.task_message(r) for r in store.conn.execute('SELECT * FROM raw_events ORDER BY id')]
+        before={table:[tuple(r) for r in store.conn.execute('SELECT * FROM '+table+' ORDER BY rowid')]
+                for table in ('raw_events','pipeline_jobs','pipeline_routes','pipeline_route_provenance','pipeline_batches')}
+    if damage=='none':
+        receipts=recovery.late_reply_route_receipts(settings.database,[unit],{1,2})
+        assert receipts[0]['new_source_message_ids']==[3]
+        assert receipts[0]['previously_routed_source_message_ids']==[1,2]
+    else:
+        with pytest.raises(p.RoutingRecoveryError):
+            recovery.late_reply_route_receipts(settings.database,[unit],{1,2})
+    with Store(settings.database,read_only=True) as store:
+        assert {table:[tuple(r) for r in store.conn.execute('SELECT * FROM '+table+' ORDER BY rowid')] for table in before}==before
+
+
+def test_late_reply_after_settled_parked_tail_continues_across_restart_without_reprocessing(settings):
+    from serein.compat.raw_archive import raw_archive
+    archive=raw_archive(settings)
+    archive.ingest([
+        {'source_event_id':'u-first','session_id':'books','role':'user','text':'First book plan',
+         'created_at':'2025-01-01T00:00:00Z'},
+        {'source_event_id':'a-first','session_id':'books','role':'assistant','text':'First agreement',
+         'created_at':'2025-01-01T00:01:00Z'},
+        {'source_event_id':'u-late','session_id':'books','role':'user','text':'Second book plan',
+         'created_at':'2025-01-01T00:02:00Z'},
+    ],source='test')
+    first=asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
+    assert first['processed_originals']==2
+    with Store(settings.database,read_only=True) as store:
+        old_jobs=[tuple(row) for row in store.conn.execute('SELECT * FROM pipeline_jobs ORDER BY rowid')]
+        old_routes=[tuple(row) for row in store.conn.execute('SELECT * FROM raw_processing ORDER BY raw_id')]
+    archive.ingest([{'source_event_id':'a-late','session_id':'books','role':'assistant','text':'Second agreement',
+        'created_at':'2025-01-01T00:03:00Z'}],source='test')
+    # Re-initialization simulates process restart with the accepted old frame.
+    p.initialize(settings.database)
+    calls=[]
+    async def continue_late(role,request):
+        calls.append(role)
+        if role=='track_router':
+            assert [m['id'] for m in request['messages']]==[3,4]
+            assert request['active_tracks']==[]
+        return output_for(role,request)
+    second=asyncio.run(p.advance(settings.database,include_recent=True,runner=continue_late))
+    assert second['status']=='processed' and second['processed_originals']==2
+    ingest(settings,3)
+    third=asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
+    assert third['status']=='processed' and third['processed_originals']==2
+    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))['status']=='current'
+    with Store(settings.database,read_only=True) as store:
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM raw_processing WHERE raw_id<=2 ORDER BY raw_id')]==old_routes
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM pipeline_jobs ORDER BY rowid LIMIT ?',(len(old_jobs),))]==old_jobs
+        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==6
+        assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==6
+        assert store.conn.execute("SELECT count(*) FROM pipeline_batches WHERE status='needs_repair'").fetchone()[0]==0
+
+
 @pytest.mark.parametrize('damage', ['contract', 'scope', 'unfinished', 'missing_seed', 'missing_proof', 'missing_jobs'])
 def test_upgrade_does_not_accept_incomplete_or_incompatible_producer(settings, damage):
     ingest(settings)

@@ -26,6 +26,14 @@ ROLES=('track_router','event_curator','event_writer')
 TZ=timezone(timedelta(hours=8))
 CONTRACT='public-event-message-tracks-v8'
 EVENT_CURATOR_MAX_ACTIVE_LEAVES_PER_TRACK=8
+# This release changes scheduling and proof-based Track selection, not the
+# frozen role protocol. Keep the exact deployed predecessor's requests and
+# budgets resumable. Unknown revisions still require explicit review.
+EXECUTION_COMPATIBLE_REVISIONS=frozenset({
+    # Commit 52add3d: Git/LF archive and Windows/CRLF deployment respectively.
+    '414a9a433fc0b9d30d665b79cdae8b249599179a0b3c5e719571c452de813a81',
+    'd05811a7b720b16e23b75228c8e43edd4c808d03c52645f5a8cfa5e2b75db507',
+})
 
 _RUNTIME_CONTRACT_FILES = (
     'pipeline.py', 'pipeline_latest.py', 'pipeline_audit.py', 'pipeline_images.py',
@@ -44,6 +52,11 @@ def runtime_revision():
     rules_root=root.parent/'resources'/'agents'
     role_rules={role:digest((rules_root/role/'AGENTS.md').read_bytes()) for role in ROLES}
     return digest(encode({'contract':CONTRACT,'code':code,'rules':role_rules}))
+
+
+def runtime_compatible(data):
+    return (data.get('contract')==CONTRACT and
+            data.get('runtime_revision') in {runtime_revision(),*EXECUTION_COMPATIBLE_REVISIONS})
 
 
 class PausedBatch(ValueError):
@@ -187,9 +200,12 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
                     first=old_data['routing_messages'][0]
                     try:
                         with latest.identity_scope(identity(database)):
+                            history_receipts=[]
                             tracks,ordinal=track_state.load_tracks(store,first['source'],first['original_session_id'],first['id'],task_message,
+                                history_receipts=history_receipts,
                                 lookback_days=old_data['input_policy'].get('track_lookback_days',3))
                         old_data.update(tracks=tracks,next_track_ordinal=ordinal)
+                        if history_receipts:old_data['track_history_receipts']=history_receipts
                     except RoutingRecoveryError as error:
                         old_data['routing_evidence_error']=str(error)
                     old_data['recent']=[task_message(row) for row in store.conn.execute(
@@ -265,7 +281,7 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
                     "AND json_array_length(result_json,'$.attempted_source_message_ids')>0",
                     (scope,watermark.date().isoformat())):
                 frozen=json.loads(previous['input_json'])
-                if (frozen.get('runtime_revision') not in {revision,*QUEUE_COMPATIBLE_ROUTER_REVISIONS}
+                if (frozen.get('runtime_revision') not in {revision,*EXECUTION_COMPATIBLE_REVISIONS,*QUEUE_COMPATIBLE_ROUTER_REVISIONS}
                         or frozen.get('input_policy')!=policy):
                     continue
                 receipt=json.loads(previous['result_json'])
@@ -308,14 +324,17 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
                     continue
                 with latest.identity_scope(identity(database)):
                     routing_error=None
+                    history_receipts=[]
                     try:
                         tracks,ordinal=track_state.load_tracks(store,source,session,eligible[0]['id'],task_message,
+                                                               history_receipts=history_receipts,
                                                                lookback_days=policy.get('track_lookback_days',3))
                     except RoutingRecoveryError as error:
                         tracks=[];ordinal=track_state.next_ordinal(scope,[{'track_id':row[0]} for row in store.conn.execute('SELECT id FROM pipeline_tracks')])
                         routing_error=str(error)
                 recent=recent_originals(store,source,session,eligible[0])
                 data={'contract':CONTRACT,'runtime_revision':runtime_revision(),'input_policy':policy,'messages':stable,'parked':parked,'routing_messages':eligible,'tracks':tracks,'next_track_ordinal':ordinal,'scope':scope,'source':source,'recent':recent,'day':watermark.date().isoformat(),'settlement_watermark':watermark.isoformat()}
+                if history_receipts:data['track_history_receipts']=history_receipts
                 if routing_error:data['routing_evidence_error']=routing_error
                 key='pipeline:'+digest(encode(data))
                 existing=store.conn.execute('SELECT status FROM pipeline_batches WHERE id=?',(key,)).fetchone()
@@ -1278,7 +1297,7 @@ def _submit(database,job_id,output):
         latest.canonicalize_claim_group_ids(output)
     encoded_output=encode(output)
     if status.startswith('superseded_'):raise ValueError('任务输入已更新，请重新领取任务；原话和已完成的归线仍保留')
-    if request.get('runtime_revision')!=runtime_revision() or request.get('contract')!=CONTRACT:
+    if not runtime_compatible(request):
         raise ValueError('Frozen runtime contract changed; explicitly rebuild the plan.')
     if existing_output:
         if existing_output!=encoded_output:raise Conflict('This job already has a different result')
@@ -1934,7 +1953,7 @@ async def _advance_frozen(database,*,include_recent=False,runner=None,retry_repa
     batch=new_batch(database,include_recent,retry_repair=retry_repair)
     if not batch:return held_result(database) or {'status':'current','note':'No unreviewed stable dialogue units are ready; deferred originals remain pending.'}
     data=json.loads(batch['input_json']);plans=[]
-    if data.get('runtime_revision')!=runtime_revision():
+    if not runtime_compatible(data):
         return json.loads(batch['result_json'])
     try:
         if batch['id'].startswith('route:'):
@@ -2076,8 +2095,8 @@ def tools_for(settings):
         return await rebuild(settings.database,batch_id,confirm)
     return {'pipeline_next':pipeline_next,'pipeline_submit':pipeline_submit,'pipeline_rebuild':pipeline_rebuild}
 
-async def flush_routes(database):
-    with execution(database):return await _flush_routes_frozen(database)
+async def flush_routes(database,*,batch_limit=None):
+    with execution(database):return await _flush_routes_frozen(database,batch_limit=batch_limit)
 
 
 def scope_holds(database):
@@ -2121,7 +2140,7 @@ def retain_routing_prompt_limit(database,batch,error):
     return pending_materials.park(database,batch,error)
 
 
-async def _flush_routes_frozen(database):
+async def _flush_routes_frozen(database,*,batch_limit=None):
     """Daytime routing uses durable jobs, complete units and settlement windows."""
     config=snapshot(database,'routing')
     if config['policy']['execution_mode']=='agent' or not config['models']['track_router']:return
@@ -2141,9 +2160,12 @@ async def _flush_routes_frozen(database):
         # Read cached rows too, so filtering never invents a different unit start.
         rows=[task_message(r) for r in store.conn.execute("SELECT r.* FROM raw_events r WHERE NOT EXISTS (SELECT 1 FROM raw_processing p WHERE p.raw_id=r.id)"+upload+import_boundary+' ORDER BY r.id')]
         cached={row[0] for row in store.conn.execute('SELECT raw_id FROM pipeline_routes UNION SELECT raw_id FROM pipeline_route_provenance')}
+    attempted=0
     for batch in frozen:
+        if batch_limit is not None and attempted>=batch_limit:return
         detail=json.loads(batch['result_json'] or '{}')
         if batch['status']=='retry_wait' and current<datetime.fromisoformat(detail['next_retry_at']):continue
+        attempted+=1
         try:await _publish_routes(database,batch,json.loads(batch['input_json']))
         except PromptLimitError as error:retain_routing_prompt_limit(database,batch,error)
         except RoutingRecoveryError as error:mark_needs_repair(database,batch,error)
@@ -2156,27 +2178,45 @@ async def _flush_routes_frozen(database):
     sessions={}
     for row in rows:sessions.setdefault((row['source'],row['original_session_id']),[]).append(row)
     for (source,session),messages in sessions.items():
+        if batch_limit is not None and attempted>=batch_limit:return
         scope=digest(encode([source,session]))[:20]
         if scope in held:continue
         units=flushable_dialogue_units(messages,now=current)
         if len(units)<5:continue
         # Only skip wholly cached units. Partial cache is visible repair evidence,
         # never permission to reroute a suffix using a made-up envelope boundary.
-        partial=any(any(m['id'] in cached for m in u) and not all(m['id'] in cached for m in u) for u in units)
         units=[u for u in units if not all(m['id'] in cached for m in u)]
         if not units:continue
         messages=[row for unit in units for row in unit]
+        if batch_limit is not None:
+            # One transport frame per scheduled pass leaves a lease boundary
+            # for settlement and explicit work. Never cut a reply envelope.
+            messages=routing_blocks(messages,config['policy']['max_input_chars'])[0]
+        partial=any(any(m['id'] in cached for m in u) and not all(m['id'] in cached for m in u)
+                    for u in dialogue_units(messages))
+        late_reply_receipts=[];partial_error=None
+        if partial:
+            from .pipeline_recovery import late_reply_route_receipts
+            try:
+                late_reply_receipts=late_reply_route_receipts(database,dialogue_units(messages),cached)
+                partial=False
+            except RoutingRecoveryError as error:partial_error=str(error)
+        attempted+=1
         with Store(database) as store:
             with latest.identity_scope(identity(database)):
                 routing_error=None
+                history_receipts=[]
                 try:
                     tracks,ordinal=track_state.load_tracks(store,source,session,messages[0]['id'],task_message,
+                                                           history_receipts=history_receipts,
                                                            lookback_days=config['policy'].get('track_lookback_days',3))
                 except RoutingRecoveryError as error:
                     tracks=[];ordinal=track_state.next_ordinal(scope,[{'track_id':row[0]} for row in store.conn.execute('SELECT id FROM pipeline_tracks')])
                     routing_error=str(error)
             recent=recent_originals(store,source,session,messages[0])
             data={'contract':CONTRACT,'runtime_revision':runtime_revision(),'input_policy':config['policy'],'routing_messages':messages,'tracks':tracks,'next_track_ordinal':ordinal,'scope':scope,'recent':recent,'day':current.astimezone(TZ).date().isoformat()}
+            if history_receipts:data['track_history_receipts']=history_receipts
+            if late_reply_receipts:data['late_reply_route_receipts']=late_reply_receipts
             if routing_error:data['routing_evidence_error']=routing_error
             key='route:'+digest(encode(data));batch={'id':key,'scope':scope,'input_json':encode(data)}
             store.conn.execute("INSERT OR IGNORE INTO pipeline_batches(id,scope,input_json,status) VALUES (?,?,?,'routing_only')",(key,scope,batch['input_json']))
@@ -2184,7 +2224,7 @@ async def _flush_routes_frozen(database):
             mark_needs_repair(database,batch,RoutingRecoveryError(routing_error))
             continue
         if partial:
-            mark_needs_repair(database,batch,RoutingRecoveryError('Partially cached dialogue unit; review the complete frozen envelope.'))
+            mark_needs_repair(database,batch,RoutingRecoveryError(partial_error or 'Partially cached dialogue unit; review the complete frozen envelope.'))
             continue
         try:await _publish_routes(database,batch,data)
         except PromptLimitError as error:retain_routing_prompt_limit(database,batch,error)
@@ -2208,9 +2248,10 @@ async def _scheduled_advance(database):
     if not read_settings(database)['pipeline']['auto_enabled']:
         return {'status':'auto_paused'}
     initialize(database)
-    await flush_routes(database)
     current=datetime.now(TZ);day=current.date().isoformat()
-    if current.hour<3:return {'status':'waiting_settlement_window'}
+    if current.hour<3:
+        await flush_routes(database,batch_limit=1)
+        return {'status':'waiting_settlement_window'}
     with Store(database,read_only=True) as store:
         row=store.conn.execute('SELECT completed FROM pipeline_schedule WHERE day=?',(day,)).fetchone()
     held=held_result(database)
@@ -2219,7 +2260,12 @@ async def _scheduled_advance(database):
     # A completed day is an observation, not a fence against late uploads or
     # explicitly resumed pending work. new_batch's durable review receipts
     # already suppress unchanged material without any model call.
+    # Settle ready old material before routing all of today's uploads. A slow
+    # or failing daytime Router must not starve an independent ready Event.
     result=await _advance(database)
+    if result['status'] in ('current','needs_repair','blocked'):
+        await flush_routes(database,batch_limit=1)
+        result=await _advance(database)
     if result['status']=='current' and not held_result(database):
         with Store(database) as store:store.conn.execute('INSERT OR REPLACE INTO pipeline_schedule VALUES (?,1)',(day,))
         if row and row[0]:return {'status':'settled_today'}

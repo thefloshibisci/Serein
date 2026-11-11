@@ -1,13 +1,19 @@
 """Persisted foreground-requested work, leased across HTTP/MCP processes."""
 import asyncio
 import json
+import logging
 import time
 from contextvars import ContextVar
+from pathlib import Path
 from uuid import uuid4
-from .core.store import Store, encode
+from .core.store import Store, digest, encode
 
 ACTIVE=ContextVar('serein_work',default=None)
 LEASE_SECONDS=60
+HEARTBEAT_SECONDS=10
+HEARTBEAT_RETRY_SECONDS=1
+REQUESTED_WORK_CONCURRENCY=3
+QUEUE_SCAN_RETRY_SECONDS=5
 
 
 def _get(store,key):
@@ -87,10 +93,36 @@ def recover_image_work(database):
                 _save(store, value['id'], value)
 
 
+def _requeue_interrupted_request(value):
+    if (value['status']!='interrupted' or not value.get('resume_on_restart')
+            or value.get('stop_requested')
+            or not (value['id']=='pipeline' or value['id'].startswith('import:'))):return False
+    value.update(status='queued',stage='queued',resumed_from_run_id=value['run_id'],
+                 run_id=uuid4().hex,lease_until=0,error='',updated_at=time.time())
+    return True
+
+
+def recover_requested_work(database):
+    """Resume a claimed explicit request after its process stops, never a timer.
+
+    The origin marker is set only when execute claims a queued pipeline/import.
+    Old records and scheduled passes deliberately lack this proof of intent.
+    Pauses, stage failures and material holds retain their normal retry policy.
+    """
+    with Store(database) as store,store.transaction(immediate=True):
+        rows=store.conn.execute("SELECT value_json FROM background_state WHERE "
+            "(name='work:pipeline' OR name LIKE 'work:import:%') "
+            "AND json_extract(value_json,'$.resume_on_restart')=1 "
+            "AND json_extract(value_json,'$.status') IN ('running','interrupted')").fetchall()
+        for row in rows:
+            value=_recover(json.loads(row[0]))
+            if _requeue_interrupted_request(value):_save(store,value['id'],value)
+
+
 def pause(database,key):
     with Store(database) as store,store.transaction(immediate=True):
         value=_recover(_get(store,key))
-        if value['status']=='queued':value['status']='paused'
+        if value['status'] in ('queued','interrupted'):value['status']='paused'
         elif value['status']=='running':value['stop_requested']=True
         _save(store,key,value)
         return value
@@ -107,6 +139,18 @@ def progress(**fields):
             _save(store,key,value)
 
 
+def _renew_lease(database,key,run_id):
+    """Renew only the current owner; None means its durable ownership ended."""
+    with Store(database) as store,store.transaction(immediate=True):
+        value=_get(store,key)
+        if (value.get('run_id')!=run_id or value['status']!='running'
+                or value.get('lease_until',0)<=time.time()):return None
+        lease_until=time.time()+LEASE_SECONDS
+        value.update(lease_until=lease_until,updated_at=time.time())
+        _save(store,key,value)
+        return lease_until
+
+
 def failure_reason(error):
     import httpx
     from .timeout_diagnostics import timeout_reason
@@ -120,8 +164,30 @@ def failure_reason(error):
 
 
 async def execute(database,key,operation,*,queued_id=None):
+    from .file_lock import exclusive_lock
+    database=Path(database).resolve()
+    lock=exclusive_lock(database.parent/(database.name+'.work-locks')/(digest(key)+'.lock'))
+    try:
+        lock.__enter__()
+    except RuntimeError:
+        # A stalled event loop or a finishing disk batch can outlive its lease.
+        # The OS lock remains held until its operation and cleanup both finish.
+        with Store(database,read_only=True) as store:
+            return {'status':'busy','task':_get(store,key)}
+    try:
+        return await _execute_leased(database,key,operation,queued_id=queued_id)
+    finally:
+        lock.__exit__(None,None,None)
+
+
+async def _execute_leased(database,key,operation,*,queued_id=None):
     with Store(database) as store,store.transaction(immediate=True):
         value=_recover(_get(store,key))
+        # A timer may arrive before the request dispatcher after startup. Give
+        # the durable explicit request its original include_recent/other args.
+        if _requeue_interrupted_request(value):
+            _save(store,key,value)
+            return {'status':'busy','task':value}
         if queued_id and value.get('next_attempt_at', 0) > time.time():
             return {'status': 'waiting', 'task': value}
         if value['status']=='running' or (value['status']=='queued' and value.get('run_id')!=queued_id):
@@ -131,13 +197,32 @@ async def execute(database,key,operation,*,queued_id=None):
         previous=dict(value)
         run_id=queued_id or uuid4().hex
         value.update(status='running',run_id=run_id,lease_until=time.time()+LEASE_SECONDS,error='',
-                     stage='starting',stop_requested=False,updated_at=time.time())
+                     stage='starting',stop_requested=False,updated_at=time.time(),
+                     resume_on_restart=bool(queued_id) and (key=='pipeline' or key.startswith('import:')))
         _save(store,key,value)
     token=ACTIVE.set((database,key,run_id))
+    owner=asyncio.current_task()
+    lease_until=value['lease_until'];lease_error=''
     async def heartbeat():
+        nonlocal lease_until,lease_error
+        delay=HEARTBEAT_SECONDS;previous_error=None
+        guard=min(5,LEASE_SECONDS/4)
         while True:
-            await asyncio.sleep(10)
-            progress(lease_until=time.time()+LEASE_SECONDS)
+            await asyncio.sleep(min(delay,max(0,lease_until-time.time()-guard)))
+            if time.time()>=lease_until-guard:
+                lease_error='后台任务租约未能及时续期；已完成步骤保留。'
+                owner.cancel();return
+            try:
+                renewed=_renew_lease(database,key,run_id)
+                if renewed is None:
+                    lease_error='后台任务租约已由其他执行器接管；当前执行已停止。'
+                    owner.cancel();return
+                lease_until=renewed;delay=HEARTBEAT_SECONDS;previous_error=None
+            except Exception as error:
+                signature=(type(error).__name__,str(error)[:200])
+                if previous_error!=signature:
+                    logging.getLogger(__name__).exception('Work lease renewal failed; retrying before expiry')
+                previous_error=signature;delay=HEARTBEAT_RETRY_SECONDS
     beat=asyncio.create_task(heartbeat())
     try:
         result=await operation()
@@ -160,7 +245,13 @@ async def execute(database,key,operation,*,queued_id=None):
                 _save(store,key,value)
         return result
     except asyncio.CancelledError:
-        progress(status='interrupted',lease_until=0,error='服务已停止；已完成步骤保留，点击继续可恢复。')
+        try:
+            progress(status='interrupted',lease_until=0,
+                     error=lease_error or '服务已停止；已完成步骤保留，恢复后可继续。')
+        except Exception:
+            # A failed status write cannot turn cancellation into a runnable
+            # old owner. The last durable lease will expire for recovery.
+            logging.getLogger(__name__).exception('Interrupted work status could not be saved; lease will expire')
         raise
     except Exception as error:
         progress(status='failed',lease_until=0,error=failure_reason(error))
@@ -168,6 +259,23 @@ async def execute(database,key,operation,*,queued_id=None):
     finally:
         beat.cancel();await asyncio.gather(beat,return_exceptions=True)
         ACTIVE.reset(token)
+
+
+async def _finish_disk_batch(batch):
+    # to_thread cancellation cannot stop the underlying write. A second stop
+    # (for example the heartbeat expiring during shutdown) must not release the
+    # process lock while that thread still owns its bounded transaction.
+    while not batch.done():
+        try:
+            await asyncio.shield(batch)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    try:
+        batch.result()
+    except Exception:
+        logging.getLogger(__name__).exception('Cancelled disk batch failed; its transaction was rolled back')
 
 
 async def work(settings,key,arguments):
@@ -200,8 +308,10 @@ async def work(settings,key,arguments):
         batch=asyncio.create_task(asyncio.to_thread(migrate,settings,key.removeprefix('legacy:')))
         try:return await asyncio.shield(batch)
         except asyncio.CancelledError:
-            pause(settings.database,key)
-            await batch
+            try:pause(settings.database,key)
+            except Exception:
+                logging.getLogger(__name__).exception('Migration pause could not be saved; waiting for its operation to finish')
+            await _finish_disk_batch(batch)
             raise
     if key=='pipeline':
         from .extensions.pipeline import _advance
@@ -220,6 +330,8 @@ async def work(settings,key,arguments):
             result={**result,'deferred':deferred,'skipped':skipped,'protected_deferrals':protected,
                     'curator_omission_deferrals':curator_omissions}
             progress(events=events)
+            if status(settings.database,key).get('stop_requested'):
+                return {**result,'status':'paused','events':events}
             if result['status']=='retained' or (result['status']=='paused' and result.get('job_id')) or result['status']=='routed' or (result['status']=='needs_repair' and not result.get('blocked_scopes')):
                 batch_id=result.get('batch_id') or result.get('job_id')
                 if batch_id and batch_id not in continued_batches:
@@ -242,7 +354,7 @@ async def work(settings,key,arguments):
         batch=asyncio.create_task(asyncio.to_thread(advance_import,settings,identifier,batch_size=batch_size))
         try:result=await asyncio.shield(batch)
         except asyncio.CancelledError:
-            await batch  # finish the bounded disk batch before releasing its lease
+            await _finish_disk_batch(batch)
             raise
         duration=time.monotonic()-started
         processed=result['batch_processed']
@@ -261,17 +373,42 @@ async def work(settings,key,arguments):
 
 
 async def run(settings):
-    """Queued work survives page navigation; stale running work is explicitly resumable."""
-    while True:
-        recover_image_work(settings.database)
-        with Store(settings.database,read_only=True) as store:
-            queued=[json.loads(row[0]) for row in store.conn.execute(
-                "SELECT value_json FROM background_state WHERE name LIKE 'work:%' AND json_extract(value_json,'$.status')='queued'")]
-        for value in queued:
-            if value.get('next_attempt_at', 0) > time.time():
-                continue
+    """Resume durable requests and give independent queue keys bounded capacity."""
+    running={};scan_error=None
+    async def invoke(value):
+        try:
+            await execute(settings.database,value['id'],
+                          lambda:work(settings,value['id'],value.get('arguments',{})),
+                          queued_id=value['run_id'])
+        except Exception:
+            pass  # The task's durable error is returned by the status endpoint.
+    try:
+        while True:
+            for key,task in list(running.items()):
+                if task.done():
+                    await asyncio.gather(task,return_exceptions=True)
+                    del running[key]
             try:
-                await execute(settings.database,value['id'],lambda:work(settings,value['id'],value.get('arguments',{})),queued_id=value['run_id'])
-            except Exception:
-                pass  # The task's durable error is returned by the status endpoint.
-        await asyncio.sleep(.5)
+                recover_image_work(settings.database)
+                recover_requested_work(settings.database)
+                with Store(settings.database,read_only=True) as store:
+                    queued=[json.loads(row[0]) for row in store.conn.execute(
+                        "SELECT value_json FROM background_state WHERE name LIKE 'work:%' "
+                        "AND json_extract(value_json,'$.status')='queued' "
+                        "ORDER BY COALESCE(json_extract(value_json,'$.updated_at'),0),name")]
+                scan_error=None
+            except Exception as error:
+                signature=(type(error).__name__,str(error)[:200])
+                if scan_error!=signature:
+                    logging.getLogger(__name__).exception('Requested queue scan failed; durable requests remain queued')
+                scan_error=signature
+                await asyncio.sleep(QUEUE_SCAN_RETRY_SECONDS)
+                continue
+            for value in queued:
+                if len(running)>=REQUESTED_WORK_CONCURRENCY:break
+                if value['id'] in running or value.get('next_attempt_at',0)>time.time():continue
+                running[value['id']]=asyncio.create_task(invoke(value),name='requested:'+value['id'])
+            await asyncio.sleep(.5)
+    finally:
+        for task in running.values():task.cancel()
+        await asyncio.gather(*running.values(),return_exceptions=True)

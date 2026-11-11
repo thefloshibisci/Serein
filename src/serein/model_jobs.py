@@ -4,6 +4,8 @@ import logging
 from .deployment import read_settings, configured_models
 from .core.store import encode
 
+CONFIGURATION_RETRY_SECONDS=5
+
 
 async def run(application):
     from .compat.jobs import BackgroundJobs
@@ -19,11 +21,20 @@ async def run(application):
             except Exception:
                 logging.getLogger(__name__).exception('Event pipeline failed; originals remain pending')
             await asyncio.sleep(30)
-    running={}
+    running={};configuration_error=None
     settings=application.settings
     try:
         while True:
-            config=read_settings(settings.database)
+            try:
+                config=read_settings(settings.database)
+                configuration_error=None
+            except Exception as error:
+                signature=(type(error).__name__,str(error)[:200])
+                if configuration_error!=signature:
+                    logging.getLogger(__name__).exception('Configured task scan failed; existing workers remain active')
+                configuration_error=signature
+                await asyncio.sleep(CONFIGURATION_RETRY_SECONDS)
+                continue
             for feature in ('relations','dreams','narrative_revision','event_pipeline','operit_tagging','arc_linker'):
                 if feature in application.enabled_extensions or (feature == 'narrative_revision' and
                         'narrative_scout' in application.enabled_extensions):continue

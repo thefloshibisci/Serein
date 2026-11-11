@@ -337,15 +337,71 @@ def test_scope_head_gate_applies_to_recheck_resume_and_daytime(settings,monkeypa
 
 def test_backfilled_older_timestamp_never_reads_future_track_card(settings,monkeypatch):
     seed(settings)
-    calls=api(settings,monkeypatch,lambda r:output_for(r['role'],r))
+    def router(request):
+        output=output_for(request['role'],request)
+        if request['role']=='track_router':
+            output['track_updates'][0]['throughline']='Accepted book plan through '+str(max(m['id'] for m in request['messages']))
+        return output
+    calls=api(settings,monkeypatch,router)
     asyncio.run(p.flush_routes(settings.database))
     before=len(calls)
+    with Store(settings.database,read_only=True) as store:
+        old_jobs=[tuple(r) for r in store.conn.execute('SELECT * FROM pipeline_jobs ORDER BY rowid')]
+        old_proof=[tuple(r) for r in store.conn.execute('SELECT * FROM pipeline_route_provenance ORDER BY raw_id')]
     seed(settings,start=Clock.value.replace(hour=2,minute=42),count=5)
     asyncio.run(p.flush_routes(settings.database))
-    assert len(calls)==before
-    hold=p.scope_holds(settings.database)[0]
-    assert hold['hold_status']=='needs_repair' and 'historical pre-routing' in hold['reason']
-    assert asyncio.run(p.scheduled_advance(settings.database))['status']=='needs_repair'
+    assert len(calls)>before and calls[before]['active_tracks']==[]
+    assert 'Accepted book plan through 10' not in calls[before]['prompt']
+    assert 'Accepted book plan through 14' not in calls[before]['prompt']
+    assert p.scope_holds(settings.database)==[]
+    for request in calls[before:]:
+        with Store(settings.database,read_only=True) as store:
+            p.track_state.assert_before(store,request['active_tracks'],request['messages'][0]['id'])
+    count=len(calls)
+    asyncio.run(p.flush_routes(settings.database))
+    assert len(calls)==count
+    with Store(settings.database,read_only=True) as store:
+        assert [tuple(r) for r in store.conn.execute('SELECT * FROM pipeline_jobs ORDER BY rowid LIMIT ?',(len(old_jobs),))]==old_jobs
+        assert [tuple(r) for r in store.conn.execute('SELECT * FROM pipeline_route_provenance WHERE raw_id<=14 ORDER BY raw_id')]==old_proof
+        latest=json.loads(store.conn.execute("SELECT input_json FROM pipeline_batches WHERE status='routed' ORDER BY rowid DESC LIMIT 1").fetchone()[0])
+        assert latest['track_history_receipts'][0]['action']=='omit_future_track'
+
+
+def test_daytime_late_reply_extends_parked_routed_question_without_scope_hold(settings,monkeypatch):
+    calls=api(settings,monkeypatch,lambda r:output_for(r['role'],r))
+    seed(settings,start=Clock.value.replace(hour=2,minute=0),count=5)
+    raw_archive(settings).ingest([{'source_event_id':'parked-question','session_id':'edge','role':'user',
+        'text':'A new book plan awaits an answer','created_at':Clock.value.replace(hour=2,minute=26).isoformat()}],source='test')
+    settled=asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
+    assert settled['processed_originals']==10
+    with Store(settings.database,read_only=True) as store:
+        old_jobs=[tuple(r) for r in store.conn.execute('SELECT * FROM pipeline_jobs ORDER BY rowid')]
+        old_processing=[tuple(r) for r in store.conn.execute('SELECT * FROM raw_processing ORDER BY raw_id')]
+        assert store.conn.execute('SELECT raw_id FROM pipeline_routes WHERE raw_id=11').fetchone()
+    raw_archive(settings).ingest([{'source_event_id':'late-answer','session_id':'edge','role':'assistant',
+        'text':'The late answer closes that question','created_at':Clock.value.replace(hour=2,minute=27).isoformat()}],source='test')
+    seed(settings,start=Clock.value.replace(hour=2,minute=30),count=4)
+    p.initialize(settings.database)
+    asyncio.run(p.flush_routes(settings.database))
+    assert calls and [m['id'] for m in calls[0]['messages']][:2]==[11,12]
+    assert calls[0]['active_tracks']==[]
+    assert p.scope_holds(settings.database)==[]
+    count=len(calls)
+    asyncio.run(p.flush_routes(settings.database))
+    assert len(calls)==count
+    with Store(settings.database,read_only=True) as store:
+        assert [tuple(r) for r in store.conn.execute('SELECT * FROM pipeline_jobs ORDER BY rowid LIMIT ?',(len(old_jobs),))]==old_jobs
+        assert [tuple(r) for r in store.conn.execute('SELECT * FROM raw_processing ORDER BY raw_id')]==old_processing
+        data=json.loads(store.conn.execute("SELECT input_json FROM pipeline_batches WHERE status='routed' ORDER BY rowid DESC LIMIT 1").fetchone()[0])
+        receipts=data['late_reply_route_receipts']
+        assert receipts[0]['previously_routed_source_message_ids']==[11]
+        assert receipts[0]['new_source_message_ids']==[12]
+    done=asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
+    assert done['status']=='processed' and done['processed_originals']==10
+    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))['status']=='current'
+    with Store(settings.database,read_only=True) as store:
+        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==20
+        assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==20
 
 
 def test_candidate_selection_replay_keeps_complete_predecessor_state(settings,monkeypatch):

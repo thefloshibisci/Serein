@@ -25,6 +25,7 @@ def retain_legacy_batches(conn):
           AND (json_extract(input_json,'$.contract') IS NULL OR json_extract(input_json,'$.contract')<>?
                OR json_extract(input_json,'$.runtime_revision') IS NULL OR json_extract(input_json,'$.runtime_revision')<>?)""",
         (p.CONTRACT,revision)).fetchall():
+        if p.runtime_compatible(json.loads(row['input_json'])):continue
         detail={'status':'needs_repair','batch_id':row['id'],'scope':row['scope'],'repair_kind':'runtime_contract',
                 'reason':'版本已更新，旧任务原话与输出已保留；可按当前设置重新整理或预览拆批。',
                 'note':'其他聊天可继续，旧任务不会自动重发。'}
@@ -255,7 +256,7 @@ def resume(database,pending_id,*,replan=False):
         row=store.conn.execute("SELECT pm.*,b.input_json,b.status AS batch_status,b.rowid AS queue_order,b.result_json AS previous_result FROM pipeline_pending_materials pm JOIN pipeline_batches b ON b.id=pm.batch_id WHERE pm.id=? AND pm.status='open'",(pending_id,)).fetchone()
         if row is None:raise Conflict('待办已被领取或完成，请刷新')
         data=json.loads(row['input_json']);ids=set(json.loads(row['source_ids_json']))
-        if data.get('runtime_revision')!=p.runtime_revision() and not replan:raise Conflict('版本已变化，请选择重新切分，不复用旧执行计划')
+        if not p.runtime_compatible(data) and not replan:raise Conflict('版本已变化，请选择重新切分，不复用旧执行计划')
         from .pipeline_recovery import _message_key
         for m in data.get('routing_messages',[]):
             if m['id'] not in ids:continue
