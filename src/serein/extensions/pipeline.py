@@ -33,6 +33,9 @@ EXECUTION_COMPATIBLE_REVISIONS=frozenset({
     # Commit 52add3d: Git/LF archive and Windows/CRLF deployment respectively.
     '414a9a433fc0b9d30d665b79cdae8b249599179a0b3c5e719571c452de813a81',
     'd05811a7b720b16e23b75228c8e43edd4c808d03c52645f5a8cfa5e2b75db507',
+    # Commit 00a3748 as deployed. Its successor only adds the exit for parked
+    # short activities and leaves every frozen role request unchanged.
+    '2e849cbc86b8c8395051726d23a01db670cdcea27c25efe2dca8664b10ad92b7',
 })
 
 _RUNTIME_CONTRACT_FILES = (
@@ -2070,7 +2073,11 @@ async def _advance_frozen(database,*,include_recent=False,runner=None,retry_repa
             reason=json.loads(store.conn.execute('SELECT result_json FROM pipeline_batches WHERE id=?',(batch['id'],)).fetchone()[0]).get('reason','模型重试耗尽')
         return pending_materials.park(database,batch,reason)
     except AwaitAgent as wait:return wait.task
-    except RoutingRecoveryError as error:return mark_needs_repair(database,batch,error)
+    except RoutingRecoveryError as error:
+        # An expired parked activity is optional work. It returns to the
+        # waiting area rather than placing a repair hold on its whole chat.
+        if data.get('round_gate_expired'):return pending_materials.park(database,batch,error)
+        return mark_needs_repair(database,batch,error)
     except FactEventSettlementBlockedError as error:return pending_materials.park(database,batch,error)
     except ValueError as error:
         with Store(database,read_only=True) as store:
@@ -2267,6 +2274,12 @@ async def _scheduled_advance(database):
     # A completed day is an observation, not a fence against late uploads or
     # explicitly resumed pending work. new_batch's durable review receipts
     # already suppress unchanged material without any model call.
+    # Parked short activities leave the waiting area here, at most one model
+    # pass per tick. Their exit is optional and must never stop settlement.
+    try:pending_materials.settle_stale(database,clock=current)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception('Parked short activities were not reviewed; settlement continues')
     # Settle ready old material before routing all of today's uploads. A slow
     # or failing daytime Router must not starve an independent ready Event.
     result=await _advance(database)

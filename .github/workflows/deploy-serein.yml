@@ -44,6 +44,7 @@ jobs:
           tests/test_model_json_fence.py tests/test_resume_shadows.py tests/test_chat_resume.py
           tests/test_pipeline_limits.py
           tests/test_pipeline_prompt_budget_recovery.py tests/test_pipeline_batch_recovery.py tests/test_pipeline_pending.py
+          tests/test_pipeline_status_rejection.py
           tests/test_release_boundaries.py
           tests/test_background_recall_refresh.py
           tests/test_arc_menu_lean_reads.py tests/test_refresh_event_eligibility.py
@@ -69,6 +70,8 @@ jobs:
       - run: node tests/memory-order.dom.mjs
         working-directory: web
       - run: node tests/memory-refresh.dom.mjs
+        working-directory: web
+      - run: node --test tests/pending-materials.dom.mjs tests/original-archive.dom.mjs tests/pipeline-recovery.dom.mjs
         working-directory: web
       - run: python scripts/release.py /tmp/serein-public.zip
       - name: Build exact tested revision

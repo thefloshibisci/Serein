@@ -47,7 +47,7 @@ export function ModelSettings({page,onOpenEventGuide,onOpenPipeline,onOpenCatalo
   const [status,setStatus]=useState("");
   const [busy,setBusy]=useState(false);
   const [pendingWork,setPendingWork]=useState(null);
-  const pendingCount=pendingWork?.pending_materials?.filter(item=>['open','running'].includes(item.status)).length||0;
+  const pendingCount=pendingWork?.pending_materials?.filter(item=>['open','running'].includes(item.status)&&!item.waiting_for_continuation).length||0;
   useEffect(()=>{
     let active=true;
     instanceSettings().then(value=>{if(active)setConfig(value);}).catch(error=>{if(active)setStatus(error.message);});

@@ -23,7 +23,7 @@ export function PipelineSettings({onOpenSummary}) {
   const failedBatch=['failed','interrupted'].includes(work?.status)&&work.batch_id&&!holds.some(item=>item.batch_id===work.batch_id)?work.batch_id:null;
   const roleNames={track_router:'归线',event_curator:'切分',event_writer:'Event 写作'};
   const autoMessage=limits?.auto_enabled===false?'自动整理已暂停；手动点击“继续整理”仍可启动任务。'
-    :work?.pending_materials?.some(item=>['open','running'].includes(item.status))?'自动整理已开启；有材料留在下方待处理区，独立的新材料可继续整理。'
+    :work?.pending_materials?.some(item=>['open','running'].includes(item.status)&&!item.waiting_for_continuation)?'自动整理已开启；有材料留在下方待处理区，独立的新材料可继续整理。'
     :work?.auto_boundary_originals>0?`自动整理已开启，但 ${work.auto_boundary_originals} 条旧原话在启用边界外，需要手动恢复。`
     :work?.status==='awaiting_agent'?'自动整理已开启，当前等待 Agent 领取任务。'
     :work?.status==='failed'||work?.status==='paused'||needsRepair?'自动整理已开启，当前批次需要处理下方的失败原因。'
@@ -166,6 +166,7 @@ export function PipelineSettings({onOpenSummary}) {
     <p>归线 → 切分与转录 → Event 写作。在“自动摘要管理”页选择执行方式、三阶段模型和整理参数。Scene 由聊天中的 agent 主动写。</p></div>
     <ConversationImport onImported={()=>setStatus('原话已导入。点击继续整理，进入下一步。')} />
     {limits&&<p>{autoMessage}</p>}
+    {work?.last_request_rejection&&<p>上次恢复请求未执行：旧计划版本不兼容，可在待处理材料中重新整理。</p>}
     {work?.auto_boundary_originals>0&&<p>有 {work.auto_boundary_originals} 条原话在开启自动整理时被划到边界外。它们仍保存在原话档案中，点击“继续整理”不会处理这些原话。<button type="button" disabled={busy||running} onClick={()=>restoreDialog.current.showModal()}>恢复并整理这批原话</button></p>}
     <button type="button" className="settings-link" onClick={onOpenSummary}>自动摘要管理</button>
     {work&&<div aria-live="polite"><p>当前阶段：{stages[work.stage]||work.stage} · 本批已完成 {work.completed||0} 个步骤 · 已保存 {work.events??work.result?.events??0} 条 Event</p>

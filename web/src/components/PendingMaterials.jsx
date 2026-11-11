@@ -76,13 +76,13 @@ export function PendingMaterials({work,onChange,onStatus,id}) {
     }catch(e){setError(e.message);}finally{setBusy(false);}
   }
   const open=items.filter(item=>['open','running'].includes(item.status));
+  // Activities parked by the round gate are waiting for the chat to
+  // continue. They are not failures and need nothing from the reader.
+  const waiting=open.filter(item=>item.waiting_for_continuation);
+  const actionable=open.filter(item=>!item.waiting_for_continuation);
   const finished=items.filter(item=>!['open','running'].includes(item.status));
   const lastOutput=detail?.last_error||detail?.last_attempt;
-  return <section id={id} className="settings-group pending-materials" aria-label="待处理材料" tabIndex={-1}><div className="settings-group__heading"><h3>待处理材料</h3>
-    <p>先核对是哪段聊天，再处理这一批。这里保留原话、错误输出与已完成步骤，尚未补写的内容不会作为新 Event 保存。</p></div>
-    {!open.length&&<p>暂无待处理材料。</p>}
-    {open.length>0&&<p className="pending-materials__notice">有 {open.length} 批材料待处理。下方字符数是原话长度；“本次提示词”还包含规则和候选内容。</p>}
-    {open.map(item=><article key={item.id} className="pending-material" aria-label={`待办 ${item.id}`}><h4>待办 {item.id} · {item.kind==='writing'?'已切分待补写':'待归线／切分修复'}</h4>
+  function card(item){return <article key={item.id} className="pending-material" aria-label={`待办 ${item.id}`}><h4>待办 {item.id} · {item.waiting_for_continuation?'等后续的对话':item.kind==='writing'?'已切分待补写':'待归线／切分修复'}</h4>
       <p>{item.summary||'归线尚未完成'} · {item.originals} 条原话 · {item.original_chars.toLocaleString()} 字符</p>
       {item.locator?.first_raw_id!==undefined&&<>
         <p className="pending-material__meta">{item.locator.timestamp_source==='import_time'?'导入记录时间：':''}{dateLabel(item.locator.first_at)} 至 {dateLabel(item.locator.last_at)}（北京时间）<br/>
@@ -95,12 +95,12 @@ export function PendingMaterials({work,onChange,onStatus,id}) {
       <p className="pending-material__reason">{item.reason}</p>
       {item.last_attempt&&<p>最后步骤：{stageName(item.last_attempt.role)}{item.last_attempt.attempt?` · 第 ${item.last_attempt.attempt} 次记录`:''} · {item.last_attempt.error||'已返回结果'} · 输出 {item.last_attempt.output_chars} 字符</p>}
       <div className="settings-actions"><button type="button" disabled={loadingId===item.id} onClick={()=>read(item.id)}>{loadingId===item.id?'正在读取原话…':'查看原话与最后输出'}</button>
-        <button type="button" disabled={busy||running||item.status==='running'} onClick={()=>resume(item.id)}>从失败步骤继续</button>
+        {item.plan_compatible!==false&&!item.waiting_for_continuation&&<button type="button" disabled={busy||running||item.status==='running'} onClick={()=>resume(item.id)}>从失败步骤继续</button>}
         <button type="button" disabled={busy||running||item.status==='running'} onClick={()=>resume(item.id,true)}>{item.kind==='unrouted'?'重新归线':'重新切分，保留归线'}</button>
         <button type="button" disabled={busy||running||item.status==='running'} onClick={()=>previewRecovery(item)}>按更小材料重新整理</button>
         {item.can_skip&&<button type="button" disabled={busy||running||item.status==='running'} onClick={()=>previewRecovery(item,'skip')}>跳过本批，保留原话</button>}
       </div>
-      <p className="pending-material__meta">继续会保留成功步骤；重新整理会生成新方案，可能再次调用模型。旧计划与输出可在记录中查看。</p>
+      <p className="pending-material__meta">{item.waiting_for_continuation?'不处理也可以；重新整理会生成新方案，可能再次调用模型。':item.plan_compatible===false?'这批的旧方案来自更早的程序版本，不能原样继续；重新切分会按当前版本生成新方案，可能再次调用模型。':'继续会保留成功步骤；重新整理会生成新方案，可能再次调用模型。'}旧计划与输出可在记录中查看。</p>
       {preview?.pending_id===item.id&&<div className="pending-recovery" role="region" aria-label={preview.action==='skip'?'确认跳过这批材料':'拆分预览'}>
         {preview.action==='skip'?<><h5>仅跳过这批材料的 Event 整理？</h5><p>共 {preview.originals} 条原话、{preview.original_chars?.toLocaleString()} 字符，将标记为手动跳过。原话和已有 Event 保留；这批原话不会再自动生成 Event。</p></>:<>
           <label className="settings-field"><span>每批原话字符上限</span><input type="number" min="2000" max="100000" value={limit} onChange={event=>setLimit(event.target.value)}/></label>
@@ -110,7 +110,15 @@ export function PendingMaterials({work,onChange,onStatus,id}) {
         </>}
         <div className="settings-actions"><button type="button" disabled={busy||running||(preview.action!=='skip'&&(!preview.can_rebatch||Number(limit)!==preview.max_input_chars))} onClick={recover}>{preview.action==='skip'?'确认仅跳过本批':'确认拆小并整理'}</button><button type="button" disabled={busy} onClick={()=>setPreview(null)}>取消</button></div>
       </div>}
-    </article>)}
+    </article>;}
+  return <section id={id} className="settings-group pending-materials" aria-label="待处理材料" tabIndex={-1}><div className="settings-group__heading"><h3>待处理材料</h3>
+    <p>先核对是哪段聊天，再处理这一批。这里保留原话、错误输出与已完成步骤，尚未补写的内容不会作为新 Event 保存。</p></div>
+    {!actionable.length&&<p>暂无待处理材料。</p>}
+    {actionable.length>0&&<p className="pending-materials__notice">有 {actionable.length} 批材料待处理。下方字符数是原话长度；“本次提示词”还包含规则和候选内容。</p>}
+    {actionable.map(card)}
+    {waiting.length>0&&<details className="pending-materials__waiting"><summary>等后续的对话（{waiting.length}）</summary>
+      <p>尚未达到整理门槛的对话先放在这里等待后续，不需要你处理。自动整理开启时，后台会在等待期结束后重新审阅一次；不能安全写入的材料仍会保留在待办中，原话不会因为等待时间或字数少而删除。</p>
+      {waiting.map(card)}</details>}
     {finished.length>0&&<details><summary>已处理记录（{finished.length}）</summary>{finished.map(item=><p key={item.id}>待办 {item.id} · {item.status==='resolved_routing'?'已恢复归线':item.status==='resolved_skipped'?'已手动跳过，原话保留':item.resolved_event_ids.length?'已保存／承接为 '+item.resolved_event_ids.join('、'):'已处理'} <button type="button" onClick={()=>read(item.id)}>查看记录</button></p>)}</details>}
     {detail&&<section className="pending-material-detail" ref={material} tabIndex={-1} aria-label={`待办 ${detail.id} 的原话与最后输出`}>
       <header><h4>待办 {detail.id} 的原话与最后输出</h4><button type="button" onClick={()=>{readSequence.current++;setDetail(null);}}>收起材料</button></header>

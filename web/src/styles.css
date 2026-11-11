@@ -7623,6 +7623,9 @@ label:has(input:focus-visible) {
 
 .pending-materials__notice { padding: 14px 16px; border-left: 3px solid #657a72; background: #f0f4f1; font-size: 13px; line-height: 1.8; }
 .pending-material { padding: 22px 0; border-top: 1px solid var(--line); }
+.pending-materials__waiting { margin-top: 18px; border-top: 1px solid var(--line); }
+.pending-materials__waiting > summary { padding: 16px 0; cursor: pointer; font-size: 14px; }
+.pending-materials__waiting > p { margin: 0 0 8px; color: var(--muted); font-size: 13px; line-height: 1.8; }
 .pending-material h4, .pending-material-detail h4 { margin: 0 0 12px; font-size: 16px; font-weight: 500; }
 .pending-material p, .pending-material-detail p { line-height: 1.8; overflow-wrap: anywhere; }
 .pending-material__meta { color: var(--muted); font-size: 12px; }

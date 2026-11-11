@@ -685,5 +685,10 @@
   "tests/test_pipeline_late_arrival.py",
   "tests/test_pipeline_observation.py",
   "tests/test_memory_lookup_keywords.py",
-  "tests/test_store_write_contention.py"
+  "tests/test_store_write_contention.py",
+  "web/tests/pending-materials.dom.mjs",
+  "web/tests/original-archive.dom.mjs",
+  "tests/test_pipeline_status_rejection.py",
+  "web/tests/pipeline-recovery.dom.mjs",
+  "tests/test_pipeline_pending.py"
 ]

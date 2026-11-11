@@ -9,5 +9,10 @@
 .original-archive button { padding:8px 12px; margin:4px 8px 4px 0; border:1px solid #aaa69b; border-radius:8px; background:transparent; color:inherit; cursor:pointer; font:inherit; }
 .original-archive button:disabled { opacity:.45; cursor:default; }
 .original-archive button:focus-visible,.original-archive input:focus-visible,.original-archive select:focus-visible { outline:2px solid #526d60; outline-offset:3px; }
-.original-archive__confirm { padding:16px; border:1px solid #a86a58; border-radius:10px; margin:16px 0; }
+.agent-guide.original-archive__confirm { width:min(460px,calc(100vw - 32px)); border-color:#a86a58; }
+.original-archive__confirm p { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.7; }
+.original-archive__confirm [role="alert"] { color:#9b504c; }
+.original-archive__confirm-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; margin-top:20px; }
+.original-archive__confirm-actions button { margin:0; min-height:44px; }
+.original-archive__confirm-actions button.is-danger { border-color:#a86a58; color:#8d4a3d; }
 .original-archive__reading { display:grid; gap:10px; margin:16px 0; }

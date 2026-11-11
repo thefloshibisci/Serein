@@ -76,3 +76,33 @@ test('a running task still permits material inspection while preventing competin
   for(const label of ['从失败步骤继续','重新切分，保留归线','按更小材料重新整理','跳过本批，保留原话'])assert.equal(button(label).disabled,true);
   await click('查看原话与最后输出');assert.equal(requests.length,1);
 });
+
+test('parked short chats are listed apart and never counted as work to do',async()=>{
+  const parked={...item,id:18,batch_id:'parked',waiting_for_continuation:true,plan_compatible:true,reason:'Synthetic park'};
+  if(root)await act(async()=>root.unmount());requests.length=0;
+  await act(async()=>{root=mount({status:'idle',pending_materials:[parked]});});
+  assert.match(document.body.textContent,/暂无待处理材料/);assert(!document.body.textContent.includes('批材料待处理'));
+  const group=document.querySelector('.pending-materials__waiting');
+  assert.equal(group.querySelector('summary').textContent,'等后续的对话（1）');assert.equal(group.open,false);
+  assert.match(group.textContent,/不需要你处理/);assert.match(group.querySelector('h4').textContent,/待办 18 · 等后续的对话/);
+  assert.equal(button('从失败步骤继续'),undefined);assert(button('重新切分，保留归线'));
+  await act(async()=>{root.unmount();root=mount({status:'idle',pending_materials:[parked,item]});});
+  assert.match(document.body.textContent,/有 1 批材料待处理/);assert.equal(document.querySelectorAll('.pending-materials__waiting article').length,1);
+});
+
+test('a plan frozen by an older build offers only a rebuild, not a continue that must fail',async()=>{
+  if(root)await act(async()=>root.unmount());requests.length=0;
+  await act(async()=>{root=mount({status:'idle',pending_materials:[{...item,plan_compatible:false}]});});
+  assert.equal(button('从失败步骤继续'),undefined);assert.match(document.body.textContent,/更早的程序版本/);
+  await click('重新切分，保留归线');assert.deepEqual(requests[0].body,{pending_id:17,replan:true});
+});
+
+test('an unresolved review remains actionable alongside chats waiting for continuation',async()=>{
+  if(root)await act(async()=>root.unmount());
+  await act(async()=>{root=mount({status:'idle',pending_materials:[{...item,waiting_for_continuation:false},
+    {...item,id:18,waiting_for_continuation:true}]});});
+  assert.match(document.body.textContent,/有 1 批材料待处理/);
+  assert.equal(document.querySelector('.pending-materials > .pending-material').getAttribute('aria-label'),'待办 17');
+  assert(button('从失败步骤继续'));
+  assert.match(document.querySelector('.pending-materials__waiting').textContent,/不能安全写入的材料仍会保留在待办中/);
+});

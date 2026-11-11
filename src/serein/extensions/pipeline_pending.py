@@ -6,6 +6,12 @@ from uuid import uuid4
 
 from ..core.store import Store, Conflict, encode, now
 
+# Silence is not evidence of closure or lack of value. After this waiting
+# period, give proven round-gate deferrals one review under the normal
+# evidence rules, without requiring another exchange.
+ROUND_GATE_EXPIRY_DAYS=3
+_HOST_DEFERRALS=('candidate_overflow_deferrals','image_deferrals','missing_images',
+                 'curator_omission_deferrals','protected_deferrals','no_new_source_deferrals')
 
 def initialize(conn):
     conn.execute('''CREATE TABLE IF NOT EXISTS pipeline_pending_materials(
@@ -13,6 +19,10 @@ def initialize(conn):
         scope TEXT NOT NULL, status TEXT NOT NULL, kind TEXT NOT NULL,
         source_ids_json TEXT NOT NULL, reason TEXT NOT NULL, updated_at TEXT NOT NULL,
         resolved_event_ids_json TEXT NOT NULL DEFAULT '[]')''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS pipeline_pending_expiry_reviews(
+        pending_id INTEGER PRIMARY KEY REFERENCES pipeline_pending_materials(id) ON DELETE CASCADE,
+        batch_id TEXT NOT NULL, attempted_at TEXT NOT NULL, status TEXT NOT NULL,
+        error TEXT NOT NULL DEFAULT '')''')
 
 
 def retain_legacy_batches(conn):
@@ -96,8 +106,54 @@ def source_locator(messages):
                                'chars':len(longest.get('content','')),'preview':longest.get('content','')[:160]}}
 
 
+def waiting_for_continuation(conn,row,data):
+    """Prove that *all* remaining sources were deferred only by the round gate.
+
+    Old batches have no saved admission receipts. Replay their accepted frozen
+    Curator outputs locally; no models or mutations are involved. Missing or
+    unverifiable evidence remains actionable, as do host blocks and Writer
+    failures, even when the gate happened to be enabled for that batch.
+    """
+    from . import pipeline as p
+    from .pipeline_admission import apply_gate
+    if (row['status']!='open' or row['kind']!='writing' or row['batch_status']!='done'
+            or data.get('round_gate_expired')):return False
+    review=conn.execute('SELECT 1 FROM pipeline_pending_expiry_reviews WHERE pending_id=? AND batch_id=?',
+                        (row['id'],row['batch_id'])).fetchone()
+    if review:return False
+    ids=set(json.loads(row['source_ids_json']))
+    if not ids:return False
+    result=json.loads(row['result_json'] or '{}')
+    if any(result.get(key) for key in _HOST_DEFERRALS):return False
+    deferred=set()
+    try:
+        for index,frozen in enumerate(data.get('components',[])):
+            if not ids.intersection(m['id'] for m in frozen['messages']):continue
+            job=conn.execute('''SELECT request_json,output_json FROM pipeline_jobs
+                WHERE batch_id=? AND role IN (?,?) ORDER BY length(role) DESC LIMIT 1''',
+                (row['batch_id'],f'event_curator:{index}',f'event_curator:{index}:context')).fetchone()
+            if not job or not job['output_json']:return False
+            request=json.loads(job['request_json']);output=json.loads(job['output_json'])
+            component=adopted_component(request['component'],output)
+            if not component.get('writer_round_gate'):return False
+            plan=p.latest.normalize_event_curator_output(p.decision(output),component)
+            if ids.intersection(plan['defer_source_message_ids']):return False
+            bases={base for event in plan['events'] for base in event['base_event_ids']}
+            if target_dependencies(conn,row['batch_id'],bases,component.get('adopted_pending_ids',[])):return False
+            gated=apply_gate(plan,component)
+            gate_ids=set(gated['defer_source_message_ids'])-set(plan['defer_source_message_ids'])
+            # A different Event may need the same bridge and have insufficient
+            # Writer evidence. Only gate-deferred ownership is classified here.
+            if any(ids.intersection(event['source_message_ids']) for event in gated['events']):return False
+            deferred.update(gate_ids)
+    except (KeyError,TypeError,ValueError):return False
+    return ids.issubset(deferred)
+
+
 def entries(conn, *, limit=100):
-    rows=conn.execute('''SELECT pm.*,b.input_json,b.status AS batch_status FROM pipeline_pending_materials pm
+    from . import pipeline as p
+    compatible_revisions={p.runtime_revision(),*p.EXECUTION_COMPATIBLE_REVISIONS}
+    rows=conn.execute('''SELECT pm.*,b.input_json,b.result_json,b.status AS batch_status FROM pipeline_pending_materials pm
         JOIN pipeline_batches b ON b.id=pm.batch_id ORDER BY CASE WHEN pm.status IN ('open','running') THEN 0 ELSE 1 END,pm.id DESC LIMIT ?''',(limit,)).fetchall()
     result=[]
     for row in rows:
@@ -108,6 +164,8 @@ def entries(conn, *, limit=100):
         result.append({key:row[key] for key in ('id','batch_id','scope','status','kind','reason','updated_at')} |
             {'source_ids':ids,'originals':len(ids),'original_chars':sum(len(m['content']) for m in source),
              'locator':source_locator(source),'batch_status':row['batch_status'],
+             'plan_compatible':data.get('contract')==p.CONTRACT and data.get('runtime_revision') in compatible_revisions,
+             'waiting_for_continuation':waiting_for_continuation(conn,row,data),
              'can_skip':row['batch_status'] in ('pending','paused_failure','retry_wait','routing_only','needs_repair','waiting_materials'),
              'summary':'；'.join(str(c.get('subject',''))+': '+str(c.get('throughline','')) for c in cards)[:240],
              'last_attempt':dict(attempt) if attempt else None,
@@ -238,9 +296,35 @@ def finish_adoptions(conn,plans,processed,event_ids):
                          (encode(event_ids),now(),pending_id))
 
 
-def resume(database,pending_id,*,replan=False):
+def _resumable(conn,pending_id,replan):
+    """Refusals that need no write; shared by the HTTP precheck and resume."""
+    from . import pipeline as p
+    from .pipeline_recovery import _message_key
+    row=conn.execute("SELECT pm.*,b.input_json,b.status AS batch_status,b.rowid AS queue_order,b.result_json AS previous_result FROM pipeline_pending_materials pm JOIN pipeline_batches b ON b.id=pm.batch_id WHERE pm.id=? AND pm.status='open'",(pending_id,)).fetchone()
+    if row is None:raise Conflict('待办已被领取或完成，请刷新')
+    data=json.loads(row['input_json']);ids=set(json.loads(row['source_ids_json']))
+    if not p.runtime_compatible(data) and not replan:raise Conflict('版本已变化，请选择重新切分，不复用旧执行计划')
+    if not ids or not ids.issubset(m['id'] for m in data.get('routing_messages',[])):
+        raise Conflict('待处理原话不在完整冻结快照中')
+    for m in data.get('routing_messages',[]):
+        if m['id'] not in ids:continue
+        raw=conn.execute('SELECT * FROM raw_events WHERE id=?',(m['id'],)).fetchone()
+        if raw is None or _message_key(p.message(raw))!=_message_key(m):raise Conflict('待处理原话已变化')
+        if conn.execute('SELECT 1 FROM raw_processing WHERE raw_id=?',(m['id'],)).fetchone():raise Conflict('待处理原话已结算，不能重复写作')
+    return row,data,ids
+
+
+def check_resume(database,pending_id,*,replan=False):
+    """Refuse an impossible request before it can mark the whole pipeline failed."""
     from . import pipeline as p
     p.initialize(database)
+    with Store(database,read_only=True) as store:_resumable(store.conn,pending_id,replan)
+
+
+def resume(database,pending_id,*,replan=False,expire_round_gate=False):
+    from . import pipeline as p
+    p.initialize(database)
+    replan=replan or expire_round_gate
     if replan:
         with Store(database,read_only=True) as store:
             broken=store.conn.execute("""SELECT pm.batch_id FROM pipeline_pending_materials pm
@@ -253,16 +337,7 @@ def resume(database,pending_id,*,replan=False):
             from .pipeline_recovery import _rebuild
             return {**_rebuild(database,broken['batch_id'],resume_pending_id=pending_id),'status':'resumed'}
     with Store(database) as store,store.transaction(immediate=True):
-        row=store.conn.execute("SELECT pm.*,b.input_json,b.status AS batch_status,b.rowid AS queue_order,b.result_json AS previous_result FROM pipeline_pending_materials pm JOIN pipeline_batches b ON b.id=pm.batch_id WHERE pm.id=? AND pm.status='open'",(pending_id,)).fetchone()
-        if row is None:raise Conflict('待办已被领取或完成，请刷新')
-        data=json.loads(row['input_json']);ids=set(json.loads(row['source_ids_json']))
-        if not p.runtime_compatible(data) and not replan:raise Conflict('版本已变化，请选择重新切分，不复用旧执行计划')
-        from .pipeline_recovery import _message_key
-        for m in data.get('routing_messages',[]):
-            if m['id'] not in ids:continue
-            raw=store.conn.execute('SELECT * FROM raw_events WHERE id=?',(m['id'],)).fetchone()
-            if raw is None or _message_key(p.message(raw))!=_message_key(m):raise Conflict('待处理原话已变化')
-            if store.conn.execute('SELECT 1 FROM raw_processing WHERE raw_id=?',(m['id'],)).fetchone():raise Conflict('待处理原话已结算，不能重复写作')
+        row,data,ids=_resumable(store.conn,pending_id,replan)
         batch_id=row['batch_id']
         data['resume_pending_id']=pending_id
         if row['batch_status']=='done' or replan:
@@ -274,6 +349,11 @@ def resume(database,pending_id,*,replan=False):
             fresh.setdefault('parked',[])
             if replan:
                 fresh.update(contract=p.CONTRACT,runtime_revision=p.runtime_revision(),input_policy=p.read_settings(database)['pipeline'])
+            if expire_round_gate:
+                # Waiting alone does not prove closure. Curator and Writer
+                # still judge every retained source under the evidence rules.
+                fresh['input_policy']={**fresh['input_policy'],'round_gate_enabled':False}
+                fresh['round_gate_expired']=True
             fresh.pop('components',None)
             if fresh.get('routing_result'):fresh['components']=p.components(database,fresh,fresh['routing_result'])
             store.conn.execute("INSERT INTO pipeline_batches(id,scope,input_json,status) VALUES (?,?,?,'pending')",(new_id,row['scope'],encode(fresh)))
@@ -305,6 +385,66 @@ def resume(database,pending_id,*,replan=False):
         store.conn.execute('DELETE FROM pipeline_job_failures WHERE job_id IN (SELECT id FROM pipeline_jobs WHERE batch_id=? AND output_json IS NULL)',(batch_id,))
         store.conn.execute("UPDATE pipeline_pending_materials SET status='running',updated_at=? WHERE id=?",(now(),pending_id))
         return {'status':'resumed','batch_id':batch_id}
+
+
+def settle_stale(database,*,clock=None):
+    """Review one old, proven round-gate deferral without discarding material.
+
+    A durable attempt receipt prevents the same failed preflight from running
+    every scheduler tick. Successful reviews use normal stage retry budgets;
+    any remaining evidence failure stays open for continuation or repair.
+    """
+    from datetime import datetime,timedelta,timezone
+    from . import pipeline as p
+    p.initialize(database)
+    days=max(ROUND_GATE_EXPIRY_DAYS,int(p.read_settings(database)['pipeline'].get('track_lookback_days',ROUND_GATE_EXPIRY_DAYS)))
+    current=(clock or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    cutoff=(current-timedelta(days=days)).isoformat()
+    result={'resumed':None,'blocked':None}
+    with Store(database,read_only=True) as store:
+        rows=[dict(row) for row in store.conn.execute("""SELECT pm.*,b.input_json,b.result_json,b.status AS batch_status
+            FROM pipeline_pending_materials pm JOIN pipeline_batches b ON b.id=pm.batch_id
+            WHERE pm.status='open' AND pm.kind='writing' AND b.status='done'
+              AND julianday(pm.updated_at)<=julianday(?)
+              AND NOT COALESCE(json_extract(b.input_json,'$.round_gate_expired'),0)
+              AND NOT EXISTS (SELECT 1 FROM pipeline_pending_expiry_reviews er
+                              WHERE er.pending_id=pm.id AND er.batch_id=pm.batch_id)
+            ORDER BY pm.id""",(cutoff,))]
+        busy={row[0] for row in store.conn.execute("SELECT scope FROM pipeline_batches WHERE status IN ('pending','routing_only','needs_repair','paused_failure','retry_wait')")}
+        busy.update(row[0] for row in store.conn.execute("SELECT scope FROM pipeline_pending_materials WHERE status='running' OR (status='open' AND kind='unrouted')"))
+        ready=[row for row in rows if row['scope'] not in busy
+               and waiting_for_continuation(store.conn,row,json.loads(row['input_json']))]
+    for row in ready:
+        # Claim locally before validation. A crash or rejected plan remains
+        # visible and cannot silently start another paid review on the next tick.
+        with Store(database) as store,store.transaction(immediate=True):
+            live=store.conn.execute("SELECT batch_id,status FROM pipeline_pending_materials WHERE id=?",(row['id'],)).fetchone()
+            if live is None or live['status']!='open' or live['batch_id']!=row['batch_id']:continue
+            existing=store.conn.execute('SELECT batch_id FROM pipeline_pending_expiry_reviews WHERE pending_id=?',(row['id'],)).fetchone()
+            if existing and existing['batch_id']==row['batch_id']:continue
+            store.conn.execute("INSERT OR REPLACE INTO pipeline_pending_expiry_reviews VALUES (?,?,?,'checking','')",
+                               (row['id'],row['batch_id'],current.isoformat()))
+        try:
+            data=json.loads(row['input_json'])
+            routed=data.get('routing_result')
+            if not routed:raise ValueError('缺少可核验的归线结果')
+            p.validate_routing_result(data,routed)
+            resume(database,row['id'],expire_round_gate=True)
+        except Exception as error:
+            reason='等待期后自动重审未启动：'+str(error)[:700]+'；原话仍保留，可查看记录或重新整理。'
+            with Store(database) as store,store.transaction(immediate=True):
+                store.conn.execute("UPDATE pipeline_pending_expiry_reviews SET status='blocked',error=? WHERE pending_id=?",
+                                   (str(error)[:1000],row['id']))
+                store.conn.execute("UPDATE pipeline_pending_materials SET reason=? WHERE id=? AND batch_id=? AND status='open'",
+                                   (reason,row['id'],row['batch_id']))
+            result['blocked']=row['id']
+        else:
+            with Store(database) as store:
+                store.conn.execute("UPDATE pipeline_pending_expiry_reviews SET status='resumed' WHERE pending_id=?",(row['id'],))
+            result['resumed']=row['id']
+        # At most one review (including a failed preflight) per scheduler pass.
+        break
+    return result
 
 
 def target_dependencies(conn,batch_id,bases,adopting=()):

@@ -63,6 +63,15 @@ function held(kind='routing_evidence'){
     blocked_scopes:[{batch_id:'batch-synthetic',scope:'synthetic',hold_status:'needs_repair',repair_kind:kind,reason:'synthetic hold'}]};
 }
 
+test('a rejected old-plan request is explained without showing a pipeline failure',async()=>{
+  await render({status:'idle',stage:'idle',last_request_rejection:'版本已变化，请选择重新切分，不复用旧执行计划',pending_materials:[]});
+  assert.match(document.body.textContent,/上次恢复请求未执行：旧计划版本不兼容，可在待处理材料中重新整理/);
+  assert(!document.body.textContent.includes('当前批次需要处理下方的失败原因'));
+  assert.equal(document.querySelectorAll('.import-error').length,0);
+  assert.equal(button('继续整理').disabled,false);
+  assert(!requests.some(item=>item.body));
+});
+
 test('runtime contract explains the hold and requires explicit rebuild confirmation',async()=>{
   await render(held('runtime_contract'));
   assert.match(document.body.textContent,/重新校验不会迁移旧计划/);

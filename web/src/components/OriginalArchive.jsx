@@ -23,6 +23,16 @@ export function OriginalArchive() {
   const [loading,setLoading]=useState(true);
   const [notice,setNotice]=useState('');
   const sequence=useRef(0);
+  const confirmDialog=useRef(null);
+  const deleteTrigger=useRef(null);
+  // The confirmation is a modal: a section appended below a long list was
+  // off screen, so pressing "删除…" looked like it did nothing.
+  useEffect(()=>{
+    const node=confirmDialog.current;
+    if(!node)return;
+    if(preview&&!node.open)node.showModal();
+    else if(!preview&&node.open)node.close();
+  },[preview]);
   useEffect(()=>{
     const controller=new AbortController();
     sequence.current+=1; setLoading(true);setError('');setReading(null);setPreview(null);setPage(null);
@@ -38,7 +48,8 @@ export function OriginalArchive() {
     } catch(e){if(current===sequence.current)setError(e.message);}
     finally{setBusy(false);}
   }
-  async function prepareDelete(id) {
+  async function prepareDelete(id,trigger) {
+    deleteTrigger.current=trigger;
     setBusy(true);setError('');
     try {setPreview(await request('delete-preview',{ids:[id]}));}
     catch(e){setError(e.message);}finally{setBusy(false);}
@@ -59,14 +70,14 @@ export function OriginalArchive() {
       <label>日期（UTC+8）<input type="date" value={date} onChange={e=>setDate(e.target.value)} /></label>
       <button type="submit" disabled={busy}>搜索</button>
     </form>
-    {error&&<p role="alert">{error}</p>}{notice&&<p role="status">{notice}</p>}
+    {error&&!preview&&<p role="alert">{error}</p>}{notice&&<p role="status">{notice}</p>}
     {loading?<p role="status">正在读取原话…</p>:page?.items.length===0?<p>没有符合条件的原话。</p>:null}
     <div className="original-archive__list">{page?.items.map(item=><article key={item.id}>
       <header><strong>{item.metadata.role==='user'?'用户':'助手'}</strong><small>{item.id} · {item.metadata.created_at}</small></header>
       <small>来源：{item.metadata.source} · 会话：{item.metadata.session_id||item.metadata.conversation_id||'未知'}</small>
       <p>{item.preview}{item.truncated?'…':''}</p>
       <button type="button" disabled={busy} onClick={()=>read(item.id)}>全文与前后文</button>
-      <button type="button" disabled={busy} onClick={()=>prepareDelete(item.id)}>删除…</button>
+      <button type="button" disabled={busy} onClick={event=>prepareDelete(item.id,event.currentTarget)}>删除…</button>
     </article>)}</div>
     {page?.next_before_id&&<button type="button" disabled={busy||loading} onClick={()=>setFilters(f=>({...f,before_id:page.next_before_id}))}>更早的原话</button>}
     {reading&&<section aria-label="原话全文" className="original-archive__reading"><header><h4>全文与同一会话前后文</h4><button type="button" onClick={()=>setReading(null)}>收起</button></header>
@@ -74,12 +85,19 @@ export function OriginalArchive() {
         <p>{item.content}</p></article>)}
       {!!reading.missing_ids?.length&&<p>部分原话已不存在，请刷新列表。</p>}
     </section>}
-    {preview&&<section className="original-archive__confirm" aria-label="删除原话确认">
-      <h4>删除 {preview.items.map(i=>i.id).join('、')}？</h4><p>{preview.scope}</p>
-      {preview.items.flatMap(i=>i.blockers).map((reason,index)=><p key={index} role="alert">{reason}</p>)}
-      <button type="button" disabled={busy} onClick={()=>setPreview(null)}>取消</button>
-      <button type="button" disabled={busy||!preview.can_delete} onClick={remove}>{busy?'处理中…':'确认删除原话'}</button>
-    </section>}
+    <dialog ref={confirmDialog} className="agent-guide original-archive__confirm" aria-labelledby="original-archive-delete-title" aria-describedby="original-archive-delete-scope"
+      onClose={()=>{setPreview(null);if(deleteTrigger.current?.isConnected)deleteTrigger.current.focus({preventScroll:true});}}
+      onCancel={event=>{if(busy)event.preventDefault();}}>
+      {preview&&<>
+        <h3 id="original-archive-delete-title">删除 {preview.items.map(i=>i.id).join('、')}？</h3><p id="original-archive-delete-scope">{preview.scope}</p>
+        {preview.items.flatMap(i=>i.blockers).map((reason,index)=><p key={index} role="alert">{reason}</p>)}
+        {error&&<p role="alert">{error}</p>}
+        <div className="original-archive__confirm-actions">
+          <button type="button" autoFocus disabled={busy} onClick={()=>setPreview(null)}>取消</button>
+          <button type="button" className="is-danger" disabled={busy||!preview.can_delete} onClick={remove}>{busy?'处理中…':'确认删除原话'}</button>
+        </div>
+      </>}
+    </dialog>
     <p>无需把聊天接到网关：启用「功能 → 原话工具」后，AI 可调用 source_message_upload 保存实际可见的原话。工具不会保证每轮自动上传；未知原始时间会明确标注。</p>
   </section>;
 }

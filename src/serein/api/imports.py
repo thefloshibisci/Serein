@@ -68,6 +68,12 @@ def routes(settings,auth):
     @router.get('/v1/pipeline/status')
     def pipeline_status():
         value=status(settings.database,'pipeline')
+        # Older versions recorded this preflight refusal as a failed run. Keep
+        # its durable audit record, but do not present it as a pipeline outage.
+        if (value['status']=='failed' and value.get('stage')=='starting'
+                and not value.get('job_id')
+                and value.get('error')=='版本已变化，请选择重新切分，不复用旧执行计划'):
+            value.update(last_request_rejection=value['error'],status='idle',stage='idle',error='',result=None)
         from ..extensions.pipeline_pending import initialize as initialize_pending,retain_legacy_batches
         with Store(settings.database) as store,store.transaction(immediate=True):
             initialize_pending(store.conn)
@@ -132,10 +138,13 @@ def routes(settings,auth):
 
     @router.post('/v1/pipeline/resume-pending')
     async def resume_pending(body:dict):
-        from ..extensions.pipeline_pending import resume
+        from ..extensions.pipeline_pending import resume,check_resume
         from ..work_tasks import execute
         pending_id=body.get('pending_id');replan=body.get('replan',False)
         if type(pending_id) is not int or type(replan) is not bool:raise ValueError('待办编号与重新切分选项无效')
+        # A request that cannot start is answered here. It is not a run, so
+        # it must not replace the pipeline status with a failure.
+        check_resume(settings.database,pending_id,replan=replan)
         async def operation():return resume(settings.database,pending_id,replan=replan)
         return await execute(settings.database,'pipeline',operation)
 
