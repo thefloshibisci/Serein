@@ -1409,12 +1409,14 @@ class FactEventStore:
         if safe_date:
             clauses.append("local_date<=? AND local_end_date>=?")
             params.extend([safe_date, safe_date])
-        if safe_query:
+        # Each whitespace-separated keyword must occur in either field.
+        # Keep the same normalized literal substring match for single words.
+        for keyword in safe_query.split():
             clauses.append(
                 "(INSTR(normalized_search_text(title), normalized_search_text(?)) > 0 "
                 "OR INSTR(normalized_search_text(body), normalized_search_text(?)) > 0)"
             )
-            params.extend([safe_query, safe_query])
+            params.extend([keyword, keyword])
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with closing(self._connect()) as conn:
             count = int(conn.execute(f"SELECT COUNT(*) FROM fact_events{where}", params).fetchone()[0])

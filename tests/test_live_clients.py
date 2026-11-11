@@ -152,3 +152,82 @@ def test_scene_edit_evidence_and_handoff_picker_use_current_canonical(live):
     assert deleted.status_code==200 and event in deleted.json()['item_ids']
     assert client.get('/api/fact-events?type=event&status=all').json()['items']==[]
     assert client.get('/v1/memories/'+event).json()['readable'] is False
+
+
+def keyword_event_records(live):
+    _, client = live
+    records = {
+        'split': ('甲乙同学的花园行程', '丙丁同学按约来访，编号 ＡＢＣ café Straße。'),
+        'body': ('会面记录', '甲乙同学后来与丙丁同学一起看书。'),
+        'first': ('甲乙同学的便签', '独自记录天气。'),
+        'second': ('丙丁同学的行程', '独自去了展厅。'),
+        'literal': ('符号记录', "比例 100%_done 和字面 O'Reilly。"),
+    }
+    keys = {}
+    for name, (title, body) in records.items():
+        candidate = item(body=body, origin='assistant_bridge:keyword_' + name)
+        candidate['title'] = title
+        candidate['source_refs'][0]['message_id'] = 'keyword_' + name
+        candidate['source_refs'][0]['content'] = body
+        response = client.post('/api/fact-events/batch', json={'items': [candidate]})
+        assert response.status_code == 200, response.text
+        assert response.json()['inserted'] == 1, response.text
+        keys[name] = response.json()['items'][0]['item_id']
+    return client, keys
+
+
+@pytest.mark.parametrize('query,expected', [
+    ('甲乙 丙丁', {'split', 'body'}),
+    ('丙丁 甲乙', {'split', 'body'}),
+    ('  甲乙  \t 丙丁 \n', {'split', 'body'}),
+    ('甲乙\u3000\u00a0丙丁', {'split', 'body'}),
+    ('甲乙 丙丁 甲乙', {'split', 'body'}),
+    ('甲乙 ＡＢＣ', {'split'}),
+    ('ａｂｃ\u3000ＣＡＦÉ', {'split'}),
+    ('甲乙 不存在', set()),
+])
+def test_event_list_matches_all_keywords_across_title_and_body(live, query, expected):
+    client, keys = keyword_event_records(live)
+    response = client.get('/api/fact-events', params={'type': 'event', 'query': query})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result['count'] == len(expected)
+    assert {row['item_id'] for row in result['items']} == {keys[name] for name in expected}
+
+
+@pytest.mark.parametrize('query,expected', [
+    ('甲乙', {'split', 'body', 'first'}),
+    ('丙丁', {'split', 'body', 'second'}),
+    ('甲', {'split', 'body', 'first'}),
+    ('  ａｂｃ  ', {'split'}),
+    ('STRASSE', {'split'}),
+    ('100%', {'literal'}),
+    ('_', {'literal'}),
+    ("O'Reilly", {'literal'}),
+    ("x' OR 1=1 --", set()),
+    ('', {'split', 'body', 'first', 'second', 'literal'}),
+    (' \t\n\u3000 ', {'split', 'body', 'first', 'second', 'literal'}),
+])
+def test_event_list_preserves_normalized_singleword_and_literal_matching(live, query, expected):
+    client, keys = keyword_event_records(live)
+    response = client.get('/api/fact-events', params={'type': 'event', 'query': query})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result['count'] == len(expected)
+    assert {row['item_id'] for row in result['items']} == {keys[name] for name in expected}
+
+
+def test_event_keyword_list_count_and_pages_use_identical_filters(live):
+    client, keys = keyword_event_records(live)
+    params = {'type': 'event', 'query': '甲乙\t丙丁'}
+    whole = client.get('/api/fact-events', params=params).json()
+    assert whole['count'] == 2
+    ordered = [row['item_id'] for row in whole['items']]
+    assert set(ordered) == {keys['split'], keys['body']}
+    for offset in (0, 1, 2):
+        response = client.get('/api/fact-events', params={**params, 'limit': 1, 'offset': offset})
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result['count'] == 2
+        assert result['limit'] == 1 and result['offset'] == offset
+        assert [row['item_id'] for row in result['items']] == ordered[offset:offset + 1]
