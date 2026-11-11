@@ -55,6 +55,47 @@ def test_daytime_pass_releases_lease_between_independent_scopes(settings, monkey
     assert [request['messages'][0]['original_session_id'] for request in calls]==['one','two']
 
 
+def test_continuous_arrivals_do_not_starve_older_uncached_scope(settings,monkeypatch):
+    Clock.value=Clock.value.replace(hour=2,minute=30)
+    for session in ('one','two'):
+        seed(settings,session=session,start=Clock.value-timedelta(hours=2),count=5)
+    calls=api(settings,monkeypatch,lambda request:output_for(request['role'],request))
+    asyncio.run(p.scheduled_advance(settings.database))
+    for index in range(3):
+        seed(settings,session='one',start=Clock.value-timedelta(hours=1)+timedelta(minutes=index*5),count=1)
+        asyncio.run(p.scheduled_advance(settings.database))
+    assert [request['messages'][0]['original_session_id'] for request in calls]==['one','two','one','one']
+    assert [[message['id'] for message in request['messages']] for request in calls]==[
+        list(range(1,11)),list(range(11,21)),list(range(21,25)),[25,26]]
+    assert all([message['role'] for message in request['messages']]==
+               ['user','assistant']*(len(request['messages'])//2) for request in calls)
+    with Store(settings.database,read_only=True) as store:
+        assert store.conn.execute('SELECT count(*) FROM pipeline_routes').fetchone()[0]==26
+        assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==26
+        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==0
+
+
+def test_late_reply_cached_prefix_does_not_jump_older_uncached_scope(settings,monkeypatch):
+    from serein.compat.raw_archive import raw_archive
+    Clock.value=Clock.value.replace(hour=2,minute=30)
+    for session in ('one','two'):
+        seed(settings,session=session,start=Clock.value-timedelta(hours=2),count=5)
+    calls=api(settings,monkeypatch,lambda request:output_for(request['role'],request))
+    asyncio.run(p.scheduled_advance(settings.database))
+    for index in range(3):
+        raw_archive(settings).ingest([{'source_event_id':f'late-{index}','session_id':'one',
+            'role':'assistant','text':f'Later book club answer {index}',
+            'created_at':(Clock.value-timedelta(hours=1)+timedelta(minutes=index)).isoformat()}],source='test')
+        asyncio.run(p.scheduled_advance(settings.database))
+    assert [request['messages'][0]['original_session_id'] for request in calls]==['one','two','one','one']
+    assert [[message['id'] for message in request['messages']] for request in calls]==[
+        list(range(1,11)),list(range(11,21)),[9,10,21,22],[9,10,21,22,23]]
+    with Store(settings.database,read_only=True) as store:
+        assert store.conn.execute('SELECT count(*) FROM pipeline_routes').fetchone()[0]==23
+        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==0
+        assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==23
+
+
 def freeze_as_deployed_predecessor(settings,batch_id,revision):
     with Store(settings.database) as store:
         row=store.conn.execute('SELECT input_json FROM pipeline_batches WHERE id=?',(batch_id,)).fetchone()

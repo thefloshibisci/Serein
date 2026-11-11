@@ -2177,8 +2177,8 @@ async def _flush_routes_frozen(database,*,batch_limit=None):
             if state=='routing_only':mark_needs_repair(database,batch,error)
     sessions={}
     for row in rows:sessions.setdefault((row['source'],row['original_session_id']),[]).append(row)
+    candidates=[]
     for (source,session),messages in sessions.items():
-        if batch_limit is not None and attempted>=batch_limit:return
         scope=digest(encode([source,session]))[:20]
         if scope in held:continue
         units=flushable_dialogue_units(messages,now=current)
@@ -2187,6 +2187,13 @@ async def _flush_routes_frozen(database,*,batch_limit=None):
         # never permission to reroute a suffix using a made-up envelope boundary.
         units=[u for u in units if not all(m['id'] in cached for m in u)]
         if not units:continue
+        first_uncached=next(m['id'] for unit in units for m in unit if m['id'] not in cached)
+        candidates.append((first_uncached,source,session,scope,units))
+    # Cached but unsettled originals must not give a busy scope permanent
+    # priority over another scope's older waiting work. Keep whole units and
+    # source order within each scope; only order independent ready scopes here.
+    for _,source,session,scope,units in sorted(candidates,key=lambda item:item[0]):
+        if batch_limit is not None and attempted>=batch_limit:return
         messages=[row for unit in units for row in unit]
         if batch_limit is not None:
             # One transport frame per scheduled pass leaves a lease boundary
