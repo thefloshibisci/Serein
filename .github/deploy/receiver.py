@@ -152,37 +152,53 @@ def download_artifact(dest, item, locations=None):
 def snapshot(source, dest):
     """Consistent individual SQLite copies, isolated rehearsal only."""
     excluded = archive_exclusions(source)
+    databases = []
+    sidecars = ('-wal', '-shm', '-journal')
     def is_archived(path):
         return any(path.relative_to(source).is_relative_to(part) for part in excluded)
     def ignore(folder, names):
-        return [name for name in names if is_archived(Path(folder) / name)]
+        omitted = {name for name in names if is_archived(Path(folder) / name)}
+        sqlite_names = set()
+        # Identify a main file before looking at its longer sidecar names.
+        # SQLite can remove WAL/SHM between copytree's enumeration and copy.
+        # Skip only exact companions of a verified SQLite file, never every
+        # file that happens to end with one of these suffixes.
+        for name in sorted(names, key=len):
+            if name in omitted or any(name == base + suffix for base in sqlite_names for suffix in sidecars):
+                continue
+            path = Path(folder) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            with path.open('rb') as stream:
+                if stream.read(16) == b'SQLite format 3\0':
+                    sqlite_names.add(name)
+                    databases.append(path)
+        omitted.update(sqlite_names)
+        omitted.update(name for name in names
+                       if any(name == base + suffix for base in sqlite_names for suffix in sidecars))
+        return omitted
     shutil.copytree(source, dest, symlinks=True, ignore=ignore)
-    for path in source.rglob('*'):
-        if is_archived(path) or not path.is_file() or path.is_symlink():
-            continue
-        with path.open('rb') as f:
-            is_db = f.read(16) == b'SQLite format 3\0'
-        if not is_db:
-            continue
+    for path in databases:
         target = dest / path.relative_to(source)
-        target.unlink()
         src = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=10)
-        dst = sqlite3.connect(target)
+        dst = None
         deadline = time.monotonic() + 60
         def progress(*_):
             if time.monotonic() > deadline:
                 raise TimeoutError('sqlite_backup_timeout')
         try:
+            dst = sqlite3.connect(target)
             src.backup(dst, pages=256, progress=progress)
+            # Make the destination self-contained before closing it. The
+            # source may use WAL; never change its mode or delete its files.
+            if dst.execute('PRAGMA journal_mode=DELETE').fetchone() != ('delete',):
+                raise ValueError('sqlite_copy_not_self_contained')
             if dst.execute('PRAGMA quick_check').fetchall() != [('ok',)]:
                 raise ValueError('sqlite_copy_invalid')
         finally:
-            dst.close()
+            if dst is not None:
+                dst.close()
             src.close()
-        for suffix in ('-wal', '-shm', '-journal'):
-            sidecar = Path(str(target) + suffix)
-            if sidecar.exists():
-                sidecar.unlink()
         shutil.copystat(path, target)
     for d, dirs, files in os.walk(dest):
         original = source / Path(d).relative_to(dest)
@@ -346,23 +362,30 @@ def rehearsal_document(doc, images, job):
 def rehearsal(doc, images, job):
     writable_sources(doc)
     test = rehearsal_document(doc, images, job)
-    for name in SERVICES:
-        for old, new in zip(doc['services'][name]['volumes'], test['services'][name]['volumes']):
-            if not old.get('read_only'):
-                snapshot(Path(old['source']), Path(new['source']))
     path = job / 'test-compose.json'
-    path.write_text(json.dumps(test))
+    starting = False
     try:
+        for name in SERVICES:
+            for old, new in zip(doc['services'][name]['volumes'], test['services'][name]['volumes']):
+                if not old.get('read_only'):
+                    snapshot(Path(old['source']), Path(new['source']))
+        path.write_text(json.dumps(test))
+        starting = True
         call(compose(path, 'up', '-d', '--pull', 'never'))
         wait_ready(path)
     finally:
-        call(compose(path, 'down', '--timeout', '60'), timeout=150)
+        if starting:
+            # A failed down must preserve copies potentially still mounted by
+            # candidate containers. Pre-start failures have no such users.
+            call(compose(path, 'down', '--timeout', '60'), timeout=150)
         cleanup_rehearsal(job)
 
 
 def cleanup_rehearsal(job):
-    # Called only after candidate containers are removed. Preserve original
+    # Called before candidates start or after their containers are removed. Preserve original
     # volumes and frozen deployment backups; discard these generated copies.
+    if job.is_symlink() or not job.is_dir():
+        raise ValueError('unexpected_rehearsal_job')
     for name in SERVICES:
         for folder in job.glob('test-data-' + name + '-*'):
             if folder.is_symlink() or folder.resolve().parent != job.resolve():

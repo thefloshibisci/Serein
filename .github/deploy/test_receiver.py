@@ -5,6 +5,8 @@ import io
 import hashlib
 import json
 import queue
+import shutil
+import sqlite3
 from pathlib import Path
 import sys
 import tarfile
@@ -213,6 +215,163 @@ def test_only_reviewed_archives_are_excluded_and_originals_survive(tmp_path,monk
     assert not dest.exists() and live.exists() and archive.exists()
     policy.write_text(json.dumps({str(source.resolve()):['runtime/serein.db']}))
     with pytest.raises(ValueError,match='historical_archive'):r.archive_exclusions(source)
+
+
+def snapshot_sources(tmp_path,monkeypatch):
+    source=tmp_path/'source';source.mkdir()
+    dest=tmp_path/'copy'
+    monkeypatch.setattr(r,'ARCHIVE_POLICY',tmp_path/'no-policy.json')
+    monkeypatch.setattr(r.os,'chown',lambda *_a,**_k:None,raising=False)
+    return source,dest
+
+
+def test_snapshot_ignores_only_verified_sqlite_sidecars_that_disappear(tmp_path,monkeypatch):
+    source,dest=snapshot_sources(tmp_path,monkeypatch)
+    database=source/'memory.db'
+    with sqlite3.connect(database) as conn:
+        conn.execute('CREATE TABLE evidence(id INTEGER PRIMARY KEY, value TEXT)')
+        conn.execute('INSERT INTO evidence VALUES (1,?)',('synthetic original',))
+    originals=database.read_bytes()
+    companions=[Path(str(database)+suffix) for suffix in ('-wal','-shm','-journal')]
+    for path in companions:path.write_bytes(b'synthetic disappearing sidecar')
+    retained={'profile.json':b'{"keep":true}', 'not-a-database-wal':b'ordinary wal-named file',
+              'not-a-database-shm':b'ordinary shm-named file', 'not-a-database-journal':b'ordinary journal-named file'}
+    for name,content in retained.items():(source/name).write_bytes(content)
+    native_copytree=r.shutil.copytree;vanished=[]
+    def race(src,dst,**kwargs):
+        original_ignore=kwargs['ignore']
+        def after_enumeration(folder,names):
+            if Path(folder)==source:
+                for path in companions:
+                    assert path.name in names
+                    path.unlink();vanished.append(path.name)
+            return original_ignore(folder,names)
+        return native_copytree(src,dst,**dict(kwargs,ignore=after_enumeration))
+    monkeypatch.setattr(r.shutil,'copytree',race)
+    r.snapshot(source,dest)
+    assert len(vanished)==3 and database.read_bytes()==originals
+    with sqlite3.connect(dest/'memory.db') as conn:
+        assert conn.execute('SELECT * FROM evidence').fetchall()==[(1,'synthetic original')]
+        assert conn.execute('PRAGMA quick_check').fetchall()==[('ok',)]
+    assert all(not Path(str(dest/'memory.db')+suffix).exists() for suffix in ('-wal','-shm','-journal'))
+    assert {name:(dest/name).read_bytes() for name in retained}==retained
+
+
+def test_snapshot_backups_include_committed_wal_content_without_touching_source(tmp_path,monkeypatch):
+    source,dest=snapshot_sources(tmp_path,monkeypatch)
+    database=source/'memory.db';conn=sqlite3.connect(database)
+    try:
+        assert conn.execute('PRAGMA journal_mode=WAL').fetchone()==('wal',)
+        conn.execute('PRAGMA wal_autocheckpoint=0')
+        conn.execute('CREATE TABLE evidence(id INTEGER PRIMARY KEY, value BLOB)');conn.commit()
+        conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        content=b'committed only in WAL'+bytes(range(256))*20
+        conn.execute('INSERT INTO evidence VALUES (1,?)',(content,));conn.commit()
+        wal=Path(str(database)+'-wal')
+        assert wal.stat().st_size>0
+        before={path.name:path.read_bytes() for path in (database,wal)}
+        r.snapshot(source,dest)
+        assert conn.execute('PRAGMA journal_mode').fetchone()==('wal',)
+        assert {path.name:path.read_bytes() for path in (database,wal)}==before
+        with sqlite3.connect(dest/'memory.db') as copied:
+            assert copied.execute('SELECT * FROM evidence').fetchall()==[(1,content)]
+            assert copied.execute('PRAGMA journal_mode').fetchone()==('delete',)
+            assert copied.execute('PRAGMA quick_check').fetchall()==[('ok',)]
+        assert all(not Path(str(dest/'memory.db')+suffix).exists() for suffix in ('-wal','-shm','-journal'))
+    finally:
+        conn.close()
+
+
+def test_snapshot_does_not_swallow_non_sqlite_copy_errors(tmp_path,monkeypatch):
+    source,dest=snapshot_sources(tmp_path,monkeypatch)
+    document=source/'original.txt';document.write_text('must not vanish silently')
+    native_copytree=r.shutil.copytree
+    def race(src,dst,**kwargs):
+        original_ignore=kwargs['ignore']
+        def after_enumeration(folder,names):
+            omitted=original_ignore(folder,names)
+            document.unlink()
+            return omitted
+        return native_copytree(src,dst,**dict(kwargs,ignore=after_enumeration))
+    monkeypatch.setattr(r.shutil,'copytree',race)
+    with pytest.raises(shutil.Error):r.snapshot(source,dest)
+
+
+def test_snapshot_refuses_existing_destination(tmp_path,monkeypatch):
+    source,dest=snapshot_sources(tmp_path,monkeypatch)
+    dest.mkdir();(dest/'keep.txt').write_text('existing copy')
+    with pytest.raises(FileExistsError):r.snapshot(source,dest)
+    assert (dest/'keep.txt').read_text()=='existing copy'
+
+
+def test_snapshot_rejects_failed_quick_check_and_closes_connections(tmp_path,monkeypatch):
+    source,dest=snapshot_sources(tmp_path,monkeypatch)
+    database=source/'memory.db'
+    with sqlite3.connect(database) as conn:conn.execute('CREATE TABLE originals(id INTEGER)')
+    original=database.read_bytes();closed=[];queries=[]
+    class Source:
+        def backup(self,target,**kwargs):target.path.write_bytes(b'synthetic rejected copy')
+        def close(self):closed.append('source')
+    class Target:
+        def __init__(self,path):self.path=path
+        def execute(self,query):queries.append(query);return self
+        def fetchone(self):return ('delete',)
+        def fetchall(self):return [('synthetic integrity failure',)]
+        def close(self):closed.append('target')
+    def connect(target,**kwargs):
+        return Source() if kwargs.get('uri') else Target(Path(target))
+    monkeypatch.setattr(r.sqlite3,'connect',connect)
+    with pytest.raises(ValueError,match='sqlite_copy_invalid'):r.snapshot(source,dest)
+    assert queries==['PRAGMA journal_mode=DELETE','PRAGMA quick_check']
+    assert closed==['target','source'] and database.read_bytes()==original
+
+
+def test_cleanup_rejects_symlink_job_without_touching_target(tmp_path,monkeypatch):
+    target=tmp_path/'real-job';target.mkdir()
+    data=target/'test-data-serein-memory-0';data.mkdir();(data/'keep').write_text('retained')
+    job=tmp_path/'linked-job'
+    try:job.symlink_to(target,target_is_directory=True)
+    except OSError:
+        native=Path.is_symlink
+        monkeypatch.setattr(Path,'is_symlink',lambda path:path==job or native(path))
+    with pytest.raises(ValueError,match='unexpected_rehearsal_job'):r.cleanup_rehearsal(job)
+    assert (data/'keep').read_text()=='retained'
+
+
+def test_rehearsal_snapshot_failure_cleans_only_current_job_copies(deployment,monkeypatch):
+    doc,images,job,path,gate=deployment;before=path.read_bytes();created=[]
+    protected=job/'data-before.tar.gz';protected.write_bytes(b'backup must survive')
+    unrelated=job.parent/'other-job'/'test-data-serein-memory-0';unrelated.mkdir(parents=True)
+    (unrelated/'keep.txt').write_text('other run')
+    for service in r.SERVICES:
+        source=Path(doc['services'][service]['volumes'][0]['source']);source.mkdir(parents=True)
+        (source/'keep.txt').write_text('production')
+    def fail_second(source,dest):
+        dest.mkdir();(dest/'partial').write_text('partial rehearsal copy');created.append(dest)
+        if len(created)==2:raise OSError('synthetic_snapshot_failure')
+    monkeypatch.setattr(r,'snapshot',fail_second)
+    monkeypatch.setattr(r,'call',lambda *_a,**_k:pytest.fail('pre-start failure must not call Docker'))
+    with pytest.raises(OSError,match='synthetic_snapshot_failure'):r.rehearsal(doc,images,job)
+    assert len(created)==2 and all(not dest.exists() for dest in created)
+    assert protected.read_bytes()==b'backup must survive' and (unrelated/'keep.txt').read_text()=='other run'
+    assert path.read_bytes()==before and not gate.exists()
+    assert all((Path(doc['services'][service]['volumes'][0]['source'])/'keep.txt').read_text()=='production' for service in r.SERVICES)
+
+
+@pytest.mark.parametrize('down_fails',[False,True])
+def test_rehearsal_failed_start_cleans_only_after_successful_down(deployment,monkeypatch,down_fails):
+    doc,images,job,_,_=deployment;calls=[]
+    monkeypatch.setattr(r,'snapshot',lambda source,dest:dest.mkdir())
+    def call(args,**kwargs):
+        calls.append(args)
+        if 'up' in args:raise RuntimeError('synthetic_up_failed')
+        if down_fails:raise RuntimeError('synthetic_down_failed')
+        return b''
+    monkeypatch.setattr(r,'call',call)
+    with pytest.raises(RuntimeError,match='synthetic_down_failed' if down_fails else 'synthetic_up_failed'):
+        r.rehearsal(doc,images,job)
+    assert ['up' if 'up' in args else 'down' for args in calls]==['up','down']
+    assert bool(list(job.glob('test-data-*')))==down_fails
 
 
 def test_backup_excludes_exact_reviewed_path_not_entire_runtime(deployment,monkeypatch,tmp_path):
