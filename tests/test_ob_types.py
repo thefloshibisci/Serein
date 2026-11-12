@@ -236,11 +236,14 @@ def test_import_undo_refuses_to_erase_new_edits(runtime, tmp_path):
 def test_mcp_and_http_entry_points_and_readonly(runtime):
     server = create_server(Application(runtime))
     names = {tool.name for tool in asyncio.run(server.list_tools())}
-    assert {'write_feel', 'edit_feel', 'read_feel', 'find_feelings'} <= names
+    assert not {'write_feel', 'edit_feel', 'read_feel', 'find_feelings', 'list_ob_archive', 'read_ob_archive'} & names
+    assert {'write_scene', 'edit_scene', 'read_memory', 'recall_memory', 'ob_archive'} <= names
     retired = {'create_plan', 'read_plan', 'list_plans', 'update_plan'}
     assert not retired & names
     from test_authored_mcp_parity import call
-    created = call(server, 'write_feel', content='I felt calm.', sources=refs())
+    saved = call(server, 'write_scene', content='I felt calm.', cues=[], feel_sources=refs())
+    import re
+    created = Feelings(runtime.database).read(re.search(r'\[scene_id:([^\]]+)\]', saved)[1])
     assert created['memory_role'] == 'feel'
     text = call(server, 'read_memory', identifier='feel:' + created['id'])
     assert 'type: feel' in text and 'trigger: event:event_rain' in text
@@ -258,7 +261,8 @@ def test_mcp_and_http_entry_points_and_readonly(runtime):
     assert after['plans'] == before['plans'] and after['plan_versions'] == before['plan_versions']
     readonly = create_server(Application(replace(runtime, writable=False)))
     names = {tool.name for tool in asyncio.run(readonly.list_tools())}
-    assert 'read_feel' in names and 'write_feel' not in names and 'update_plan' not in names
+    assert {'read_memory', 'recall_memory', 'ob_archive'} <= names
+    assert not {'read_feel', 'write_feel', 'update_plan', 'write_scene'} & names
 
 
 @pytest.mark.parametrize('mixed', [False, True])

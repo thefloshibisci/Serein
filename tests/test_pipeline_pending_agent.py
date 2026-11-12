@@ -32,25 +32,25 @@ def test_mcp_lists_reads_finishes_with_atomic_receipt_and_originals_intact(setti
 
     async def exercise():
         catalog = {tool.name: tool for tool in await server.list_tools()}
-        assert PENDING_TOOLS <= catalog.keys()
-        assert catalog['pipeline_pending_read'].annotations.readOnlyHint
-        assert catalog['pipeline_pending_finish'].annotations.idempotentHint
-        page = result_value(await server.call_tool('pipeline_pending_list', {}))
+        assert 'pipeline_pending' in catalog and not PENDING_TOOLS & catalog.keys()
+        assert not catalog['pipeline_pending'].annotations.readOnlyHint
+        assert not catalog['pipeline_pending'].annotations.idempotentHint
+        page = result_value(await server.call_tool('pipeline_pending', {'action': 'list', }))
         assert page['total'] == 1 and [row['id'] for row in page['items']] == [item['id']]
-        first = result_value(await server.call_tool('pipeline_pending_read', {'pending_id': item['id'], 'limit': 1}))
-        second = result_value(await server.call_tool('pipeline_pending_read', {'pending_id': item['id'], 'offset': first['next_offset']}))
+        first = result_value(await server.call_tool('pipeline_pending', {'action': 'read', 'pending_id': item['id'], 'limit': 1}))
+        second = result_value(await server.call_tool('pipeline_pending', {'action': 'read', 'pending_id': item['id'], 'offset': first['next_offset']}))
         assert first['messages'] + second['messages'] == pending.detail(settings.database, item['id'])['messages']
         assert second['next_offset'] is None
         with pytest.raises(Exception):
-            await server.call_tool('pipeline_pending_finish', {'pending_id': item['id'], 'confirm': 'wrong'})
-        receipt = result_value(await server.call_tool('pipeline_pending_finish',
-            {'pending_id': item['id'], 'confirm': pending.ARCHIVE_CONFIRM}))
+            await server.call_tool('pipeline_pending', {'action': 'finish', 'pending_id': item['id'], 'confirm': 'wrong'})
+        receipt = result_value(await server.call_tool('pipeline_pending',
+            {'action': 'finish', 'pending_id': item['id'], 'confirm': pending.ARCHIVE_CONFIRM}))
         assert receipt['status'] == 'archived_only'
         assert receipt['closure_receipt']['originals_preserved']
-        assert receipt == result_value(await server.call_tool('pipeline_pending_finish',
-            {'pending_id': item['id'], 'confirm': pending.ARCHIVE_CONFIRM}))
-        assert result_value(await server.call_tool('pipeline_pending_list', {})) == {'items': [], 'total': 0, 'next_before_id': None}
-        assert result_value(await server.call_tool('pipeline_pending_read', {'pending_id': item['id']}))['messages'] == pending.detail(settings.database, item['id'])['messages']
+        assert receipt == result_value(await server.call_tool('pipeline_pending',
+            {'action': 'finish', 'pending_id': item['id'], 'confirm': pending.ARCHIVE_CONFIRM}))
+        assert result_value(await server.call_tool('pipeline_pending', {'action': 'list', })) == {'items': [], 'total': 0, 'next_before_id': None}
+        assert result_value(await server.call_tool('pipeline_pending', {'action': 'read', 'pending_id': item['id']}))['messages'] == pending.detail(settings.database, item['id'])['messages']
     asyncio.run(exercise())
     assert snapshot(settings) == before
 
@@ -73,19 +73,20 @@ def test_http_mcp_protocol_exposes_and_finishes_the_same_pending_item(settings, 
             result = rpc('tools/call', {'name': name, 'arguments': arguments})
             assert not result['isError'], result
             return result.get('structuredContent') or json.loads(result['content'][0]['text'])
-        assert PENDING_TOOLS <= {tool['name'] for tool in rpc('tools/list')['tools']}
-        assert call('pipeline_pending_list', {})['total'] == 1
-        originals = call('pipeline_pending_read', {'pending_id': item['id']})['messages']
+        assert 'pipeline_pending' in {tool['name'] for tool in rpc('tools/list')['tools']}
+        assert not PENDING_TOOLS & {tool['name'] for tool in rpc('tools/list')['tools']}
+        assert call('pipeline_pending', {'action': 'list', })['total'] == 1
+        originals = call('pipeline_pending', {'action': 'read', 'pending_id': item['id']})['messages']
         assert [row['id'] for row in originals] == item['source_ids']
         args = {'pending_id': item['id'], 'confirm': pending.ARCHIVE_CONFIRM}
-        result = call('pipeline_pending_finish', args)
-        assert call('pipeline_pending_finish', args) == result
-        assert call('pipeline_pending_list', {})['total'] == 0
-        assert call('pipeline_pending_read', {'pending_id': item['id']})['messages'] == originals
-        restored = call('pipeline_pending_reopen', {'pending_id': item['id'], 'confirm': pending.REOPEN_CONFIRM})
+        result = call('pipeline_pending', {'action': 'finish', **args})
+        assert call('pipeline_pending', {'action': 'finish', **args}) == result
+        assert call('pipeline_pending', {'action': 'list', })['total'] == 0
+        assert call('pipeline_pending', {'action': 'read', 'pending_id': item['id']})['messages'] == originals
+        restored = call('pipeline_pending', {'action': 'reopen', 'pending_id': item['id'], 'confirm': pending.REOPEN_CONFIRM})
         assert restored['pending_id'] != item['id']
-        assert call('pipeline_pending_reopen', {'pending_id': item['id'], 'confirm': pending.REOPEN_CONFIRM}) == restored
-        assert [row['id'] for row in call('pipeline_pending_list', {})['items']] == [restored['pending_id']]
+        assert call('pipeline_pending', {'action': 'reopen', 'pending_id': item['id'], 'confirm': pending.REOPEN_CONFIRM}) == restored
+        assert [row['id'] for row in call('pipeline_pending', {'action': 'list', })['items']] == [restored['pending_id']]
     assert snapshot(settings) == before
 
 
@@ -94,7 +95,7 @@ def test_mcp_resume_returns_real_frozen_writer_and_settles_selected_item(setting
     save_settings(settings.database, {'features': {'pipeline_agent': True}, 'pipeline': {'execution_mode': 'agent'}})
     server = create_server(Application(settings))
     async def exercise():
-        result = result_value(await server.call_tool('pipeline_pending_resume', {'pending_id': item['id']}))
+        result = result_value(await server.call_tool('pipeline_pending', {'action': 'resume', 'pending_id': item['id']}))
         assert result['status'] == 'resumed'
         task = result_value(await server.call_tool('pipeline_next', {'include_recent': True}))
         assert task['status'] == 'awaiting_agent' and task['role'] == 'event_writer'
@@ -105,7 +106,7 @@ def test_mcp_resume_returns_real_frozen_writer_and_settles_selected_item(setting
         result = result_value(await server.call_tool('pipeline_next', {'include_recent': True}))
         assert result['status'] == 'processed' and result['events'] == 1
         assert result['pending_count'] == 0
-        assert result_value(await server.call_tool('pipeline_pending_list', {}))['total'] == 0
+        assert result_value(await server.call_tool('pipeline_pending', {'action': 'list', }))['total'] == 0
     asyncio.run(exercise())
 
 
@@ -114,7 +115,8 @@ def test_next_points_at_pending_tools_instead_of_an_unactionable_wait(settings, 
     monkeypatch.setattr(p, 'advance', AsyncMock(return_value={'status': 'current'}))
     result = asyncio.run(tools_for(settings)['pipeline_next']())
     assert result['pending_count'] == 1 and result['pending_material_ids'] == [item['id']]
-    assert all(tool in result['pending_instructions'] for tool in ('pipeline_pending_list', 'pipeline_pending_read', 'pipeline_pending_finish', 'pipeline_pending_resume'))
+    assert 'pipeline_pending(action=list/read)' in result['pending_instructions']
+    assert not any(name in result['pending_instructions'] for name in PENDING_TOOLS)
 
 
 def test_explicit_agent_resume_reviews_old_round_wait_now(settings):
@@ -133,19 +135,20 @@ def test_pending_tools_share_feature_gate_allowlist_and_http(settings):
     item = retained(settings)
     server = create_server(Application(settings))
     async def exercise():
-        assert not PENDING_TOOLS & {tool.name for tool in await server.list_tools()}
+        assert not (PENDING_TOOLS | {'pipeline_pending'}) & {tool.name for tool in await server.list_tools()}
         save_settings(settings.database, {'features': {'pipeline_agent': True}})
-        assert PENDING_TOOLS <= {tool.name for tool in await server.list_tools()}
+        assert 'pipeline_pending' in {tool.name for tool in await server.list_tools()}
+        assert not PENDING_TOOLS & {tool.name for tool in await server.list_tools()}
         save_settings(settings.database, {'features': {'pipeline_agent': False}})
-        for name in PENDING_TOOLS:
+        for name in PENDING_TOOLS | {'pipeline_pending'}:
             with pytest.raises(Exception, match='Unknown tool'):
                 await server.call_tool(name, {})
     asyncio.run(exercise())
     save_settings(settings.database, {'features': {'pipeline_agent': True}})
-    restricted = create_server(Application(replace(settings, mcp_tools=['pipeline_pending_list'])))
-    assert {tool.name for tool in asyncio.run(restricted.list_tools())} == {'pipeline_pending_list'}
+    restricted = create_server(Application(replace(settings, mcp_tools=['pipeline_pending'])))
+    assert {tool.name for tool in asyncio.run(restricted.list_tools())} == {'pipeline_pending'}
     readonly = create_server(Application(replace(settings, writable=False)))
-    assert not PENDING_TOOLS & {tool.name for tool in asyncio.run(readonly.list_tools())}
+    assert not (PENDING_TOOLS | {'pipeline_pending'}) & {tool.name for tool in asyncio.run(readonly.list_tools())}
     client = TestClient(create_app(settings, token='test', live=True), headers={'Authorization': 'Bearer test'})
     assert client.post('/v1/extensions/pipeline_pending_list', json={}).json()['total'] == 1
     result = client.post('/v1/extensions/pipeline_pending_finish', json={'pending_id': item['id'], 'confirm': pending.ARCHIVE_CONFIRM})

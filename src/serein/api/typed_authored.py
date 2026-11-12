@@ -6,6 +6,19 @@ from ..ingest.ob_archive import list_records, read_record
 
 
 RETIRED_PLAN_TOOLS = frozenset({'create_plan', 'read_plan', 'list_plans', 'update_plan'})
+INTERNAL_TYPED_TOOLS = frozenset({'read_feel', 'find_feelings', 'write_feel', 'edit_feel',
+                                  'list_ob_archive', 'read_ob_archive'})
+
+
+def mcp_tools_for(settings):
+    def ob_archive(namespace: str, record_id: str = '', genre: str = '', limit: int = 20, offset: int = 0):
+        """Read retained OB historical archives. Omit record_id to page the directory by genre; pass a returned record_id to read it. Do not mix a record ID with directory filters. Locks and instance scope are always enforced; archives never enter fact recall."""
+        if record_id:
+            if genre or offset or limit != 20:
+                raise ValueError('Use either record_id or directory options')
+            return read_record(settings.database, namespace, record_id)
+        return list_records(settings.database, namespace, genre=genre, limit=limit, offset=offset)
+    return {'ob_archive': ob_archive}
 
 
 def tools_for(settings):

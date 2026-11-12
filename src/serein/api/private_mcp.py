@@ -11,8 +11,17 @@ def add_tools(server,settings):
     scenes=Scenes(settings.database);diaries=Diaries(settings.database);personal=Personal(settings.database)
     preferences=Preferences(settings.database)
 
-    def write_scene(content:str,cues:list[str],title:str='',date:str='',domain:str='',evidence_refs:list[dict]|None=None):
-        """Save an authored Scene and optional verbatim source evidence together. No summarization."""
+    def write_scene(content:str,cues:list[str],title:str='',date:str='',domain:str='',evidence_refs:list[dict]|None=None,
+                    feel_sources:list[dict]|None=None):
+        """Save a Scene; for a subjective feeling use cues=[] and feel_sources=[{kind:event/scene/source,id,...}]. Sources freeze real readable versions, are not factual evidence, and surfacing defaults off. Read before retrying a lost write."""
+        if feel_sources is not None:
+            if cues or date or domain or evidence_refs is not None:
+                raise ValueError('Feel uses empty cues, content/title and feel_sources only')
+            from ..core.feelings import Feelings
+            from ..deployment import read_settings
+            result = Feelings(settings.database).create(content, feel_sources, title=title,
+                author=read_settings(settings.database)['identity']['ai_name'])
+            return f"已保存。\n[scene_id:{result['id']}]\n[type:feel — 主观感受，非事实证据]"
         return scenes.write(content,cues,title,date,domain,evidence_refs)
 
     def edit_scene(scene_id:str,expected_updated_at:str,title:str|None=None,content:str|None=None,cues:list[str]|None=None):

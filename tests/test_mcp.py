@@ -129,7 +129,7 @@ def test_read_only_mcp_has_no_writing_tools(tmp_path):
     server = create_server(Application(Settings(tmp_path / "not-opened.db")))
     names = {tool.name for tool in asyncio.run(server.list_tools())}
     assert names == {"read_memory", "recall_memory", "find_arc", "read_arc_materials", "read_diary", "read_preferences",
-                     "read_feel", "find_feelings", "list_ob_archive", "read_ob_archive"}
+                     "ob_archive"}
 
 
 @pytest.mark.parametrize('private,writable', [(False, False), (False, True), (True, True)])
@@ -210,7 +210,7 @@ def test_scene_only_schema_edit_preservation_and_proposal_boundary(tmp_path):
                 assert schema['additionalProperties'] is False
             if tool.name == 'write_scene':
                 assert set(tool.inputSchema['required']) == {'content','cues'}
-                assert set(tool.inputSchema['properties']) == {'title','content','cues','date','domain','evidence_refs','favorite'}
+                assert set(tool.inputSchema['properties']) == {'title','content','cues','date','domain','evidence_refs','favorite','feel_sources'}
                 assert tool.inputSchema['additionalProperties'] is False
             if tool.name == 'edit_scene':
                 assert set(tool.inputSchema['required']) == {'scene_id','expected_updated_at'}

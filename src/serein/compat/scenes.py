@@ -100,7 +100,13 @@ class Scenes:
             if not doc or doc['kind']!='scene' or doc['lifecycle']=='deleted':
                 return {'status':'not_found','scene_id':scene_id}
             if doc['metadata'].get('memory_role') == 'feel':
-                raise ValueError('Use edit_feel to preserve the feeling contract')
+                from ..core.feelings import access_status, surface_reasons
+                if access_status(writer.store, doc) != 'available':
+                    raise ValueError('Feel is unavailable')
+                if cues is not None or date is not None or metadata is not None:
+                    raise ValueError('Feel edits preserve frozen sources and accept title/content/status only')
+                if restore_surface and surface_reasons(writer.store, doc):
+                    raise ValueError('Feeling sources do not permit surfacing')
             if doc['updated_at']!=expected_updated_at:
                 return {'status':'conflict','scene_id':scene_id,'updated_at':doc['updated_at']}
             if doc['metadata'].get('source_record_immutable'): raise ValueError('Immutable source record')

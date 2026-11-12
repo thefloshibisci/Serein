@@ -5,13 +5,14 @@ opening an agent exit must not invalidate accepted Router/Curator/Writer work.
 """
 import asyncio
 import json
+from typing import Literal
 
 from ..core.store import Store
 from . import pipeline, pipeline_pending as pending
 
 PENDING_TOOLS = frozenset({'pipeline_pending_list', 'pipeline_pending_read',
                            'pipeline_pending_resume', 'pipeline_pending_finish', 'pipeline_pending_reopen'})
-PIPELINE_TOOLS = PENDING_TOOLS | {'pipeline_next', 'pipeline_submit', 'pipeline_rebuild'}
+PIPELINE_TOOLS = PENDING_TOOLS | {'pipeline_pending', 'pipeline_next', 'pipeline_submit', 'pipeline_rebuild'}
 _OPEN = "status IN ('open','running')"
 _HOST_DEFERRALS=('candidate_overflow_deferrals','image_deferrals','missing_images',
                  'curator_omission_deferrals','protected_deferrals','no_new_source_deferrals')
@@ -111,7 +112,7 @@ def tools_for(settings):
     advance = tools['pipeline_next']
 
     async def pipeline_next(include_recent: bool = False, retry_repair: bool = False) -> dict:
-        """Continue Event processing. If pending_count is nonzero, inspect pipeline_pending_list/read; resume useful material or finish trivial material while preserving originals."""
+        """Continue Event processing. Use pipeline_pending to inspect and handle retained material."""
         result = await advance(include_recent=include_recent, retry_repair=retry_repair)
         # Do not enlarge or alter a frozen task's delivery budget.
         if not result.get('request'):
@@ -120,9 +121,9 @@ def tools_for(settings):
                       'pending_material_ids': [item['id'] for item in page['items']]}
             if page['total']:
                 result['pending_instructions'] = (
-                    'Use pipeline_pending_list and pipeline_pending_read to inspect the remaining originals. '
-                    'Use pipeline_pending_resume for material worth organizing, then pipeline_next/submit. '
-                    'For standalone fragments that do not need an Event, use pipeline_pending_finish '
+                    'Use pipeline_pending(action=list/read) to inspect the remaining originals. '
+                    'Use action=resume for material worth organizing, then pipeline_next/submit. '
+                    'For standalone fragments that do not need an Event, use action=finish '
                     'with confirm=ARCHIVE_PENDING_ORIGINALS: preserve original text and remove the item from pending. '
                     'Do not report that no pending-management tools exist or wait indefinitely for more conversation.')
         return result
@@ -190,5 +191,37 @@ def tools_for(settings):
         return await execute(settings.database, 'pipeline', lambda: _disk_operation(
             lambda: pending.reopen(settings.database, pending_id, confirm)))
 
-    return {**tools, **{fn.__name__: fn for fn in (pipeline_next, pipeline_pending_list,
-            pipeline_pending_read, pipeline_pending_resume, pipeline_pending_finish, pipeline_pending_reopen)}}
+    async def pipeline_pending(action: Literal['list', 'read', 'resume', 'finish', 'reopen'] = 'list',
+                               pending_id: int | None = None, limit: int = 20,
+                               offset: int = 0, before_id: int | None = None,
+                               replan: bool = False, confirm: str = '') -> dict:
+        """Inspect and handle pending material. list returns IDs/count; read pages all originals before a decision. resume continues useful material via pipeline_next/submit. finish preserves originals and removes a fragment from pending (confirm=ARCHIVE_PENDING_ORIGINALS). reopen undoes one explicitly selected mistaken finish (confirm=RESTORE_PENDING_ORIGINALS), then resume its new ID. Never finish unread errors or bypass source dependencies. Writes use the existing shared lease; list/read do not write."""
+        if action == 'list':
+            if pending_id is not None or offset or replan or confirm:
+                raise ValueError('list only accepts limit and before_id')
+            return await asyncio.to_thread(pipeline_pending_list, limit, before_id)
+        _positive(pending_id, '待办编号')
+        if before_id is not None:
+            raise ValueError('before_id is only used with list')
+        if action == 'read':
+            if replan or confirm:
+                raise ValueError('read does not accept replan or confirm')
+            return await asyncio.to_thread(pipeline_pending_read, pending_id, offset, limit)
+        if offset or limit != 20:
+            raise ValueError('pagination is only used with list/read')
+        if action == 'resume':
+            if confirm:
+                raise ValueError('resume does not accept confirm')
+            return await pipeline_pending_resume(pending_id, replan)
+        if replan:
+            raise ValueError('replan is only used with resume')
+        if action == 'finish':
+            return await pipeline_pending_finish(pending_id, confirm)
+        if action == 'reopen':
+            return await pipeline_pending_reopen(pending_id, confirm)
+        raise ValueError('Unknown pending action')
+
+    # Old functions remain internal for the existing HTTP/UI contract, not MCP.
+    return {**tools, **{fn.__name__: fn for fn in (pipeline_next, pipeline_pending,
+            pipeline_pending_list, pipeline_pending_read, pipeline_pending_resume,
+            pipeline_pending_finish, pipeline_pending_reopen)}}

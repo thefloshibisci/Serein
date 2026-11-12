@@ -99,7 +99,7 @@ def create_server(app: Application, *, private=False, http=False):
 
     def pipeline_text_tool(function):
         async def pipeline_next(include_recent: bool = False, retry_repair: bool = False) -> list:
-            """Claim the next Event task as one JSON text; submit its result with pipeline_submit. When pending_count is nonzero, use pipeline_pending_list/read to inspect the originals, then resume useful material or finish trivial material with pipeline_pending_finish while preserving originals."""
+            """Claim the next Event task; submit via pipeline_submit. If pending_count is nonzero, use pipeline_pending(action=list/read/resume/finish) to inspect and handle it, preserving originals."""
             from ..core.store import encode
             from ..deployment import read_settings
             from ..extensions.pipeline_images import agent_text_task
@@ -138,8 +138,18 @@ def create_server(app: Application, *, private=False, http=False):
                       min_cosine: float | None = .5, topic: str | None = None,
                       intent: Literal["direct", "latest", "progress", "timeline", "narrative", "exact"] = "direct",
                       exclude_ids: list[str] | None = None, use_passages: bool | None = None,
-                      fallback: bool = True) -> str:
-        """Recall with separate Event/Scene rules. Omit method (or pass null) to follow the current effective embedding configuration on every call: semantic when configured, lexical otherwise, with cosine cutoff 0.5. With default mode/method and direct intent, an empty result or published route skip tries one labelled lexical lookup, restricted to currently surface-eligible memories. Set fallback=false, or explicitly choose mode/method, to disable this retry. Errors never trigger fallback. Explicit surface keeps lexical/cue matches as candidates unless named by full title; explicit lookup permits intentional browsing. Empty lexical lookups may retry up to 12 separated keywords, labelling partial matches and ranking keyword coverage; automatic surface admission is unchanged. Default output includes bound-source counts only; read_memory(with_evidence=True) expands originals. Narrative/quote intent redirects to dedicated reads."""
+                      fallback: bool = True, kind: Literal['feel'] | None = None,
+                      source_id: str = '', offset: int = 0) -> str:
+        """Recall with separate Event/Scene rules. Omit method (or pass null) to follow the current effective embedding configuration on every call: semantic when configured, lexical otherwise, with cosine cutoff 0.5. With default mode/method and direct intent, an empty result or published route skip tries one labelled lexical lookup, restricted to currently surface-eligible memories. Set fallback=false, or explicitly choose mode/method, to disable this retry. Errors never trigger fallback. Explicit surface keeps lexical/cue matches as candidates unless named by full title; explicit lookup permits intentional browsing. Empty lexical lookups may retry up to 12 separated keywords, labelling partial matches and ranking keyword coverage; automatic surface admission is unchanged. Default output includes bound-source counts only; read_memory(with_evidence=True) expands originals. Narrative/quote intent redirects to dedicated reads. For subjective feelings only, kind=feel selects literal lookup with optional source_id and offset; read_memory reads returned IDs."""
+        if kind == 'feel':
+            if mode is not None or method is not None or topic is not None or intent != 'direct' or exclude_ids or use_passages is not None:
+                raise ValueError('Feel lookup uses query, limit, offset and optional source_id only')
+            from ..core.feelings import Feelings
+            page = Feelings(app.settings.database).search(query, source_id=source_id, limit=limit, offset=offset)
+            return '\n\n'.join([*(memory_text(item, with_evidence=False) for item in page['items']),
+                f"method: literal\nhas_more: {str(page['has_more']).lower()}\nnext_offset: {page['next_offset']}"])
+        if source_id or offset:
+            raise ValueError('source_id and offset are only used with kind=feel')
         if method in (None, "semantic") and min_cosine is None:
             min_cosine = .5
         result = services.recall(query, mode=mode or "surface", limit=limit, with_evidence=True, method=method, min_cosine=min_cosine,
@@ -269,10 +279,11 @@ def create_server(app: Application, *, private=False, http=False):
     # Keep internal/UI implementations available without exposing retired MCP tools.
     internal_tools = {'resume', 'list_source_messages', 'read_source_messages',
                       'handoff', 'narrative_revision_inbox', 'review_narrative_revision', 'publish_narrative'}
-    from ..extensions.pipeline_agent import PIPELINE_TOOLS
+    from ..extensions.pipeline_agent import PIPELINE_TOOLS, PENDING_TOOLS
+    internal_tools |= PENDING_TOOLS
     pipeline_names = PIPELINE_TOOLS
     gated_tools = {name:('memory_candidates',fn) for name,fn in candidate_tools.items()}
-    gated_tools.update({name:('pipeline_agent',app.contributions.tools[name]) for name in pipeline_names if name in app.contributions.tools})
+    gated_tools.update({name:('pipeline_agent',app.contributions.tools[name]) for name in pipeline_names - PENDING_TOOLS if name in app.contributions.tools})
     builtins = internal_tools | pipeline_names | {"memory_read", "memory_materials", "memory_search", "memory_write", "memory_candidates", "memory_recall", "source_messages", "source_read"}
     for name, function in app.contributions.tools.items():
         if private and name in (pipeline_names | app._optional_names):
@@ -287,18 +298,16 @@ def create_server(app: Application, *, private=False, http=False):
         if not app.settings.writable:raise ValueError('Private live MCP requires writable storage')
         from .private_mcp import add_tools
         add_tools(server,app.settings)
-    from .typed_authored import RETIRED_PLAN_TOOLS, tools_for as typed_tools_for
-    typed_tools = typed_tools_for(app.settings)
+    from .typed_authored import RETIRED_PLAN_TOOLS, INTERNAL_TYPED_TOOLS, mcp_tools_for
+    retired_tools = RETIRED_PLAN_TOOLS | INTERNAL_TYPED_TOOLS | PENDING_TOOLS
+    typed_tools = mcp_tools_for(app.settings)
     for name, function in typed_tools.items():
-        annotation = read_only if name.startswith(('read_', 'find_', 'list_')) else ToolAnnotations(
-            readOnlyHint=False, destructiveHint=name == 'edit_feel', idempotentHint=False, openWorldHint=False)
-        server.add_tool(function, name=name, annotations=annotation)
+        server.add_tool(function, name=name, annotations=read_only)
         server._tool_manager.get_tool(name).parameters['additionalProperties'] = False
     if app.settings.mcp_tools is not None:
         available = {tool.name for tool in server._tool_manager.list_tools()}
-        # A retired feature in a saved allowlist must not prevent an upgrade.
-        # Keep rejecting unrelated unknown names; never re-register plan tools.
-        selected = set(app.settings.mcp_tools) - RETIRED_PLAN_TOOLS
+        # Ignore retired names without granting their broader replacements.
+        selected = set(app.settings.mcp_tools) - retired_tools
         if not private and 'save_memory' in selected:
             selected.remove('save_memory')
             selected.update({'write_scene', 'edit_scene'})
@@ -335,13 +344,13 @@ def create_server(app: Application, *, private=False, http=False):
             annotation=ToolAnnotations(readOnlyHint=True,destructiveHint=False,idempotentHint=True,openWorldHint=False) if name=='resume' else read_only if name in {'source_message_search','source_message_read','read_favorites','dream_read','window_shadow_read','list_event_mailbox','read_event_mailbox'} else None
             if name in candidate_tools:
                 annotation = read_only if name=='list_candidates' else write
-            if name in {'pipeline_pending_list','pipeline_pending_read'}:
-                annotation = read_only
-            elif name in {'pipeline_pending_finish','pipeline_pending_reopen'}:
-                annotation = write
+            if name == 'pipeline_pending':
+                # One tool includes writes: never advertise all actions as read-only/idempotent.
+                annotation = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
+                                             idempotentHint=False, openWorldHint=False)
             server.add_tool(exposed, name=name, annotations=annotation,
                             structured_output=False if name in {'read_favorites','resume','dream_read','window_shadow_read','pipeline_next'} else None)
-            if name in {'resume','dream_read','window_shadow_read'}:server._tool_manager.get_tool(name).parameters['additionalProperties']=False
+            if name in {'resume','dream_read','window_shadow_read','pipeline_pending'}:server._tool_manager.get_tool(name).parameters['additionalProperties']=False
 
     async def list_tools():
         refresh_optional()
@@ -349,7 +358,7 @@ def create_server(app: Application, *, private=False, http=False):
 
     async def call_tool(name, arguments):
         refresh_optional()
-        if name in typed_tools:
+        if name in typed_tools or name == 'pipeline_pending':
             tool = server._tool_manager.get_tool(name)
             if tool and set(arguments or {}) - tool.parameters['properties'].keys():
                 raise ValueError('Unexpected typed authored arguments')

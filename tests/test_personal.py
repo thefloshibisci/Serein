@@ -66,8 +66,7 @@ def test_private_mcp_catalog_and_favorite_limit(live):
     server=create_server(Application(settings),private=True)
     tools=asyncio.run(server.list_tools())
     assert {t.name for t in tools}==set(SELF_USE_TOOLS) | {
-        'write_feel', 'edit_feel', 'read_feel', 'find_feelings',
-        'list_ob_archive', 'read_ob_archive'}
+        'ob_archive'}
     favorite=next(t for t in tools if t.name=='read_favorites')
     assert favorite.inputSchema['properties']['limit']['default']==5
     assert favorite.inputSchema['properties']['offset']['default']==0

@@ -157,6 +157,12 @@ def test_public_tools_cannot_change_identity_or_bypass_scope_or_locks(runtime, t
     assert 'SECRET' not in encode(directory) and 'PRIVATE CLAIM' not in encode(directory)
     assert not tools['read_ob_archive']('synthetic', 'you:claim:claim-a')['readable']
     assert not tools['read_ob_archive']('synthetic', 'them:person:person-a')['readable']
+    from serein.api.typed_authored import mcp_tools_for
+    archive = mcp_tools_for(Settings(runtime, writable=False))['ob_archive']
+    assert archive('synthetic', limit=100) == directory
+    assert not archive('synthetic', record_id='you:claim:claim-a')['readable']
+    assert not archive('synthetic', record_id='them:person:person-a')['readable']
+    assert not archive('synthetic', record_id='locked')['readable']
     with pytest.raises(TypeError):
         tools['read_ob_archive']('synthetic', 'locked', caller_side='human')
 

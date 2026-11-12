@@ -208,7 +208,7 @@ Curator 的 extend 专指接续输入候选中某条已保存 Event，必须选�
 
 自动摘要管理与对话导入页只显示尚未结束的待处理材料，不另设等待后续或已处理记录分组。模型重试耗尽、调用前输入超限或未写成 Event 时，保留原话、最后错误输出和已完成步骤。待办预留其原话，不在每次调度中重新调用模型；已经通过归线的材料不再阻塞同一聊天的独立新材料，尚未完成归线的范围仍保持顺序。
 
-Agent 可用 `pipeline_pending_list` 查看尚未结束的数量和编号，再用 `pipeline_pending_read` 逐页读完整原话与失败原因。有整理价值的材料用 `pipeline_pending_resume` 继续，通过已有 `pipeline_next` / `pipeline_submit` 完成任务；不值得单独生成 Event 的短片段，用 `pipeline_pending_finish` 明确确认只保留原话，成功后即从待处理列表消失。误操作可用 `pipeline_pending_reopen` 精确恢复一项，再按当前设置重新整理；恢复保留旧结束回执和原话，不重开其他记录。
+Agent 可用 `pipeline_pending(action="list")` 查看尚未结束的数量和编号，再用 `pipeline_pending(action="read")` 逐页读完整原话与失败原因。有整理价值的材料用 `pipeline_pending(action="resume")` 继续，通过已有 `pipeline_next` / `pipeline_submit` 完成任务；不值得单独生成 Event 的短片段，用 `pipeline_pending(action="finish")` 明确确认只保留原话，成功后即从待处理列表消失。误操作可用 `pipeline_pending(action="reopen")` 精确恢复一项，再按当前设置重新整理；恢复保留旧结束回执和原话，不重开其他记录。
 
 不按材料年龄或长度自动结束，也不定期自动重审旧待办。明确继续一项仅被轮次门槛挡住的材料时，无须再等额外对话；来源、共享依赖和 Writer 证据校验仍生效。只保留原话不调用模型、不生成 Event，原话仍可查阅。网络或模型调用失败、缺图片、共享依赖、无法验证的来源仍显示真实原因，由明确操作处理。
 
@@ -223,3 +223,5 @@ Agent 可用 `pipeline_pending_list` 查看尚未结束的数量和编号，再�
 不承接时仅作背景；整份承接须在正常结果中返回 `adopt_pending_material_ids:[编号]`，把其全部原话明确纳入 Event。程序不凭“看过”或来源重叠结清待办。Event 保存与待办结清在同一事务中完成；失败不结清。原话变化、同一旧 Event 的在途补写冲突仍阻止保存。待办与错误输出不进入记忆召回，内部结算回执保留承接的 Event 编号。
 
 图片优先复用成功的逐图转录。异步失败后，自动流水线用归线模型尝试转录；上游拒绝图片输入时，不再逐张重复同一拒绝。无法转录的图片只提供 `user 发送了 X 张图`（或 assistant）的发送事实，不伪造画面、文字或成功转录回执，不因此阻塞文字摘要。Writer 始终不接收原图。
+
+MCP 待办管理合并为一个 `pipeline_pending` 工具；五个旧名称仅保留内部 HTTP/UI 兼容，不再注册为 MCP。旧白名单中的退役名称被忽略，不自动授予合并工具的写入权限；使用自定义白名单时显式选择新名称。

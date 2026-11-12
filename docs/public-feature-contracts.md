@@ -221,7 +221,7 @@ Writer 正文通常以 500 字为软预算，复杂经历可适当超出；host 
 
 「记忆候选工具」（`features.memory_candidates`）默认关闭；可写实例开启后才动态注册 `propose_memory`、`list_candidates`、`review_memory`，关闭即拒绝旧缓存调用，已有候选保留。`propose_memory` 的 draft 仍用 `title`、`body_md`、`cues`、`date`，可选收藏意图；修改提案仍带 `document_id` 和 `expected_revision`。接受候选在事务内检查类型，历史 Event / Narrative 候选只能在此忽略，不能借接受操作绕过写入边界。
 
-「自动摘要 Agent 工具」（`features.pipeline_agent`）默认关闭；可写实例开启后才注册 `pipeline_next`、`pipeline_submit`、`pipeline_rebuild` 及 `pipeline_pending_list/read/resume/finish/reopen`，HTTP 扩展同样核对开关。待处理工具可读取原话、恢复执行，或将无需单独整理的材料结束为只保留原话；结束项不再进入待处理列表，原话和已保存 Event 不删除，终态回执仍留内部核验。工具暴露与 `pipeline.auto_enabled` 独立：关闭工具不改变后台摘要启停，不删除任务，也不影响配置页的内部整理／修复入口。两组工具都继续服从 `mcp_tools` 白名单。
+「自动摘要 Agent 工具」（`features.pipeline_agent`）默认关闭；可写实例开启后才注册 `pipeline_next`、`pipeline_submit`、`pipeline_rebuild` 及 `pipeline_pending(action=list/read/resume/finish/reopen)`，HTTP 扩展同样核对开关。待处理工具可读取原话、恢复执行，或将无需单独整理的材料结束为只保留原话；结束项不再进入待处理列表，原话和已保存 Event 不删除，终态回执仍留内部核验。工具暴露与 `pipeline.auto_enabled` 独立：关闭工具不改变后台摘要启停，不删除任务，也不影响配置页的内部整理／修复入口。两组工具都继续服从 `mcp_tools` 白名单。
 
 Event 正文交给原话整理流程。主模型自行写叙事卷仍使用 `narrative_volume`：开启“主模型读写叙事卷”，读取正文与材料，自己写作，预览，再确认保存；不会额外调用 Writer 模型。Event 升 Scene 工具仍继承原 Event 的证据。网页编辑入口保持原有契约。
 
@@ -244,3 +244,5 @@ Gateway Key 由引导脚本自动生成，并在部署完成的连接说明中�
 原话 MCP 工具保留 `source_message_search`（可选关键词、日期、说话者）和 `source_message_read`（精确 ID、可选同会话前后消息），不合并搜索与读取。旧的 `list_source_messages`、`read_source_messages` 不再注册，缓存调用被拒绝；旧白名单仍兼容启动。底层 source 适配器继续用于采集和写入证据，数据库编号、绑定关系及原文内容保持不变。
 
 归线候选检索为可选实验，默认关闭，仍完整带入回看范围内的旧 Track 卡。开启后，最近 12／24／48／72 小时有活动的卡直接带入，较早卡由程序使用整批新原文与附近前文进行 jieba＋BM25 检索，默认补充最多 8 张（可设 1～50）。搜索短标题、续接线索及近期原文，过滤保守口头停用词；先排除直接带入卡，再合并去重，候选按最近活动时间排列。检索仅筛选本次 Router 输入，不删除或截断存储中的卡片和原文，不自动回改以前的消息归属。检索可能漏接或改变分线；已冻结任务保持原输入和配置。
+
+MCP 待办管理合并为一个 `pipeline_pending` 工具；五个旧名称仅保留内部 HTTP/UI 兼容，不再注册为 MCP。旧白名单中的退役名称被忽略，不自动授予合并工具的写入权限；使用自定义白名单时显式选择新名称。

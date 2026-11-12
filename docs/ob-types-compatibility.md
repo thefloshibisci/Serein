@@ -4,11 +4,11 @@
 
 ## Feel
 
-- 存储复用 `documents(kind=scene)` 与完整 revisions，语义固定为 `metadata.memory_role=feel`，提供独立 ID、`read_feel`、`find_feelings`、`write_feel`、`edit_feel`。`read_memory(feel:ID)` 也可读取。旧 Scene 引用保持有效。
+- 存储复用 `documents(kind=scene)` 与完整 revisions，语义固定为 `metadata.memory_role=feel`，提供独立 ID，但 MCP 复用已有 Scene 工具：`write_scene(content=..., cues=[], feel_sources=[...])` 创建，`edit_scene` 编辑，`set_scene_status` 归档或删除，`read_memory` 读取；不再单列四个 Feel 工具。网页内部 HTTP 感受接口保留。旧 Scene 引用保持有效。
 - 创建必须给真实 Event/Scene 或仍有效的原话 binding；源 ID、类型、版本、hash 固定于创建时。引发感受的来源保存在 `feel_sources`，不复制为证据，不创建 Event/原话，不改变源正文、digested 或 Persona。
 - 源版本修改后仍读当时版本；来源归档不影响感受自身状态。源删除、锁定、失去原话绑定或 hash 不一致时，不返回来源摘要，自动浮现关闭；感受自己仍可显式阅读。
-- `find_feelings` 是明确标注的字面检索，支持来源和作者日期过滤；不是已实现的独立语义搜索。语义自动召回复用已有混合候选、重排、卡片上限、冷却与交付登记，并始终标注“当时的主观感受，非事实证据”。
-- 普通记忆和材料读取不自动反查 feel/plan。需要按来源找感受时显式调用 `find_feelings(source_id=...)`；感受自身的冻结来源仍随显式读取返回。原生 Scene 关联、注脚和证据读取保持原契约。
+- `recall_memory(query=..., kind="feel", source_id=..., offset=...)` 是明确标注的感受字面检索，支持按来源过滤及分页；不是独立语义搜索。网页内部 HTTP 仍支持完整来源和作者日期过滤。语义自动召回复用已有混合候选、重排、卡片上限、冷却与交付登记，并始终标注“当时的主观感受，非事实证据”。
+- 普通记忆和材料读取不自动反查 feel/plan。需要按来源找感受时显式调用 `recall_memory(query="", kind="feel", source_id=...)`；感受自身的冻结来源仍随显式读取返回。原生 Scene 关联、注脚和证据读取保持原契约。
 - 自动召回传输 ID 继续为 `scene:ID` 以兼容已交付去重，另带 `semantic_kind=feel`；专用显式入口接受 feel ID。感受和源同轮命中时不重复源正文；自动卡最多展开三个短来源摘要，更多来源显式读取。
 - 新建默认不自动浮现。历史 `manual_surface` 原值保留，缺值为未审阅；`dont_surface` / `digested` 阻止自动浮现，`pinned` / `protected` 保留但不自动开启。生命周期与开关分开。
 - 旧 annotation 不改；旧独立 feel 与 `kind=feel` 年轮均可预览为独立对象。缺源关联进入待补清单，既不丢正文也不猜关联。whisper/日印象/信件不自动改造成 feel。
@@ -77,4 +77,6 @@ Scene 页面标注并编辑 feel；备忘页面只保留原备忘流程，不再
 
 `ob_migration.undo` 只撤销本批新建且未改变、没有外部依赖的对象，保留原 ZIP、目录、既有记录及不可变收据。后续编辑、删除或新引用会阻止整批撤销。撤销后的同一 namespace 不会被重试复活。
 
-信件保留原体裁；删除、未知锁定或对 AI 不可读的记录不向工具返回标题和正文。`list_ob_archive` / `read_ob_archive` 可显式查询档案，不能变更调用方身份或绕过锁。You/Them 的旧 scope 需明确绑定本实例 AI 才可读取，未经绑定的资料保全待审。档案、信件和画像资料不进入普通事实召回，也不自动改写当前 Persona 或窗影。
+信件保留原体裁；删除、未知锁定或对 AI 不可读的记录不向工具返回标题和正文。`ob_archive(namespace=...)` 分页列出目录；传 `record_id` 读取对应档案，不能变更调用方身份或绕过锁。You/Them 的旧 scope 需明确绑定本实例 AI 才可读取，未经绑定的资料保全待审。档案、信件和画像资料不进入普通事实召回，也不自动改写当前 Persona 或窗影。
+
+MCP 的六个旧 Feel/OB 名称已从工具目录退役，旧白名单不会自动转换成权限更宽的新入口；刷新目录后显式选择现有 Scene 工具与 `ob_archive`。所有旧资料、版本和来源保留，内部 HTTP 页面操作继续可用。

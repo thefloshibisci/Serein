@@ -1,4 +1,5 @@
 [
+  "tests/test_compact_mcp.py",
   "tests/test_pipeline_service_reliability.py",
   "tests/test_work_queue_reliability.py",
   "web/tests/memory-refresh.dom.mjs",
