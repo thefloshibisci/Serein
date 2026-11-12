@@ -286,7 +286,7 @@ def create_server(app: Application, *, private=False, http=False):
         if not app.settings.writable:raise ValueError('Private live MCP requires writable storage')
         from .private_mcp import add_tools
         add_tools(server,app.settings)
-    from .typed_authored import tools_for as typed_tools_for
+    from .typed_authored import RETIRED_PLAN_TOOLS, tools_for as typed_tools_for
     typed_tools = typed_tools_for(app.settings)
     for name, function in typed_tools.items():
         annotation = read_only if name.startswith(('read_', 'find_', 'list_')) else ToolAnnotations(
@@ -295,7 +295,9 @@ def create_server(app: Application, *, private=False, http=False):
         server._tool_manager.get_tool(name).parameters['additionalProperties'] = False
     if app.settings.mcp_tools is not None:
         available = {tool.name for tool in server._tool_manager.list_tools()}
-        selected = set(app.settings.mcp_tools)
+        # A retired feature in a saved allowlist must not prevent an upgrade.
+        # Keep rejecting unrelated unknown names; never re-register plan tools.
+        selected = set(app.settings.mcp_tools) - RETIRED_PLAN_TOOLS
         if not private and 'save_memory' in selected:
             selected.remove('save_memory')
             selected.update({'write_scene', 'edit_scene'})

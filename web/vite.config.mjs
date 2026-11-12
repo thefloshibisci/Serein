@@ -862,7 +862,7 @@ function sereinMemoryBridge() {
         }
         try {
           const body=await readJsonBody(request,500_000);
-          if (!['read_feel','edit_feel','list_plans','read_plan','create_plan','update_plan'].includes(body.tool)) {
+          if (!['read_feel','edit_feel'].includes(body.tool)) {
             response.statusCode=404; response.end(JSON.stringify({detail:"tool_not_available"})); return;
           }
           const result=await callSereinBackend('/api/authored-types',{method:'POST',body});

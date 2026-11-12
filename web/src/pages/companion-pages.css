@@ -125,15 +125,6 @@
 .memo-quiet h2 { font-size: 23px; font-weight: 400; margin: 24px 0 10px; }
 .memo-quiet p { color: #8b988f; font-size: 14px; }
 .memo-footer { margin-top: 30px; }
-.plan-notes { margin: 28px 0 48px; }
-.plan-notes .memo-list-heading h2, .memo-reminders-heading { margin: 0; font-size: 24px; font-weight: 400; }
-.plan-notes .memo-toolbar { margin-top: 20px; }
-.plan-notes .memo-title h3 { margin: 0; font-size: 18px; font-weight: 400; }
-.plan-notes .memo-body { white-space: pre-wrap; overflow-wrap: anywhere; }
-.plan-notes .companion-actions button, .plan-notes .companion-filters button { min-height: 44px; }
-.plan-history { margin-top: 16px; color: #63756a; font-size: 13px; line-height: 1.8; }
-.plan-history summary { cursor: pointer; padding: 8px 0; }
-.plan-entry--resolved .memo-body, .plan-entry--abandoned .memo-body { color: #718274; }
 @media (max-width: 650px) {
   .persona-toolbar { align-items: stretch; flex-direction: column; gap: 8px; }
   .persona-toolbar .companion-actions { flex-wrap: nowrap; }

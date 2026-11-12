@@ -12,13 +12,10 @@ for(const key of ['window','document','navigator','HTMLElement','HTMLInputElemen
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 dom.window.HTMLElement.prototype.scrollTo=()=>{};
 const calls=[];
-let locked=false, conflict=false;
+let locked=false;
 const feel={source_id:'scene_feel_fixture',title:'Rain feeling',date:'2026-11-08',content:'A subjective feeling.',
   memory_role:'feel',semantic_kind:'feel',revision:1,updated_at:'version-1',author:'Fixture',annotations:[],
   status:'可浮现',storage_status:'active',feel_sources:[{kind:'event',id:'event_source',status:'available',title:'STALE CACHED TITLE',summary:'STALE CACHED BODY'}]};
-const plans=[['active','Carry an umbrella.'],['resolved','Finish reading.'],['abandoned','Go out tonight.']].map(([status,content],index)=>({
-  id:'plan_'+index,status,content,revision:1,weight:.5,history:[{to:status,actor:'Fixture'}],related:[],reminder_id:null,
-}));
 const memos=[{id:'memo_fixture',title:'Original reminder',content:'Keep existing memo controls.',status:'active',repeat_rule:'daily',
   daily_limit:1,reminder_count:0,max_injections:0,cooldown_minutes:0,channel:'global'}];
 const reply=(value,status=200)=>({ok:status>=200&&status<300,status,json:async()=>structuredClone(value)});
@@ -35,14 +32,6 @@ globalThis.fetch=window.fetch=async(url,options={})=>{
     if(body.tool==='read_feel')return reply({readable:true,feel_sources:[locked?{status:'restricted',kind:'event',id:'event_source'}:
       {status:'available',kind:'event',id:'event_source',title:'Verified source',summary:'Exact frozen body.',revision:1}]});
     if(body.tool==='edit_feel')return reply({document:{body_md:args.content,updated_at:'version-2',revision:2},feel_sources:[]});
-    if(body.tool==='list_plans')return reply({items:plans.filter(row=>!args.status||row.status===args.status),next_offset:null});
-    if(body.tool==='read_plan')return reply(plans.find(row=>row.id===args.plan_id));
-    if(body.tool==='update_plan') {
-      if(conflict)return reply({detail:'Synthetic plan version conflict'},409);
-      const item=plans.find(row=>row.id===args.plan_id);assert.equal(args.expected_revision,item.revision);assert(args.reason.trim());
-      Object.assign(item,{status:args.status,content:args.content,revision:item.revision+1});item.history.push({to:args.status,reason:args.reason});return reply(item);
-    }
-    if(body.tool==='create_plan') {plans.push({id:'plan_new',content:args.content,status:'active',revision:1,weight:args.weight,history:[]});return reply(plans.at(-1));}
   }
   throw new Error(`Unexpected synthetic request: ${url} ${body.tool||''}`);
 };
@@ -71,21 +60,20 @@ try {
   assert(document.querySelector('.feel-sources').textContent.includes('来源当前不可读取'));
   assert(!document.querySelector('.feel-sources').textContent.includes('Exact frozen body.'));
   await settle(()=>{root.unmount();});root=null;await settle(()=>{root=mount('memos');});
-  const pane=document.querySelector('.plan-notes');assert(pane.textContent.includes('Carry an umbrella.'));
+  assert(!document.querySelector('.plan-notes'));
+  assert(!document.body.textContent.includes('计划与承诺'));
+  assert(!document.body.textContent.includes('新增计划'));
+  assert.equal(document.querySelectorAll('[aria-label="备忘状态"]').length,1);
   assert(document.body.textContent.includes('Original reminder'));
-  await click(button('已完成',pane));assert(pane.textContent.includes('Finish reading.'));assert(!pane.textContent.includes('Carry an umbrella.'));
-  await click(button('已放下',pane));assert(pane.textContent.includes('Go out tonight.'));
-  await click(button('编辑计划与状态',pane));
-  const form=pane.querySelector('form');await value(form.querySelector('select'),'active');
-  assert(button('保存计划',pane).disabled);await value(form.querySelectorAll('textarea')[1],'I choose to reopen it.');
-  conflict=true;await click(button('保存计划',pane));assert(pane.querySelector('[role="alert"]').textContent.includes('version conflict'));assert(form.isConnected);
-  assert.equal(plans[2].status,'abandoned');conflict=false;await click(button('保存计划',pane));
-  assert.equal(plans[2].status,'active');assert.equal(memos[0].status,'active');
-  await click(button('标完成'));assert.equal(memos[0].status,'done');assert.equal(plans[2].status,'active');
-  await click(button('＋ 新增计划',pane));await value(pane.querySelector('textarea'),'A newly chosen plan.');await click(button('保存计划',pane));
-  assert.equal(plans.at(-1).status,'active');
-  assert(!calls.some(row=>row.body.tool==='create_plan'&&row.body.arguments.reminder_id));
-  console.log('PASS authored UI: feel semantics and fresh protected sources, typed edit, plan filters/conflict/reasons, memo lifecycle isolation and creation');
+  await click(button('标完成'));assert.equal(memos[0].status,'done');
+  await click(button('已完成'));assert(document.body.textContent.includes('Original reminder'));
+  await click(button('重新打开'));assert.equal(memos[0].status,'active');
+  await click(button('进行中'));await click(button('归档'));assert.equal(memos[0].status,'archived');
+  await click(button('已归档'));assert(document.body.textContent.includes('Original reminder'));
+  await click(button('＋ 新增备忘'));
+  assert(document.querySelector('.memo-editor textarea'));
+  assert(!calls.some(row=>['list_plans','read_plan','create_plan','update_plan'].includes(row.body.tool)));
+  console.log('PASS authored UI: feel semantics and fresh protected sources, typed edit, original memo controls and lifecycle, no plan UI or requests');
   await settle(()=>root.unmount());root=null;
 } finally {if(root)root.unmount();dom.window.close();await rm(directory,{recursive:true,force:true});}
 process.exit(0);

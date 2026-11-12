@@ -1,13 +1,15 @@
 """Explicit authored tools shared by public/private MCP and local HTTP."""
 from typing import Literal
 from ..core.feelings import Feelings
-from ..core.plans import Plans
 from ..deployment import read_settings
 from ..ingest.ob_archive import list_records, read_record
 
 
+RETIRED_PLAN_TOOLS = frozenset({'create_plan', 'read_plan', 'list_plans', 'update_plan'})
+
+
 def tools_for(settings):
-    feelings, plans = Feelings(settings.database), Plans(settings.database)
+    feelings = Feelings(settings.database)
 
     def read_feel(feel_id: str, revision: int | None = None):
         """Read an independent historical feeling with exact triggering source versions. It is not fact evidence."""
@@ -19,14 +21,6 @@ def tools_for(settings):
         return feelings.search(query, source_id=source_id, date_from=date_from, date_to=date_to,
                                limit=limit, offset=offset, include_archived=include_archived)
 
-    def read_plan(plan_id: str, revision: int | None = None):
-        """Read an intention, its status and append-only history, independently of any reminder."""
-        return plans.read(plan_id, revision)
-
-    def list_plans(status: str = '', query: str = '', limit: int = 20, offset: int = 0):
-        """Find active/resolved/abandoned intentions; they are never evidence of completed events."""
-        return plans.list(status=status, query=query, limit=limit, offset=offset)
-
     def list_ob_archive(namespace: str, genre: str = '', limit: int = 20, offset: int = 0):
         """List retained OB archive identities without bodies. Letters keep locks; You/Them need a reviewed instance scope. Archives never enter fact recall."""
         return list_records(settings.database, namespace, genre=genre, limit=limit, offset=offset)
@@ -35,7 +29,7 @@ def tools_for(settings):
         """Read one retained OB genre as historical material. AI-side permissions are fixed; deleted, human-locked and unbound-scope content stays hidden."""
         return read_record(settings.database, namespace, record_id)
 
-    tools = {fn.__name__: fn for fn in (read_feel, find_feelings, read_plan, list_plans, list_ob_archive, read_ob_archive)}
+    tools = {fn.__name__: fn for fn in (read_feel, find_feelings, list_ob_archive, read_ob_archive)}
     if not settings.writable:
         return tools
 
@@ -50,16 +44,5 @@ def tools_for(settings):
         """Edit a feeling after reading its revision; original trigger snapshots remain fixed."""
         return feelings.edit(feel_id, expected_revision, content=content, can_surface=can_surface, lifecycle=lifecycle)
 
-    def create_plan(content: str, weight: float = 0.5, related: list[dict] | None = None):
-        """Record an active intention, optionally linked to exact memories; does not create a reminder or Event."""
-        return plans.create(content, actor=read_settings(settings.database)['identity']['ai_name'], weight=weight, related=related)
-
-    def update_plan(plan_id: str, expected_revision: int, reason: str,
-                    status: Literal['active', 'resolved', 'abandoned'] | None = None,
-                    content: str | None = None, reminder_id: str | None = None):
-        """Explicitly update an intention after reading. Resolve/abandon only when instructed, never infer completion from age or reminder expiry. Reason is retained in history. Empty reminder_id detaches a reminder."""
-        return plans.update(plan_id, expected_revision, actor=read_settings(settings.database)['identity']['ai_name'],
-                            reason=reason, status=status, content=content, reminder_id=reminder_id)
-
-    tools.update({fn.__name__: fn for fn in (write_feel, edit_feel, create_plan, update_plan)})
+    tools.update({fn.__name__: fn for fn in (write_feel, edit_feel)})
     return tools

@@ -236,16 +236,26 @@ def test_import_undo_refuses_to_erase_new_edits(runtime, tmp_path):
 def test_mcp_and_http_entry_points_and_readonly(runtime):
     server = create_server(Application(runtime))
     names = {tool.name for tool in asyncio.run(server.list_tools())}
-    assert {'write_feel', 'edit_feel', 'read_feel', 'find_feelings', 'create_plan', 'read_plan', 'list_plans', 'update_plan'} <= names
+    assert {'write_feel', 'edit_feel', 'read_feel', 'find_feelings'} <= names
+    retired = {'create_plan', 'read_plan', 'list_plans', 'update_plan'}
+    assert not retired & names
     from test_authored_mcp_parity import call
     created = call(server, 'write_feel', content='I felt calm.', sources=refs())
     assert created['memory_role'] == 'feel'
     text = call(server, 'read_memory', identifier='feel:' + created['id'])
     assert 'type: feel' in text and 'trigger: event:event_rain' in text
+    legacy_plan = Plans(runtime.database).create('Previously saved intention.', actor='Synthetic')
+    before = ob_types.export_types(runtime.database)
+    assert 'Previously saved intention.' in call(server, 'read_memory', identifier='plan:' + legacy_plan['id'], kind='plan')
     with TestClient(create_app(runtime, token='synthetic-test', live=True), headers={'Authorization': 'Bearer synthetic-test'}) as client:
-        result = client.post('/api/authored-types', json={'tool': 'create_plan', 'arguments': {'content': 'I will return.'}})
+        for tool in retired:
+            result = client.post('/api/authored-types', json={'tool': tool, 'arguments': {'content': 'Must not save.'}})
+            assert result.status_code == 404, result.text
+        result = client.post('/api/authored-types', json={'tool': 'read_feel', 'arguments': {'feel_id': created['id']}})
         assert result.status_code == 200, result.text
-        assert result.json()['status'] == 'active'
+        assert result.json()['document']['body_md'] == 'I felt calm.'
+    after = ob_types.export_types(runtime.database)
+    assert after['plans'] == before['plans'] and after['plan_versions'] == before['plan_versions']
     readonly = create_server(Application(replace(runtime, writable=False)))
     names = {tool.name for tool in asyncio.run(readonly.list_tools())}
     assert 'read_feel' in names and 'write_feel' not in names and 'update_plan' not in names

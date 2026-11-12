@@ -13,12 +13,13 @@
 - 新建默认不自动浮现。历史 `manual_surface` 原值保留，缺值为未审阅；`dont_surface` / `digested` 阻止自动浮现，`pinned` / `protected` 保留但不自动开启。生命周期与开关分开。
 - 旧 annotation 不改；旧独立 feel 与 `kind=feel` 年轮均可预览为独立对象。缺源关联进入待补清单，既不丢正文也不猜关联。whisper/日印象/信件不自动改造成 feel。
 
-## Plan
+## Plan 历史兼容（产品入口已退役）
 
-- 独立表 `authored_plans` / `authored_plan_revisions`，不进入普通记忆索引和事实召回。提供 `create_plan`、`read_plan`、`list_plans`、`update_plan`。
+- 已撤回新增的「计划与承诺」页面区域以及 `create_plan`、`read_plan`、`list_plans`、`update_plan` MCP/HTTP 工具，日常使用恢复原备忘流程。旧配置中的这四个工具名被忽略，不阻止启动，也不会重新注册。
+- 独立表 `authored_plans` / `authored_plan_revisions` 及旧数据、版本保留，不进入普通记忆索引和事实召回。已知旧 ID 仍可通过 `read_memory(identifier="plan:ID")` 只读；专用本地迁移、导出和撤销引用保护继续兼容旧资料。
 - 保留 active/resolved/abandoned、weight、原正文、相关对象、作者时间、新状态变更记录及旧 `legacy_history`。相关对象随显式计划读取返回，不在每次 Scene/Event 读取时反查。
-- 新建 active；完成、放弃、重新打开均需显式更新、当前版本、操作者和原因。没有后台推断完成的路径。
-- 可挂已有 reminder ID；不自动新建提醒。提醒过期、次数耗尽、关闭均不改变计划。完成计划也不擅自变更旧提醒或长期 Scene。
+- 兼容模块保留旧版状态变更校验与历史结构，网页和模型不再提供创建、完成、放弃或重新打开计划的入口。
+- 旧有 reminder ID 关联保留；退役不把计划转成提醒，不自动新建提醒，也不改变原提醒或长期 Scene。提醒过期、次数耗尽、关闭均不改写历史计划。
 
 ## 本地迁移流程
 
@@ -62,7 +63,7 @@ Serein 已有窗影 `self_view`，无需再造固定自我分类。旧 OB 的自
 
 ## 已知范围
 
-Scene 页面标注并编辑 feel，备忘页面管理计划；不另建感受管理页。独立感受语义搜索页面与旧全库导入按钮没有新增接线。实际部署、真实迁移、客户端真机和真实模型质量分别验收，合成测试不能代替这些结果。
+Scene 页面标注并编辑 feel；备忘页面只保留原备忘流程，不再显示独立计划账本。不另建感受管理页。独立感受语义搜索页面与旧全库导入按钮没有新增接线。实际部署、真实迁移、客户端真机和真实模型质量分别验收，合成测试不能代替这些结果。
 
 原 `Narrative.save_body` 同时修复：只改正文保留全部五类旧 excluded 标记，显式重新选中相应来源才撤销该标记。不会重写已有叙事正文。
 

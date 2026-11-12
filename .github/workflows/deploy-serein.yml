@@ -71,7 +71,7 @@ jobs:
         working-directory: web
       - run: node tests/memory-refresh.dom.mjs
         working-directory: web
-      - run: node --test tests/pending-materials.dom.mjs tests/original-archive.dom.mjs tests/pipeline-recovery.dom.mjs
+      - run: node --test tests/pending-materials.dom.mjs tests/original-archive.dom.mjs tests/pipeline-recovery.dom.mjs tests/authored-companion.dom.mjs
         working-directory: web
       - run: python scripts/release.py /tmp/serein-public.zip
       - name: Build exact tested revision

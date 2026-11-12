@@ -143,15 +143,16 @@ test('gateway separates web auth from API auth, saves settings and streams respo
       assert.ok(requests.some(r=>r.path===path.replace('/__serein/','/v1/')&&r.method==='GET'));
     }
     const postHeaders={...auth,'Content-Type':'application/json',Origin:base};
-    const plans=await fetch(base+'/__serein/authored-types',{method:'POST',headers:postHeaders,
-      body:JSON.stringify({tool:'list_plans',arguments:{status:'active',limit:50}})});
-    assert.equal(plans.status,200);assert.equal(plans.headers.get('cache-control'),'no-store');
+    const feeling=await fetch(base+'/__serein/authored-types',{method:'POST',headers:postHeaders,
+      body:JSON.stringify({tool:'read_feel',arguments:{feel_id:'synthetic-feel'}})});
+    assert.equal(feeling.status,200);assert.equal(feeling.headers.get('cache-control'),'no-store');
     assert.ok(requests.some(r=>r.path==='/api/authored-types'&&r.auth==='Bearer synthetic-api-key'));
-    assert.deepEqual(requests.findLast(r=>r.path==='/api/authored-types'&&r.body).body,{tool:'list_plans',arguments:{status:'active',limit:50}});
+    assert.deepEqual(requests.findLast(r=>r.path==='/api/authored-types'&&r.body).body,{tool:'read_feel',arguments:{feel_id:'synthetic-feel'}});
     const typedCount=requests.length;
-    for(const [headers,tool,status] of [[{'Content-Type':'application/json'},'list_plans',401],
-      [{...postHeaders,Origin:'https://foreign.invalid'},'update_plan',403],
-      [postHeaders,'pipeline_next',404]]){
+    for(const [headers,tool,status] of [[{'Content-Type':'application/json'},'read_feel',401],
+      [{...postHeaders,Origin:'https://foreign.invalid'},'edit_feel',403],
+      [postHeaders,'pipeline_next',404],
+      ...['create_plan','read_plan','list_plans','update_plan'].map(tool=>[postHeaders,tool,404])]){
       assert.equal((await fetch(base+'/__serein/authored-types',{method:'POST',headers,body:JSON.stringify({tool,arguments:{}})})).status,status);
     }
     assert.equal(requests.length,typedCount);

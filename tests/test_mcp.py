@@ -129,7 +129,29 @@ def test_read_only_mcp_has_no_writing_tools(tmp_path):
     server = create_server(Application(Settings(tmp_path / "not-opened.db")))
     names = {tool.name for tool in asyncio.run(server.list_tools())}
     assert names == {"read_memory", "recall_memory", "find_arc", "read_arc_materials", "read_diary", "read_preferences",
-                     "read_feel", "find_feelings", "read_plan", "list_plans", "list_ob_archive", "read_ob_archive"}
+                     "read_feel", "find_feelings", "list_ob_archive", "read_ob_archive"}
+
+
+@pytest.mark.parametrize('private,writable', [(False, False), (False, True), (True, True)])
+def test_retired_plan_allowlist_keeps_upgrade_available(tmp_path, writable, private):
+    database = tmp_path / 'retired-plan.db'
+    with Store(database):
+        pass
+    retired = {'create_plan', 'read_plan', 'list_plans', 'update_plan'}
+    settings = Settings(database, writable=writable, mcp_tools=[*sorted(retired), 'read_memory'])
+    server = create_server(Application(settings), private=private)
+
+    async def exercise():
+        for _ in range(2):
+            assert {tool.name for tool in await server.list_tools()} == {'read_memory'}
+        for name in retired:
+            with pytest.raises(Exception, match='Unknown tool'):
+                await server.call_tool(name, {})
+
+    asyncio.run(exercise())
+    with pytest.raises(ValueError, match='unavailable'):
+        create_server(Application(Settings(database, writable=writable,
+                                           mcp_tools=[*sorted(retired), 'unknown_plan_tool'])), private=private)
 
 
 @pytest.mark.parametrize('selected', [['save_memory'], ['write_scene'], ['edit_scene']])
