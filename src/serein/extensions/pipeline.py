@@ -41,6 +41,8 @@ EXECUTION_COMPATIBLE_REVISIONS=frozenset({
     # frozen role requests, accepted outputs and retry budgets are unchanged.
     'bbd63c2b740f104892f7756e4c326440bf7430de2131fedb9bc88d007383887e',
     '8e9c74ff57e94d9e17d422302701426abc303c8d31b2dd826cc817cf1e37a348',
+    # 9a7c76a: scheduling responsiveness only; frozen requests are unchanged.
+    '57d5e2e81613fe34dda41a1d99e44c0a4e49d62ca5d3f1583367c9899f438dc9',
 })
 
 _RUNTIME_CONTRACT_FILES = (
@@ -2281,7 +2283,13 @@ async def _scheduled_advance(database):
     # already suppress unchanged material without any model call.
     # Parked short activities leave the waiting area here, at most one model
     # pass per tick. Their exit is optional and must never stop settlement.
-    try:pending_materials.settle_stale(database,clock=current)
+    review=asyncio.create_task(asyncio.to_thread(pending_materials.settle_stale,database,clock=current))
+    try:await asyncio.shield(review)
+    except asyncio.CancelledError:
+        # The disk transaction must finish before execute releases its lease.
+        from ..work_tasks import _finish_disk_batch
+        await _finish_disk_batch(review)
+        raise
     except Exception:
         import logging
         logging.getLogger(__name__).exception('Parked short activities were not reviewed; settlement continues')

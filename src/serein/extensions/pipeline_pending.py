@@ -96,13 +96,14 @@ def check_archive(database,pending_id,confirm):
         if not _archive_receipt(store.conn,pending_id):_archive_check(store.conn,pending_id)
 
 
-def _archive_in_store(conn,pending_id,*,automatic=False,clock=None):
+def _archive_in_store(conn,pending_id,*,automatic=False,clock=None,verified_proof=None):
     """Atomic terminal receipt; no source, Event, route or accepted output is deleted."""
     from datetime import datetime,timezone
     previous=_archive_receipt(conn,pending_id)
     if previous:return previous
     row,data,ids,originals=_archive_check(conn,pending_id)
-    proof=_automatic_archive_proof(conn,row,data,ids,originals,clock=clock) if automatic else {'reason':'user_confirmed'}
+    proof=(verified_proof if verified_proof is not None else
+           _automatic_archive_proof(conn,row,data,ids,originals,clock=clock)) if automatic else {'reason':'user_confirmed'}
     if proof is None:return None
     stamp=(clock or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
     operation='archive_pending:'+str(pending_id)+':'+digest(row['batch_id'])[:16]
@@ -190,13 +191,19 @@ def _automatic_archive_proof(conn,row,data,ids,originals,*,clock=None):
     from datetime import datetime,timedelta,timezone
     from ..source_time import source_datetime
     from . import pipeline as p,pipeline_recovery as recovery
-    proof=_content_deferral_proof(conn,row,data,ids)
-    if proof is None:return None
     current=(clock or datetime.now(timezone.utc)).astimezone(timezone.utc)
     try:
         # Acquisition time protects freshly uploaded old history. Retain/resume
         # timestamps are intentionally irrelevant, so retries cannot renew a wait.
         latest=max(max(source_datetime(raw['created_at'],raw['source']),source_datetime(raw['ingested_at'])) for raw in originals)
+        chars=sum(len(raw['text']) for raw in originals)
+        tiny=len(ids)<=ARCHIVE_SMALL_MESSAGES and chars<=ARCHIVE_SMALL_CHARS
+        minimum_age=timedelta(hours=ARCHIVE_SMALL_HOURS if tiny else ARCHIVE_STALE_DAYS*24)
+        # Later related messages can only shorten inactivity. Avoid replaying
+        # historical routing evidence while even the originals are too recent.
+        if current-latest<minimum_age:return None
+        proof=_content_deferral_proof(conn,row,data,ids)
+        if proof is None:return None
         if any(json.loads(raw['metadata_json']).get('timestamp_source')=='import_time' for raw in originals):return None
         tracks={a['primary_track_id'] for a in data['routing_result']['assignments'] if a['source_message_id'] in ids}
         if not tracks:return None
@@ -231,10 +238,8 @@ def _automatic_archive_proof(conn,row,data,ids,originals,*,clock=None):
             frozen=next((m for m in matches[0]['messages'] if m['id']==raw['id']),None)
             if frozen is None or recovery._message_key(p.message(raw))!=recovery._message_key(frozen):return None
             if related:latest=max(latest,source_datetime(raw['created_at'],raw['source']),source_datetime(raw['ingested_at']))
-        chars=sum(len(raw['text']) for raw in originals)
-        tiny=len(ids)<=ARCHIVE_SMALL_MESSAGES and chars<=ARCHIVE_SMALL_CHARS
         age=current-latest
-        if age<timedelta(hours=ARCHIVE_SMALL_HOURS if tiny else ARCHIVE_STALE_DAYS*24):return None
+        if age<minimum_age:return None
         return {**proof,'reason':'short_fragment_inactive' if tiny else 'old_topic_inactive',
                 'latest_related_at':latest.isoformat(),'track_ids':sorted(tracks),
                 'source_messages':len(ids),'source_chars':chars,'policy_version':1}
@@ -244,10 +249,20 @@ def _automatic_archive_proof(conn,row,data,ids,originals,*,clock=None):
 def archive_stale(database,*,clock=None):
     """Close proven content deferrals without another paid model call."""
     closed=[]
-    with Store(database) as store,store.transaction(immediate=True):
+    with Store(database) as store:
         candidates=[r[0] for r in store.conn.execute("SELECT id FROM pipeline_pending_materials WHERE status='open' AND kind='writing' ORDER BY id")]
         for pending_id in candidates:
-            try:receipt=_archive_in_store(store.conn,pending_id,automatic=True,clock=clock)
+            try:
+                # Long provenance reads must not hold the database writer lock.
+                # The same connection's data_version rejects any intervening
+                # external commit before the short, atomic terminal write.
+                version=store.conn.execute('PRAGMA data_version').fetchone()[0]
+                row,data,ids,originals=_archive_check(store.conn,pending_id)
+                proof=_automatic_archive_proof(store.conn,row,data,ids,originals,clock=clock)
+                if proof is None:continue
+                with store.transaction(immediate=True):
+                    if store.conn.execute('PRAGMA data_version').fetchone()[0]!=version:continue
+                    receipt=_archive_in_store(store.conn,pending_id,automatic=True,clock=clock,verified_proof=proof)
             except (Conflict,AttributeError,KeyError,TypeError,ValueError):continue
             if receipt:closed.append(pending_id)
     return closed

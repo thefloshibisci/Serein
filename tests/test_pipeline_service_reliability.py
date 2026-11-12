@@ -11,6 +11,39 @@ from serein.core.store import Store, encode
 from serein.extensions import pipeline as p
 
 
+def test_pending_review_keeps_event_loop_responsive_and_lease_until_cancelled_disk_work_finishes(settings,monkeypatch):
+    import threading
+    from serein import work_tasks
+    p.initialize(settings.database)
+    monkeypatch.setattr(p,'datetime',Clock)
+    started=threading.Event();release=threading.Event();finished=threading.Event()
+    def review(*args,**kwargs):
+        started.set()
+        try:
+            assert release.wait(3),'Event loop could not release disk work'
+        finally:finished.set()
+    monkeypatch.setattr(p.pending_materials,'settle_stale',review)
+    async def scenario():
+        task=asyncio.create_task(p.scheduled_advance(settings.database))
+        try:
+            for _ in range(100):
+                if started.is_set():break
+                await asyncio.sleep(.01)
+            assert started.is_set() and not finished.is_set()
+            task.cancel();await asyncio.sleep(.02)
+            task.cancel();await asyncio.sleep(.02)
+            assert not task.done()
+            async def forbidden():pytest.fail('Lease released before disk work finished')
+            assert (await work_tasks.execute(settings.database,'pipeline',forbidden))['status']=='busy'
+            release.set()
+            with pytest.raises(asyncio.CancelledError):await task
+            assert finished.is_set()
+        finally:
+            release.set()
+            await asyncio.gather(task,return_exceptions=True)
+    asyncio.run(scenario())
+
+
 def test_ready_event_settles_before_slow_daytime_router(settings, monkeypatch):
     seed(settings,session='ready',start=Clock.value.replace(hour=1,minute=0),count=1)
     seed(settings,session='daytime',start=Clock.value.replace(hour=3,minute=0),count=5)

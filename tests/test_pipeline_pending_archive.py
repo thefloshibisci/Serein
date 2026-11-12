@@ -259,3 +259,30 @@ def test_archive_http_requires_confirmation_and_repeated_calls_return_same_recei
     assert client.post('/v1/pipeline/archive-pending',json=payload).json()==first.json()
     current=client.get('/v1/pipeline/status').json()
     assert next(row for row in current['pending_materials'] if row['id']==item['id'])['status']=='archived_only'
+
+
+def test_automatic_proof_does_not_hold_writer_lock_and_rejects_concurrent_change(settings,monkeypatch):
+    item=retained(settings);before=snapshot(settings)
+    native=pending._automatic_archive_proof;changed=[]
+    def interrupted_proof(conn,*args,**kwargs):
+        proof=native(conn,*args,**kwargs)
+        assert proof is not None
+        # This separate connection must commit even while provenance is read.
+        with Store(settings.database) as writer:
+            writer.conn.execute('PRAGMA busy_timeout=100')
+            writer.conn.execute("UPDATE pipeline_pending_materials SET reason='Concurrent update' WHERE id=?",(item['id'],))
+        changed.append(True)
+        return proof
+    monkeypatch.setattr(pending,'_automatic_archive_proof',interrupted_proof)
+    assert pending.archive_stale(settings.database,clock=later(2))==[]
+    assert changed==[True] and state(settings,item['id'])['status']=='open'
+    assert snapshot(settings)==before
+    monkeypatch.setattr(pending,'_automatic_archive_proof',native)
+    assert pending.archive_stale(settings.database,clock=later(2))==[item['id']]
+
+
+def test_recent_originals_skip_expensive_evidence_replay(settings,monkeypatch):
+    item=retained(settings)
+    monkeypatch.setattr(pending,'_content_deferral_proof',lambda *a:pytest.fail('Recent material replayed historical evidence'))
+    assert pending.archive_stale(settings.database,clock=later(.5))==[]
+    assert state(settings,item['id'])['status']=='open'
