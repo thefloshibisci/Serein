@@ -7654,7 +7654,7 @@ label:has(input:focus-visible) {
 .pending-material-detail { padding-top: 24px; margin-top: 24px; border-top: 1px solid var(--line); }
 .pending-material-detail > header, .pending-originals article > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .pending-material-detail > header button { padding: 6px 10px; border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer; }
-.pending-originals { max-height: 32rem; overflow-y: auto; overscroll-behavior: contain; border-block: 1px solid var(--line); }
+.pending-originals { max-height: 32rem; overflow-y: auto; overscroll-behavior-x: contain; border-block: 1px solid var(--line); }
 .pending-originals article { padding: 16px 4px; border-bottom: 1px solid var(--line); }
 .pending-originals article:last-child { border-bottom: 0; }
 .pending-originals article:focus-visible, .pending-material-detail:focus-visible { outline: 2px solid #657a72; outline-offset: -2px; }
