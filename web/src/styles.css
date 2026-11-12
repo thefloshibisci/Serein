@@ -28,6 +28,24 @@ body {
 }
 button, input, textarea { font: inherit; }
 
+/* A reverse proxy may append a registration link outside React's root.
+   Keep it in normal flow on the home cover, outside all reading screens. */
+body > footer:has(> a[href="https://beian.miit.gov.cn/"]) {
+  display: none;
+  position: static !important;
+  inset: auto !important;
+  transform: none !important;
+  z-index: auto !important;
+}
+body:has(.app-shell[data-home-cover="true"]) > footer:has(> a[href="https://beian.miit.gov.cn/"]) {
+  display: block;
+  color: var(--muted);
+}
+body > footer > a[href="https://beian.miit.gov.cn/"] {
+  color: inherit;
+  text-decoration: none;
+}
+
 .markdown-projection {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -7706,7 +7724,7 @@ html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }
 .settings-panel__body--slides > [role="tabpanel"]::-webkit-scrollbar { display: none; }
 .settings-panel__body--slides > [role="tabpanel"] {
   flex: 0 0 100%; width: 100%; min-width: 0; box-sizing: border-box;
-  padding: 28px 26px 40px; overflow-y: auto; scroll-snap-align: start; scrollbar-width: none;
+  padding: 28px 26px 40px; overflow-x: hidden; overflow-y: auto; scroll-snap-align: start; scrollbar-width: none;
 }
 @media (max-width: 700px) {
   .settings-page .settings-panel__body--slides { height: calc(100dvh - 146px); min-height: 360px; }

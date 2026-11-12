@@ -36,27 +36,43 @@ export function SettingsPanel({
   const pages = useRef(null);
   const snapTimer = useRef(null);
   const targetPage = useRef(null);
+  const selectedTab = useRef("appearance");
+  function pageLeft(element, index) {
+    const panel = element.querySelector(`#settings-content-${tabs[index][0]}`);
+    return panel ? element.scrollLeft + panel.getBoundingClientRect().left - element.getBoundingClientRect().left : 0;
+  }
   function showTab(key) {
     const index = tabs.findIndex(([name]) => name === key);
     if (index < 0) return;
+    selectedTab.current = key;
     setTab(key);
     const element = pages.current;
     if (!element || !open) return;
     window.clearTimeout(snapTimer.current);
     targetPage.current = index;
-    const left = element.clientWidth * index;
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     element.style.scrollSnapType = "none";
-    element.scrollTo({ left, behavior: reduced ? "instant" : "smooth" });
+    element.scrollTo({ left: pageLeft(element, index), behavior: reduced ? "instant" : "smooth" });
     snapTimer.current = window.setTimeout(() => {
-      element.scrollTo({ left, behavior: "instant" });
+      // Mobile viewport changes during the animation must not leave the
+      // selected tab pointing at a neighbour using the old captured width.
+      element.scrollTo({ left: pageLeft(element, index), behavior: "instant" });
       element.style.scrollSnapType = "";
       setTab(key);
       targetPage.current = null;
     }, reduced ? 0 : 480);
   }
   useLayoutEffect(() => {
-    if (open && pages.current) pages.current.scrollTo({ left: pages.current.clientWidth * tabs.findIndex(([key]) => key === tab), behavior: "instant" });
+    const element = pages.current;
+    if (!open || !element) return;
+    const align = () => {
+      const index = targetPage.current ?? tabs.findIndex(([key]) => key === selectedTab.current);
+      element.scrollTo({ left: pageLeft(element, index), behavior: "instant" });
+    };
+    align();
+    const observer = new ResizeObserver(align);
+    observer.observe(element);
+    return () => observer.disconnect();
   }, [open]);
   useEffect(() => () => window.clearTimeout(snapTimer.current), []);
   useEffect(() => {
@@ -111,7 +127,9 @@ export function SettingsPanel({
         <div className="settings-panel__body settings-panel__body--slides" ref={pages} onScroll={event => {
           if (targetPage.current !== null || !open) return;
           const element = event.currentTarget;
-          const index = Math.min(tabs.length - 1, Math.max(0, Math.round(element.scrollLeft / Math.max(1, element.clientWidth))));
+          const index = tabs.reduce((nearest, _, current) =>
+            Math.abs(pageLeft(element, current) - element.scrollLeft) < Math.abs(pageLeft(element, nearest) - element.scrollLeft) ? current : nearest, 0);
+          selectedTab.current = tabs[index][0];
           setTab(tabs[index][0]);
         }}>
           <div role="tabpanel" id="settings-content-appearance" aria-labelledby="settings-tab-appearance" aria-hidden={tab !== "appearance"} inert={tab !== "appearance"}>

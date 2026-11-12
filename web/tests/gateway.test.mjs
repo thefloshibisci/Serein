@@ -54,7 +54,7 @@ test('gateway separates web auth from API auth, saves settings and streams respo
       if(req.url==='/diaries/999999'){res.statusCode=404;res.end('{"message":"Synthetic diary missing"}');return;}
       res.end('{"status":"deleted","recoverable":true}');return;
     }
-    if(['/api/authored-types','/api/fact-events/status','/api/fact-events/delete','/api/buckets/delete','/v1/tools/call','/v1/pipeline/rebuild','/v1/pipeline/retry-image','/v1/pipeline/retry-batch','/v1/pipeline/recovery-preview','/v1/pipeline/skip-batch','/v1/pipeline/rebatch','/v1/pipeline/resume-pending'].includes(req.url)){
+    if(['/api/authored-types','/api/fact-events/status','/api/fact-events/delete','/api/buckets/delete','/v1/tools/call','/v1/pipeline/rebuild','/v1/pipeline/retry-image','/v1/pipeline/retry-batch','/v1/pipeline/recovery-preview','/v1/pipeline/skip-batch','/v1/pipeline/rebatch','/v1/pipeline/resume-pending','/v1/pipeline/archive-pending'].includes(req.url)){
       let raw='';req.on('data',chunk=>raw+=chunk);req.on('end',()=>{
         const body=JSON.parse(raw);requests.push({path:req.url,body});
         const payload=req.url==='/api/fact-events/status'
@@ -292,7 +292,8 @@ test('gateway separates web auth from API auth, saves settings and streams respo
     for(const [action,body] of [['recovery-preview',{batch_id:'pipeline:synthetic',max_input_chars:5000}],
       ['skip-batch',{batch_id:'pipeline:synthetic',confirm:'SKIP_PIPELINE_BATCH'}],
       ['rebatch',{batch_id:'pipeline:synthetic',confirm:'REBATCH_PIPELINE_BATCH',max_input_chars:5000}],
-      ['resume-pending',{pending_id:17,replan:false}]]){
+      ['resume-pending',{pending_id:17,replan:false}],
+      ['archive-pending',{pending_id:17,confirm:'ARCHIVE_PENDING_ORIGINALS'}]]){
       assert.equal((await fetch(base+'/__serein/pipeline/'+action,{method:'POST',headers:postHeaders,body:JSON.stringify(body)})).status,200);
       assert.ok(requests.some(r=>r.path==='/v1/pipeline/'+action&&JSON.stringify(r.body)===JSON.stringify(body)));
       assert.equal((await fetch(base+'/__serein/pipeline/'+action,{method:'POST',headers:{...postHeaders,Origin:'https://foreign.invalid'},body:JSON.stringify(body)})).status,403);

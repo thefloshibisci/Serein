@@ -148,6 +148,15 @@ def routes(settings,auth):
         async def operation():return resume(settings.database,pending_id,replan=replan)
         return await execute(settings.database,'pipeline',operation)
 
+    @router.post('/v1/pipeline/archive-pending')
+    async def archive_pending(body:dict):
+        from ..extensions.pipeline_pending import archive,check_archive
+        from ..work_tasks import execute
+        pending_id=body.get('pending_id');confirm=body.get('confirm')
+        check_archive(settings.database,pending_id,confirm)
+        async def operation():return archive(settings.database,pending_id,confirm)
+        return await execute(settings.database,'pipeline',operation)
+
     @router.post('/v1/pipeline/retry-batch')
     async def retry_pipeline_batch(body:dict):
         from ..work_tasks import execute

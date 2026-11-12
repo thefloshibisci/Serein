@@ -36,6 +36,11 @@ EXECUTION_COMPATIBLE_REVISIONS=frozenset({
     # Commit 00a3748 as deployed. Its successor only adds the exit for parked
     # short activities and leaves every frozen role request unchanged.
     '2e849cbc86b8c8395051726d23a01db670cdcea27c25efe2dca8664b10ad92b7',
+    # Commit 5c582e4: Windows archive and verified deployed LF sources.
+    # Original-only closure adds a terminal path;
+    # frozen role requests, accepted outputs and retry budgets are unchanged.
+    'bbd63c2b740f104892f7756e4c326440bf7430de2131fedb9bc88d007383887e',
+    '8e9c74ff57e94d9e17d422302701426abc303c8d31b2dd826cc817cf1e37a348',
 })
 
 _RUNTIME_CONTRACT_FILES = (

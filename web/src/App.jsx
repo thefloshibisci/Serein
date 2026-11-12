@@ -131,6 +131,7 @@ export function App() {
   return (
     <main
       ref={root}
+      data-home-cover={activeArea === "醒来" && awakeEntry === "cover" ? "true" : "false"}
       className={`app-shell app-shell--${
         activeArea === "醒来"
           ? "awake"

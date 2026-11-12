@@ -10,12 +10,14 @@ const {build,stop}=require('esbuild'),{JSDOM}=require('jsdom');
 const dom=new JSDOM('<div id="root"></div>',{url:'https://synthetic.invalid'});
 for(const key of ['window','document','navigator','HTMLElement','Event','Node'])Object.defineProperty(globalThis,key,{value:dom.window[key],configurable:true});
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+dom.window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
+dom.window.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new Event('close'));};
 const channels=[],NativeChannel=globalThis.MessageChannel;
 globalThis.MessageChannel=class extends NativeChannel{constructor(){super();channels.push(this);}};
 const directory=await mkdtemp(join(tmpdir(),'serein-pending-dom-'));
-const output=await build({stdin:{contents:`import React,{act} from 'react';import {createRoot} from 'react-dom/client';import {PendingMaterials} from './src/components/PendingMaterials.jsx';export {act};export function mount(work){const root=createRoot(document.getElementById('root'));root.render(<PendingMaterials work={work}/>);return root;}`,resolveDir:webRoot,loader:'jsx'},jsx:'automatic',bundle:true,platform:'node',format:'esm',write:false,define:{'process.env.NODE_ENV':'"development"'}});
+const output=await build({stdin:{contents:`import React,{act} from 'react';import {createRoot} from 'react-dom/client';import {PendingMaterials} from './src/components/PendingMaterials.jsx';export {act};export function update(root,work,props={}){root.render(<PendingMaterials work={work} {...props}/>);}export function mount(work,props){const root=createRoot(document.getElementById('root'));update(root,work,props);return root;}`,resolveDir:webRoot,loader:'jsx'},jsx:'automatic',bundle:true,platform:'node',format:'esm',write:false,define:{'process.env.NODE_ENV':'"development"'}});
 const path=join(directory,'bundle.mjs');await writeFile(path,output.outputFiles[0].text);
-const {act,mount}=await import(pathToFileURL(path));let root,busy=false,skipped=false;const requests=[];
+const {act,mount,update}=await import(pathToFileURL(path));let root,busy=false,skipped=false,archived=false;const requests=[];
 const item={id:17,batch_id:'synthetic',status:'open',kind:'writing',reason:'Synthetic writer failure',summary:'Book club',originals:2,original_chars:100,can_skip:true,
   locator:{source:'synthetic',session_id:'book-chat',first_at:'2025-01-01T00:00:00Z',last_at:'2025-01-01T00:01:00Z',first_raw_id:101,last_raw_id:102,preview:'FIRST_SNIPPET',longest_message:{id:102,role:'assistant',chars:2000}},
   resolved_event_ids:[],last_attempt:{role:'event_writer:0:0',error:'Synthetic error',output_chars:20}};
@@ -25,15 +27,16 @@ globalThis.fetch=async(url,options={})=>{
     {id:102,role:'assistant',content:'L'.repeat(2000)}],last_attempt:{output_text:'SYNTHETIC_BAD_OUTPUT'}};
   else if(url.endsWith('/resume-pending'))result={status:busy?'busy':'resumed'};
   else if(url.endsWith('/next'))result={status:'queued'};
-  else if(url.endsWith('/status'))result={pending_materials:[{...item,status:skipped?'resolved_skipped':'resolved',resolved_event_ids:skipped?[]:['event-synthetic']}]};
+  else if(url.endsWith('/status'))result={pending_materials:[{...item,status:archived?'archived_only':skipped?'resolved_skipped':'resolved',resolved_event_ids:skipped||archived?[]:['event-synthetic']}]};
   else if(url.endsWith('/recovery-preview'))result={pending_id:17,batch_id:'synthetic',originals:2,original_chars:100,max_input_chars:5000,batches:2,oversized_batches:0,can_rebatch:true};
   else if(url.endsWith('/rebatch'))result={status:'rebatched'};
   else if(url.endsWith('/skip-batch')){skipped=true;result={status:'skipped_batch',skipped_originals:2};}
+  else if(url.endsWith('/archive-pending')){archived=true;result={status:'archived_only',pending_id:17,originals:2,closure_receipt:{reason:'manual'}};}
   else throw new Error('Unexpected request '+url);
   return {ok:true,json:async()=>structuredClone(result)};
 };
 const button=text=>[...document.querySelectorAll('button')].find(node=>node.textContent===text);
-async function render(status){if(root)await act(async()=>root.unmount());requests.length=0;skipped=false;await act(async()=>{root=mount({status,pending_materials:[item]});});}
+async function render(status){if(root)await act(async()=>root.unmount());requests.length=0;skipped=false;archived=false;await act(async()=>{root=mount({status,pending_materials:[item]});});}
 async function click(text){await act(async()=>{button(text).click();});}
 after(async()=>{if(root)await act(async()=>root.unmount());dom.window.close();stop();for(const c of channels){c.port1.close();c.port2.close();}globalThis.MessageChannel=NativeChannel;await rm(directory,{recursive:true,force:true});});
 test('pending summaries do not fetch originals until explicitly opened',async()=>{
@@ -66,9 +69,79 @@ test('skipping is limited to the selected batch and requires a preview plus conf
   await render();await click('跳过本批，保留原话');
   assert(!requests.some(r=>r.url.endsWith('/skip-batch')));
   await click('取消');assert(!requests.some(r=>r.url.endsWith('/skip-batch')));
-  await click('跳过本批，保留原话');await click('确认仅跳过本批');
+  await click('跳过本批，保留原话');assert.equal(document.querySelector('.pending-finish-dialog').open,true);await click('确认结束整理');
   assert.deepEqual(requests.find(r=>r.url.endsWith('/skip-batch')).body,{batch_id:'synthetic',confirm:'SKIP_PIPELINE_BATCH'});
   assert.match(document.body.textContent,/已手动跳过，原话保留/);
+  assert(!requests.some(r=>r.url.endsWith('/next')));
+});
+
+test('archive-only finishes done-batch leftovers with a visible confirmation and no new model work',async()=>{
+  await render();await act(async()=>{root.unmount();root=mount({status:'idle',pending_materials:[{...item,can_skip:false,can_archive:true,plan_compatible:false}]});});
+  await click('只保留原话');assert.equal(document.querySelector('.pending-finish-dialog').open,true);
+  assert(!requests.some(r=>r.url.endsWith('/archive-pending')));
+  await click('取消');assert.equal(document.querySelector('.pending-finish-dialog').open,false);
+  await click('只保留原话');await click('确认结束整理');
+  assert.deepEqual(requests.find(r=>r.url.endsWith('/archive-pending')).body,{pending_id:17,confirm:'ARCHIVE_PENDING_ORIGINALS'});
+  assert(!document.querySelector('.pending-material'));assert.match(document.body.textContent,/已结束整理，原话保留/);
+  assert(!requests.some(r=>r.url.endsWith('/next')));
+});
+
+test('confirmed finishes survive late work props and stale refreshes without hiding other pending items',async()=>{
+  const originalFetch=globalThis.fetch;
+  for(const action of ['archive','skip']){
+    await render();
+    const selected={...item,can_archive:action==='archive'},other={...item,id:18,batch_id:'another-batch'};
+    const stale={status:'idle',pending_materials:[selected,other]},changes=[];
+    const props={onChange:value=>changes.push(value)};
+    await act(async()=>update(root,stale,props));
+    globalThis.fetch=async(url,options)=>url.endsWith('/status')?{ok:true,json:async()=>structuredClone(stale)}:originalFetch(url,options);
+    await click(action==='archive'?'只保留原话':'跳过本批，保留原话');await click('确认结束整理');
+    assert.equal(changes.at(-1).pending_materials[0].status,action==='archive'?'archived_only':'resolved_skipped');
+    await act(async()=>update(root,structuredClone(stale),props));
+    assert.deepEqual([...document.querySelectorAll('.pending-material')].map(node=>node.getAttribute('aria-label')),['待办 18']);
+    assert(!requests.some(request=>request.url.endsWith('/next')));
+    globalThis.fetch=originalFetch;
+  }
+});
+
+test('a standalone poll started before archiving cannot undo its terminal state or notify the parent with stale work',async()=>{
+  await render();await act(async()=>root.unmount());root=null;
+  const originalFetch=globalThis.fetch,originalInterval=globalThis.setInterval,originalClear=globalThis.clearInterval;
+  const stale={status:'idle',pending_materials:[{...item,can_archive:true}]},observed=[];
+  let poll,releasePoll,delay=false,done=false;
+  globalThis.setInterval=callback=>{poll=callback;return 1;};globalThis.clearInterval=()=>{};
+  globalThis.fetch=async(url,options)=>{
+    if(url.endsWith('/status')){
+      if(delay){delay=false;return new Promise(resolve=>{releasePoll=()=>resolve({ok:true,json:async()=>structuredClone(stale)});});}
+      return {ok:true,json:async()=>({...stale,pending_materials:[{...stale.pending_materials[0],status:done?'archived_only':'open'}]})};
+    }
+    const result=await originalFetch(url,options);if(url.endsWith('/archive-pending'))done=true;return result;
+  };
+  try{
+    await act(async()=>{root=mount(undefined,{onStatus:value=>observed.push(value)});});
+    delay=true;await act(async()=>{poll();});
+    await click('只保留原话');await click('确认结束整理');
+    await act(async()=>releasePoll());
+    assert.equal(document.querySelectorAll('.pending-material').length,0);
+    assert.equal(observed.at(-1).pending_materials[0].status,'archived_only');
+    assert(!requests.some(request=>request.url.endsWith('/next')));
+  }finally{
+    if(root)await act(async()=>root.unmount());root=null;
+    globalThis.fetch=originalFetch;globalThis.setInterval=originalInterval;globalThis.clearInterval=originalClear;
+  }
+});
+
+test('an archive error stays in the visible dialog and does not claim completion',async()=>{
+  await render();await act(async()=>update(root,{status:'idle',pending_materials:[{...item,can_archive:true}]}));
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>url.endsWith('/archive-pending')?{ok:false,json:async()=>({detail:'Synthetic shared dependency'})}:originalFetch(url,options);
+  try{
+    await click('只保留原话');await click('确认结束整理');
+    const dialog=document.querySelector('.pending-finish-dialog');assert(dialog.open);
+    assert.match(dialog.querySelector('[role="alert"]').textContent,/Synthetic shared dependency/);
+    assert.equal(document.querySelectorAll('.pending-material').length,1);
+    assert(!requests.some(request=>request.url.endsWith('/next')));
+  }finally{globalThis.fetch=originalFetch;}
 });
 
 test('a running task still permits material inspection while preventing competing recovery actions',async()=>{
@@ -104,5 +177,5 @@ test('an unresolved review remains actionable alongside chats waiting for contin
   assert.match(document.body.textContent,/有 1 批材料待处理/);
   assert.equal(document.querySelector('.pending-materials > .pending-material').getAttribute('aria-label'),'待办 17');
   assert(button('从失败步骤继续'));
-  assert.match(document.querySelector('.pending-materials__waiting').textContent,/不能安全写入的材料仍会保留在待办中/);
+  assert.match(document.querySelector('.pending-materials__waiting').textContent,/会结束整理，只保留原话/);
 });

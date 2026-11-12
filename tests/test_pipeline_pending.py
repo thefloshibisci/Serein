@@ -445,8 +445,8 @@ def test_optional_pending_checks_agent_delivery_size(settings):
     assert not p.context_request_fits(settings.database,batch,request,'event_curator:0:context',None)
 
 
-# Parked short activities: the round gate waits for a second exchange and
-# silence never closes one, so expiry is their only automatic exit.
+# Content-level waits can end with an original-only receipt. Larger gate-only
+# activities still get one evidence review before the inactivity limit.
 from datetime import datetime,timedelta,timezone
 
 from test_public_features import raw_archive
@@ -479,27 +479,27 @@ def outcomes(settings):
 
 
 def test_parked_activity_waits_through_the_continuation_window(settings):
-    item=parked(settings,chars=200)
+    item=parked(settings,chars=400)
     assert pending.settle_stale(settings.database)=={'resumed':None,'blocked':None}
     assert pending.settle_stale(settings.database,clock=LATER(2))=={'resumed':None,'blocked':None}
     with Store(settings.database) as store:assert pending.entries(store.conn)[0]['status']=='open'
     assert outcomes(settings)==[] and item['originals']==2
 
 
-def test_expired_tiny_exchange_is_reviewed_not_discarded_by_length(settings):
+def test_expired_tiny_exchange_keeps_originals_and_ends_without_model_retry(settings):
     item=parked(settings)
-    assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':item['id'],'blocked':None}
-    assert outcomes(settings)==[]
-    result=asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
-    assert result['events']==1 and outcomes(settings)==['settled','settled']
+    assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':None,'blocked':None,'archived_only':[item['id']]}
+    assert outcomes(settings)==['archive_only','archive_only']
+    async def forbidden(*args):pytest.fail('Archived-only material reached a model')
+    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=forbidden))['status']=='current'
     with Store(settings.database) as store:
         closed=pending.entries(store.conn)[0]
-        assert closed['status']=='resolved'
+        assert closed['status']=='archived_only'
         assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==2
 
 
 def test_expired_substantial_activity_gets_one_ungated_pass_and_becomes_an_event(settings):
-    item=parked(settings,chars=200);calls=[]
+    item=parked(settings,chars=400);calls=[]
     assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':item['id'],'blocked':None}
     # A second tick cannot start more paid work while the first is unfinished.
     assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':None,'blocked':None}
@@ -521,26 +521,26 @@ def test_expired_substantial_activity_gets_one_ungated_pass_and_becomes_an_event
     assert p.read_settings(settings.database)['pipeline']['round_gate_enabled'] is True
 
 
-def test_expired_activity_keeps_insufficient_evidence_visible_without_repeating_paid_work(settings):
-    item=parked(settings,chars=200)
+def test_expired_activity_archives_insufficient_evidence_without_repeating_paid_work(settings):
+    item=parked(settings,chars=400)
     assert pending.settle_stale(settings.database,clock=LATER(4))['resumed']==item['id']
     assert asyncio.run(p.advance(settings.database,include_recent=True,runner=insufficient))['pending']==2
     with Store(settings.database) as store:
         again=pending.entries(store.conn)[0]
         assert again['status']=='open' and not again['waiting_for_continuation']
-    assert pending.settle_stale(settings.database,clock=LATER(9))=={'resumed':None,'blocked':None}
+    assert pending.settle_stale(settings.database,clock=LATER(9))=={'resumed':None,'blocked':None,'archived_only':[item['id']]}
     async def forbidden(*args):pytest.fail('Expired material was sent to a model twice')
     assert asyncio.run(p.advance(settings.database,include_recent=True,runner=forbidden))['status']=='current'
-    assert outcomes(settings)==[]
+    assert outcomes(settings)==['archive_only','archive_only']
     with Store(settings.database) as store:
         kept=pending.entries(store.conn)[0]
-        assert kept['status']=='open' and kept['originals']==2
+        assert kept['status']=='archived_only' and kept['originals']==2
         assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==2
 
 
 def test_expired_pass_cannot_place_a_repair_hold_on_the_chat(settings,monkeypatch):
     from serein.extensions import pipeline_recovery as recovery
-    item=parked(settings,chars=200)
+    item=parked(settings,chars=400)
     assert pending.settle_stale(settings.database,clock=LATER(4))['resumed']==item['id']
     def broken(*args):raise p.RoutingRecoveryError('synthetic frozen plan mismatch')
     monkeypatch.setattr(recovery,'assert_downstream_snapshot',broken)
@@ -590,25 +590,25 @@ def test_unverified_curator_output_is_not_hidden_or_retried(settings):
     assert outcomes(settings)==[]
 
 
-def test_writer_failure_with_gate_enabled_stays_actionable(settings):
+def test_accepted_writer_insufficiency_with_gate_enabled_can_end_as_originals(settings):
     save_settings(settings.database,{'pipeline':{'round_gate_enabled':True}})
     for index,role in enumerate(('user','assistant','user','assistant')):
         raw_archive(settings).ingest([{'source_event_id':str(index),'session_id':'books','role':role,
             'text':'A real planning exchange '+str(index),'created_at':f'2025-01-01T00:0{index}:00Z'}],source='test')
-    async def fail_writer(role,request):
+    async def insufficient_writer(role,request):
         if role=='event_writer':return {'evidence_sufficient':False,'self_review':{}}
         return await gated(role,request)
-    result=asyncio.run(p.advance(settings.database,include_recent=True,runner=fail_writer))
+    result=asyncio.run(p.advance(settings.database,include_recent=True,runner=insufficient_writer))
     assert result['pending']==4
     with Store(settings.database) as store:
         item=pending.entries(store.conn)[0]
         assert item['batch_status']=='done' and not item['waiting_for_continuation']
-    assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':None,'blocked':None}
-    assert outcomes(settings)==[]
+    assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':None,'blocked':None,'archived_only':[item['id']]}
+    assert outcomes(settings)==['archive_only']*4
 
 
 def test_failed_automatic_preflight_is_durable_and_remains_visible(settings,monkeypatch):
-    item=parked(settings);calls=[]
+    item=parked(settings,chars=400);calls=[]
     def refused(*args,**kwargs):
         calls.append(1)
         raise ValueError('synthetic preflight conflict')
@@ -622,7 +622,7 @@ def test_failed_automatic_preflight_is_durable_and_remains_visible(settings,monk
         assert 'synthetic preflight conflict' in kept['reason']
 
 
-def test_expiry_uses_retained_time_not_old_source_timestamp(settings):
+def test_expiry_protects_recently_ingested_old_history(settings):
     item=parked(settings)
     assert pending.settle_stale(settings.database)=={'resumed':None,'blocked':None}
     with Store(settings.database) as store:

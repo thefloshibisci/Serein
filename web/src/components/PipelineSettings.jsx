@@ -8,6 +8,8 @@ export function PipelineSettings({onOpenSummary}) {
   const [work,setWork]=useState(null);
   const [limits,setLimits]=useState(null);
   const mounted=useRef(true),polling=useRef(false),rebuildDialog=useRef(null),restoreDialog=useRef(null);
+  const acceptedVersion=useRef(0);
+  const confirmedSkippedBatches=useRef(new Set());
   const [rebuildTarget,setRebuildTarget]=useState('');
   const recoveryDialog=useRef(null);
   const [recovery,setRecovery]=useState(null),[recoveryLimit,setRecoveryLimit]=useState('');
@@ -33,21 +35,35 @@ export function PipelineSettings({onOpenSummary}) {
     :work?.execution_mode==='agent'?'自动整理已开启，当前为 Agent 模式；点击“继续整理”可创建任务，等待 Agent 领取。'
     :work?.stage==='settled_today'?'今天的自动检查已完成；新原话会在下一轮检查。'
     :'自动整理已开启；后台在每天 03:00 后检查新原话。要立即运行可点击“继续整理”。';
-  const stages={paused:'本批已暂停',idle:'尚未开始',queued:'等待后台处理',starting:'正在准备',track_router:'归线',event_curator:'切分整理',event_writer:'Event 写作',awaiting_agent:'等待 Agent',processed:'本批处理完成',current:'本轮检查完成',retained:'已移入待处理材料',needs_repair:'归线材料待修复',rebuilt:'计划已重建',blocked:'部分聊天等待处理',retry_wait:'等待有限重试'};
+  const stages={archived_only:'已结束整理，原话保留',skipped_batch:'已跳过本批，原话保留',paused:'本批已暂停',idle:'尚未开始',queued:'等待后台处理',starting:'正在准备',track_router:'归线',event_curator:'切分整理',event_writer:'Event 写作',awaiting_agent:'等待 Agent',processed:'本批处理完成',current:'本轮检查完成',retained:'已移入待处理材料',needs_repair:'归线材料待修复',rebuilt:'计划已重建',blocked:'部分聊天等待处理',retry_wait:'等待有限重试'};
   async function call(action,body) {
     const response=await fetch('/__serein/pipeline/'+action,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const result=await response.json();
     if(!response.ok)throw new Error(result.detail || '整理暂未完成，原话会保留，请稍后重试。');
     return result;
   }
-  function accept(result){setWork(result);setTask(result.status==='awaiting_agent'?result.result:null);}
+  function accept(result){
+    const skipped=confirmedSkippedBatches.current;
+    const current={...result,
+      pending_materials:(result.pending_materials||[]).map(item=>skipped.has(item.batch_id)?{...item,status:'resolved_skipped'}:item),
+      blocked_scopes:(result.blocked_scopes||[]).filter(item=>!skipped.has(item.batch_id)),
+      paused_batches:(result.paused_batches||[]).filter(item=>!skipped.has(item.batch_id))};
+    // Skipping is terminal even if the follow-up refresh fails or an old poll
+    // still contains the previous hold. Other batches keep their own state.
+    if(!['queued','running'].includes(current.status)&&skipped.has(current.batch_id||current.result?.batch_id)){
+      current.status='idle';current.stage='current';current.result=null;current.batch_id=null;current.error='';
+    }
+    if(current.status==='blocked'&&!current.blocked_scopes.length&&!current.paused_batches.length){current.status='idle';current.stage='current';}
+    acceptedVersion.current++;setWork(current);setTask(current.status==='awaiting_agent'?current.result:null);
+  }
   useEffect(()=>{
     mounted.current=true;
     instanceSettings().then(value=>{if(mounted.current){setLimits(value.pipeline);}}).catch(error=>{if(mounted.current)setStatus(error.message);});
     const refresh=async()=>{
       if(polling.current)return;polling.current=true;
-      try{const result=await call('status');if(mounted.current)accept(result);}
-      catch(error){if(mounted.current)setStatus(error.message);}finally{polling.current=false;}
+      const version=acceptedVersion.current;
+      try{const result=await call('status');if(mounted.current&&version===acceptedVersion.current)accept(result);}
+      catch(error){if(mounted.current&&version===acceptedVersion.current)setStatus(error.message);}finally{polling.current=false;}
     };
     const saved=event=>setLimits(event.detail.pipeline);window.addEventListener('serein:settings-saved',saved);
     refresh();const timer=setInterval(refresh,2000);
@@ -138,6 +154,12 @@ export function PipelineSettings({onOpenSummary}) {
       recoveryDialog.current.close();setRecovery(null);setTask(null);setOutput('');
       const message=skip?`已跳过本批 ${result.skipped_originals} 条原话的 Event 整理，原文保留。`:`已拆成 ${result.batches} 批，旧计划与模型结果保留。`;
       setStatus(message);
+      if(skip){
+        confirmedSkippedBatches.current.add(recovery.preview.batch_id);accept(work);
+        try{accept(await call('status'));}
+        catch{setStatus(message+' 列表同步暂未完成，可刷新查看。');}
+        return;
+      }
       try {accept(await call('next',{include_recent:true}));setStatus(message+'后台继续整理。');}
       catch(error){accept(await call('status'));setStatus(message+'后续任务未启动：'+error.message);}
     }catch(error){setStatus(error.message);}finally{setBusy(false);}
