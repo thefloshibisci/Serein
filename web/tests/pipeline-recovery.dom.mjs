@@ -133,6 +133,15 @@ test('skipping previews the exact scope, cancellation is harmless, and confirmat
 
 function pendingFor(batch_id,id){return {id,batch_id,status:'open',kind:'writing',reason:'Synthetic retained material',summary:'Synthetic',
   originals:2,original_chars:100,can_skip:true,resolved_event_ids:[]};}
+test('the pending section counts unfinished items instead of historical deferred totals',async()=>{
+  await render({status:'idle',stage:'processed',result:{pending:999,deferred:998},pending_materials:[
+    pendingFor('ordinary',17),{...pendingFor('short-chat',18),waiting_for_continuation:true},
+    {...pendingFor('finished',19),status:'archived_only'}]});
+  assert.match(document.body.textContent,/有 2 批材料待处理/);
+  assert.match(document.body.textContent,/已连接 MCP 的助手处理/);
+  assert.equal(document.querySelectorAll('.pending-material').length,2);
+  for(const text of ['999','998','暂缓','等待后续处理','已处理记录','等后续的对话'])assert(!document.body.textContent.includes(text));
+});
 test('a delayed pre-skip poll cannot restore the completed batch or remove unrelated work',async()=>{
   const stale={...paused(),pending_materials:[pendingFor('paused-synthetic',17),pendingFor('other',18)]};
   await render(stale);

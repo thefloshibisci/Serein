@@ -7716,6 +7716,7 @@ html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }
 @media (prefers-reduced-motion: reduce) { .usage-guide__pages { scroll-behavior: auto; } }
 
 .settings-page .settings-panel__body--slides {
+  position: relative;
   display: flex; width: 100%; height: calc(100dvh - 158px); min-height: 420px;
   box-sizing: border-box; padding: 0; overflow-x: auto; overflow-y: hidden;
   scroll-snap-type: x mandatory; overscroll-behavior-x: contain; scrollbar-width: none;

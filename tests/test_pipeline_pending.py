@@ -445,8 +445,7 @@ def test_optional_pending_checks_agent_delivery_size(settings):
     assert not p.context_request_fits(settings.database,batch,request,'event_curator:0:context',None)
 
 
-# Content-level waits can end with an original-only receipt. Larger gate-only
-# activities still get one evidence review before the inactivity limit.
+# Fixtures for explicit review of material held by the round gate.
 from datetime import datetime,timedelta,timezone
 
 from test_public_features import raw_archive
@@ -469,165 +468,13 @@ def parked(settings,*,chars=20):
     result=asyncio.run(p.advance(settings.database,include_recent=True,runner=gated))
     assert result['events']==0 and result['pending']==2
     with Store(settings.database) as store:item=pending.entries(store.conn)[0]
-    assert item['kind']=='writing' and item['waiting_for_continuation'] and item['plan_compatible']
+    assert item['kind']=='writing' and item['plan_compatible']
     return item
 
 
 def outcomes(settings):
     with Store(settings.database,read_only=True) as store:
         return [row[0] for row in store.conn.execute('SELECT outcome FROM raw_processing ORDER BY raw_id')]
-
-
-def test_parked_activity_waits_through_the_continuation_window(settings):
-    item=parked(settings,chars=400)
-    assert pending.settle_stale(settings.database)=={'resumed':None,'blocked':None}
-    assert pending.settle_stale(settings.database,clock=LATER(2))=={'resumed':None,'blocked':None}
-    with Store(settings.database) as store:assert pending.entries(store.conn)[0]['status']=='open'
-    assert outcomes(settings)==[] and item['originals']==2
-
-
-def test_expired_tiny_exchange_keeps_originals_and_ends_without_model_retry(settings):
-    item=parked(settings)
-    assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':None,'blocked':None,'archived_only':[item['id']]}
-    assert outcomes(settings)==['archive_only','archive_only']
-    async def forbidden(*args):pytest.fail('Archived-only material reached a model')
-    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=forbidden))['status']=='current'
-    with Store(settings.database) as store:
-        closed=pending.entries(store.conn)[0]
-        assert closed['status']=='archived_only'
-        assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==2
-
-
-def test_expired_substantial_activity_gets_one_ungated_pass_and_becomes_an_event(settings):
-    item=parked(settings,chars=400);calls=[]
-    assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':item['id'],'blocked':None}
-    # A second tick cannot start more paid work while the first is unfinished.
-    assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':None,'blocked':None}
-    with Store(settings.database) as store:
-        frozen=json.loads(store.conn.execute("SELECT input_json FROM pipeline_batches WHERE status='pending'").fetchone()[0])
-    assert frozen['round_gate_expired'] is True and frozen['input_policy']['round_gate_enabled'] is False
-    assert frozen['resume_pending_id']==item['id'] and [m['id'] for m in frozen['messages']]==item['source_ids']
-    async def run(role,request):
-        calls.append(role)
-        if role=='event_curator':assert not request['component'].get('writer_round_gate')
-        return await gated(role,request)
-    result=asyncio.run(p.advance(settings.database,include_recent=True,runner=run))
-    assert result['status']=='processed' and result['events']==1 and calls==['event_curator','event_writer']
-    assert outcomes(settings)==['settled','settled']
-    with Store(settings.database) as store:
-        done=pending.entries(store.conn)[0]
-        assert done['status']=='resolved' and len(done['resolved_event_ids'])==1
-    # The gate setting itself is untouched for ordinary new material.
-    assert p.read_settings(settings.database)['pipeline']['round_gate_enabled'] is True
-
-
-def test_expired_activity_archives_insufficient_evidence_without_repeating_paid_work(settings):
-    item=parked(settings,chars=400)
-    assert pending.settle_stale(settings.database,clock=LATER(4))['resumed']==item['id']
-    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=insufficient))['pending']==2
-    with Store(settings.database) as store:
-        again=pending.entries(store.conn)[0]
-        assert again['status']=='open' and not again['waiting_for_continuation']
-    assert pending.settle_stale(settings.database,clock=LATER(9))=={'resumed':None,'blocked':None,'archived_only':[item['id']]}
-    async def forbidden(*args):pytest.fail('Expired material was sent to a model twice')
-    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=forbidden))['status']=='current'
-    assert outcomes(settings)==['archive_only','archive_only']
-    with Store(settings.database) as store:
-        kept=pending.entries(store.conn)[0]
-        assert kept['status']=='archived_only' and kept['originals']==2
-        assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==2
-
-
-def test_expired_pass_cannot_place_a_repair_hold_on_the_chat(settings,monkeypatch):
-    from serein.extensions import pipeline_recovery as recovery
-    item=parked(settings,chars=400)
-    assert pending.settle_stale(settings.database,clock=LATER(4))['resumed']==item['id']
-    def broken(*args):raise p.RoutingRecoveryError('synthetic frozen plan mismatch')
-    monkeypatch.setattr(recovery,'assert_downstream_snapshot',broken)
-    async def forbidden(*args):pytest.fail('A rejected plan reached a model')
-    assert asyncio.run(p.advance(settings.database,include_recent=True,runner=forbidden))['status']=='retained'
-    assert p.scope_holds(settings.database)==[]
-    with Store(settings.database) as store:
-        assert not store.conn.execute("SELECT 1 FROM pipeline_batches WHERE status='needs_repair'").fetchone()
-        kept=pending.entries(store.conn)[0]
-        assert kept['status']=='open' and kept['kind']!='unrouted' and kept['batch_status']=='waiting_materials'
-    monkeypatch.undo()
-    # It stays visible for a person; expiry does not retry it automatically.
-    assert pending.settle_stale(settings.database,clock=LATER(9))=={'resumed':None,'blocked':None}
-
-
-def test_unverifiable_old_plan_is_left_parked_instead_of_resumed(settings):
-    item=parked(settings,chars=200)
-    with Store(settings.database) as store:
-        store.conn.execute("UPDATE pipeline_batches SET input_json=json_remove(input_json,'$.routing_result') WHERE id=?",(item['batch_id'],))
-    assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':None,'blocked':item['id']}
-    with Store(settings.database) as store:
-        assert not pending.entries(store.conn)[0]['waiting_for_continuation']
-        assert '自动重审未启动' in pending.entries(store.conn)[0]['reason']
-        assert not store.conn.execute("SELECT 1 FROM pipeline_batches WHERE status IN ('pending','needs_repair')").fetchone()
-    assert pending.settle_stale(settings.database,clock=LATER(9))=={'resumed':None,'blocked':None}
-    assert outcomes(settings)==[]
-
-
-@pytest.mark.parametrize('key',pending._HOST_DEFERRALS)
-def test_host_deferrals_are_never_hidden_as_normal_waiting(settings,key):
-    item=parked(settings)
-    with Store(settings.database) as store:
-        row=store.conn.execute('SELECT result_json FROM pipeline_batches WHERE id=?',(item['batch_id'],)).fetchone()
-        result=json.loads(row[0]);result[key]=[{'source_message_ids':item['source_ids']}]
-        store.conn.execute('UPDATE pipeline_batches SET result_json=? WHERE id=?',(json.dumps(result),item['batch_id']))
-        assert pending.entries(store.conn)[0]['waiting_for_continuation'] is False
-    assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':None,'blocked':None}
-    assert outcomes(settings)==[]
-
-
-def test_unverified_curator_output_is_not_hidden_or_retried(settings):
-    item=parked(settings)
-    with Store(settings.database) as store:
-        store.conn.execute("UPDATE pipeline_jobs SET request_json='{}' WHERE batch_id=? AND role='event_curator:0'",(item['batch_id'],))
-        assert not pending.entries(store.conn)[0]['waiting_for_continuation']
-    assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':None,'blocked':None}
-    assert outcomes(settings)==[]
-
-
-def test_accepted_writer_insufficiency_with_gate_enabled_can_end_as_originals(settings):
-    save_settings(settings.database,{'pipeline':{'round_gate_enabled':True}})
-    for index,role in enumerate(('user','assistant','user','assistant')):
-        raw_archive(settings).ingest([{'source_event_id':str(index),'session_id':'books','role':role,
-            'text':'A real planning exchange '+str(index),'created_at':f'2025-01-01T00:0{index}:00Z'}],source='test')
-    async def insufficient_writer(role,request):
-        if role=='event_writer':return {'evidence_sufficient':False,'self_review':{}}
-        return await gated(role,request)
-    result=asyncio.run(p.advance(settings.database,include_recent=True,runner=insufficient_writer))
-    assert result['pending']==4
-    with Store(settings.database) as store:
-        item=pending.entries(store.conn)[0]
-        assert item['batch_status']=='done' and not item['waiting_for_continuation']
-    assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':None,'blocked':None,'archived_only':[item['id']]}
-    assert outcomes(settings)==['archive_only']*4
-
-
-def test_failed_automatic_preflight_is_durable_and_remains_visible(settings,monkeypatch):
-    item=parked(settings,chars=400);calls=[]
-    def refused(*args,**kwargs):
-        calls.append(1)
-        raise ValueError('synthetic preflight conflict')
-    monkeypatch.setattr(pending,'resume',refused)
-    assert pending.settle_stale(settings.database,clock=LATER(4))=={'resumed':None,'blocked':item['id']}
-    assert pending.settle_stale(settings.database,clock=LATER(9))=={'resumed':None,'blocked':None}
-    assert calls==[1] and outcomes(settings)==[]
-    with Store(settings.database) as store:
-        kept=pending.entries(store.conn)[0]
-        assert kept['status']=='open' and not kept['waiting_for_continuation']
-        assert 'synthetic preflight conflict' in kept['reason']
-
-
-def test_expiry_protects_recently_ingested_old_history(settings):
-    item=parked(settings)
-    assert pending.settle_stale(settings.database)=={'resumed':None,'blocked':None}
-    with Store(settings.database) as store:
-        assert pending.entries(store.conn)[0]['status']=='open'
-    assert item['locator']['first_at'].startswith('2025-01-01') and outcomes(settings)==[]
 
 
 def test_refused_resume_reports_the_reason_without_failing_the_pipeline(settings):
@@ -644,14 +491,3 @@ def test_refused_resume_reports_the_reason_without_failing_the_pipeline(settings
     after=client.get('/v1/pipeline/status').json()
     assert after['status']==before['status']!='failed' and not after.get('error')
     assert client.post('/v1/pipeline/resume-pending',json={'pending_id':item['id'],'replan':True}).json()['status']=='resumed'
-
-
-def test_scheduled_pass_reviews_parked_work_and_survives_its_failure(settings,monkeypatch):
-    from test_route_scope_holds import api,Clock
-    api(settings,monkeypatch,lambda request:output_for(request['role'],request));seen=[]
-    monkeypatch.setattr(pending,'settle_stale',lambda database,clock=None:seen.append(clock))
-    assert asyncio.run(p.scheduled_advance(settings.database))['status']=='current'
-    assert seen==[Clock.value]
-    def broken(database,clock=None):raise RuntimeError('synthetic review failure')
-    monkeypatch.setattr(pending,'settle_stale',broken)
-    assert asyncio.run(p.scheduled_advance(settings.database))['status']=='settled_today'

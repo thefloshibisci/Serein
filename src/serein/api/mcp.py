@@ -99,7 +99,7 @@ def create_server(app: Application, *, private=False, http=False):
 
     def pipeline_text_tool(function):
         async def pipeline_next(include_recent: bool = False, retry_repair: bool = False) -> list:
-            """Claim the next Event task as one JSON text; submit its result with pipeline_submit."""
+            """Claim the next Event task as one JSON text; submit its result with pipeline_submit. When pending_count is nonzero, use pipeline_pending_list/read to inspect the originals, then resume useful material or finish trivial material with pipeline_pending_finish while preserving originals."""
             from ..core.store import encode
             from ..deployment import read_settings
             from ..extensions.pipeline_images import agent_text_task
@@ -269,12 +269,13 @@ def create_server(app: Application, *, private=False, http=False):
     # Keep internal/UI implementations available without exposing retired MCP tools.
     internal_tools = {'resume', 'list_source_messages', 'read_source_messages',
                       'handoff', 'narrative_revision_inbox', 'review_narrative_revision', 'publish_narrative'}
-    pipeline_names = {'pipeline_next','pipeline_submit','pipeline_rebuild'}
+    from ..extensions.pipeline_agent import PIPELINE_TOOLS
+    pipeline_names = PIPELINE_TOOLS
     gated_tools = {name:('memory_candidates',fn) for name,fn in candidate_tools.items()}
     gated_tools.update({name:('pipeline_agent',app.contributions.tools[name]) for name in pipeline_names if name in app.contributions.tools})
     builtins = internal_tools | pipeline_names | {"memory_read", "memory_materials", "memory_search", "memory_write", "memory_candidates", "memory_recall", "source_messages", "source_read"}
     for name, function in app.contributions.tools.items():
-        if private and name in {'pipeline_next','pipeline_submit','pipeline_rebuild',*app._optional_names}:
+        if private and name in (pipeline_names | app._optional_names):
             continue
         if name not in builtins:
             if name in registered:
@@ -334,6 +335,10 @@ def create_server(app: Application, *, private=False, http=False):
             annotation=ToolAnnotations(readOnlyHint=True,destructiveHint=False,idempotentHint=True,openWorldHint=False) if name=='resume' else read_only if name in {'source_message_search','source_message_read','read_favorites','dream_read','window_shadow_read','list_event_mailbox','read_event_mailbox'} else None
             if name in candidate_tools:
                 annotation = read_only if name=='list_candidates' else write
+            if name in {'pipeline_pending_list','pipeline_pending_read'}:
+                annotation = read_only
+            elif name in {'pipeline_pending_finish','pipeline_pending_reopen'}:
+                annotation = write
             server.add_tool(exposed, name=name, annotations=annotation,
                             structured_output=False if name in {'read_favorites','resume','dream_read','window_shadow_read','pipeline_next'} else None)
             if name in {'resume','dream_read','window_shadow_read'}:server._tool_manager.get_tool(name).parameters['additionalProperties']=False

@@ -690,5 +690,9 @@
   "tests/test_pipeline_status_rejection.py",
   "web/tests/pipeline-recovery.dom.mjs",
   "tests/test_pipeline_pending.py",
-  "tests/test_pipeline_pending_archive.py"
+  "tests/test_pipeline_pending_archive.py",
+  "src/serein/extensions/pipeline_agent.py",
+  "tests/test_pipeline_pending_agent.py",
+  "web/src/hooks/useVisiblePolling.js",
+  "web/tests/settings-polling.dom.mjs"
 ]

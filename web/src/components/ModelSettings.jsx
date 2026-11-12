@@ -47,7 +47,7 @@ export function ModelSettings({page,onOpenEventGuide,onOpenPipeline,onOpenCatalo
   const [status,setStatus]=useState("");
   const [busy,setBusy]=useState(false);
   const [pendingWork,setPendingWork]=useState(null);
-  const pendingCount=pendingWork?.pending_materials?.filter(item=>['open','running'].includes(item.status)&&!item.waiting_for_continuation).length||0;
+  const pendingCount=pendingWork?.pending_materials?.filter(item=>['open','running'].includes(item.status)).length||0;
   useEffect(()=>{
     let active=true;
     instanceSettings().then(value=>{if(active)setConfig(value);}).catch(error=>{if(active)setStatus(error.message);});
@@ -158,6 +158,7 @@ export function ModelSettings({page,onOpenEventGuide,onOpenPipeline,onOpenCatalo
   return <>
     <div role="tabpanel" id="settings-content-models" aria-labelledby="settings-tab-models" aria-hidden={page!=="models"} inert={page!=="models"}>
       <section className="settings-group" aria-label="上游与模型">
+        {!config&&!status&&<p role="status">正在读取模型设置…</p>}
         {config&&<form ref={upstreamForm} onSubmit={event=>save(event,true)}>
       <div className="settings-group__heading"><h3>上游与模型</h3></div>
       <p className="model-connection-help">按上游管理模型，密钥只保存在服务端。</p>
@@ -170,6 +171,7 @@ export function ModelSettings({page,onOpenEventGuide,onOpenPipeline,onOpenCatalo
     </div>
     <div role="tabpanel" id="settings-content-configuration" aria-labelledby="settings-tab-configuration" aria-hidden={page!=="configuration"} inert={page!=="configuration"}>
       <section className="settings-group" aria-label="各功能使用的模型">
+        {!config&&!status&&<p role="status">正在读取配置…</p>}
         {config&&<form onSubmit={save}>
       <div className="settings-group__heading"><h3>基础配置</h3><p>先选择检索模型并准备索引，再开启聊天记忆。</p></div>
       <div className="model-assignments">{['embedding','reranker'].map(key=><div className="settings-field model-assignment" key={key}>
@@ -251,7 +253,8 @@ export function ModelSettings({page,onOpenEventGuide,onOpenPipeline,onOpenCatalo
     </div>
     <div role="tabpanel" id="settings-content-summary" aria-labelledby="settings-tab-summary" aria-hidden={page!=="summary"} inert={page!=="summary"}>
       <section className="settings-group" aria-label="自动摘要管理"><div className="settings-group__heading"><h3>自动摘要管理</h3><p>开关、模型、输入范围与执行方式在这里统一保存。</p></div>
-      {pendingCount>0&&<div className="pending-materials__notice" role="status">有 {pendingCount} 批材料待处理，原话与错误记录已保留。{' '}
+      {!config&&!status&&<p role="status">正在读取自动摘要设置…</p>}
+      {pendingCount>0&&<div className="pending-materials__notice" role="status">有 {pendingCount} 批材料待处理。可以让已连接 MCP 的助手处理，或在下方选择只保留原话。{' '}
         <button type="button" className="settings-link" onClick={()=>{const target=document.getElementById('summary-pending-materials');const panel=document.getElementById('settings-content-summary');if(target&&panel)panel.scrollTop+=target.getBoundingClientRect().top-panel.getBoundingClientRect().top-16;target?.focus({preventScroll:true});}}>定位并处理卡住的材料</button></div>}
       <button type="button" className="settings-link" onClick={onOpenEventGuide}>了解模型调用与费用</button>
       <p className="model-connection-help">Event Writer 要核对原话、人物、因果和修订，再写出自然正文；建议为“原话 · Event 写作”选择理解和写作能力较强的模型。</p>
@@ -291,7 +294,7 @@ export function ModelSettings({page,onOpenEventGuide,onOpenPipeline,onOpenCatalo
       {[
         ['joint_review_enabled','跨线联合审阅','有明确桥接时，让 Curator 一次核对相连的少量 Track；合并 Event 仍须逐字证据。'],
         ['material_review_enabled','逐条材料取舍','让 Curator 标明每条 owned 原话的写作用途，再传给 Writer；来源绑定仍完整保留。'],
-        ['round_gate_enabled','普通交流轮次门槛','至少两轮完整交流才进入 Writer；未结束的短段等待后续原话，明确结束的短段跳过。'],
+        ['round_gate_enabled','普通交流轮次门槛','至少两轮完整交流才进入 Writer；未成篇的短片段可以只保留原话，结束整理。'],
         ['append_protected_enabled','受保护 Event 后续追加','若旧 Event 只因叙事卷或 Scene 引用受保护，后续新经历可追加为新版本；旧正文、标题和召回设置保持原样。'],
       ].map(([key,label,help])=><label className="settings-toggle" key={key}><span><strong>{label}</strong><small>{help}</small></span>
         <input type="checkbox" role="switch" checked={config.pipeline[key]===true}

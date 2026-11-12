@@ -193,7 +193,7 @@ class Application:
         if settings.writable:
             self.contributions.tools.update(memory_write=self.services.write, memory_candidates=self.services.candidates,
                                             memory_recall=self.services.recall)
-            from .extensions.pipeline import tools_for
+            from .extensions.pipeline_agent import tools_for
             self.contributions.tools.update(tools_for(settings))
         if self.services.source is not None:
             self.contributions.tools.update(source_messages=self.services.source.list, source_read=self.services.source.read)

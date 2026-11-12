@@ -14,7 +14,8 @@ def routes(application, auth):
         tools = {k:v for k,v in application.contributions.tools.items() if k not in builtins}
         if name not in tools:
             raise HTTPException(404, 'Feature is disabled or unavailable')
-        if name in {'pipeline_next','pipeline_submit','pipeline_rebuild'}:
+        from ..extensions.pipeline_agent import PIPELINE_TOOLS
+        if name in PIPELINE_TOOLS:
             from ..deployment import feature_enabled
             if not feature_enabled(application.settings.database,'pipeline_agent'):
                 raise HTTPException(404, 'Automatic-summary Agent tools are disabled')

@@ -43,6 +43,10 @@ EXECUTION_COMPATIBLE_REVISIONS=frozenset({
     '8e9c74ff57e94d9e17d422302701426abc303c8d31b2dd826cc817cf1e37a348',
     # 9a7c76a: scheduling responsiveness only; frozen requests are unchanged.
     '57d5e2e81613fe34dda41a1d99e44c0a4e49d62ca5d3f1583367c9899f438dc9',
+    # Installed 83a88e6 public sources, verified byte-for-byte against the
+    # deployed files. Removing automatic expiry and adding explicit pending
+    # tools leaves frozen role requests, accepted outputs and budgets intact.
+    '69ebaffc64e1b0ac0bcae61cc7dcfa9438c0f06983e74222d9dbb4a7c0ddfcf3',
 })
 
 _RUNTIME_CONTRACT_FILES = (
@@ -2281,18 +2285,6 @@ async def _scheduled_advance(database):
     # A completed day is an observation, not a fence against late uploads or
     # explicitly resumed pending work. new_batch's durable review receipts
     # already suppress unchanged material without any model call.
-    # Parked short activities leave the waiting area here, at most one model
-    # pass per tick. Their exit is optional and must never stop settlement.
-    review=asyncio.create_task(asyncio.to_thread(pending_materials.settle_stale,database,clock=current))
-    try:await asyncio.shield(review)
-    except asyncio.CancelledError:
-        # The disk transaction must finish before execute releases its lease.
-        from ..work_tasks import _finish_disk_batch
-        await _finish_disk_batch(review)
-        raise
-    except Exception:
-        import logging
-        logging.getLogger(__name__).exception('Parked short activities were not reviewed; settlement continues')
     # Settle ready old material before routing all of today's uploads. A slow
     # or failing daytime Router must not starve an independent ready Event.
     result=await _advance(database)

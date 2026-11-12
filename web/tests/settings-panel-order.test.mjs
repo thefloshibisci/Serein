@@ -7,7 +7,7 @@ import {pathToFileURL,fileURLToPath} from 'node:url';
 import {build,stop} from 'esbuild';
 import {JSDOM} from 'jsdom';
 
-test('settings tab positions match rendered slides with both summaries and original archives',async()=>{
+test('settings tabs map to eight slides with one active page',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'serein-settings-order-'));
   let dom;
   try {
@@ -29,6 +29,7 @@ test('settings tab positions match rendered slides with both summaries and origi
     const tabs=[...dom.window.document.querySelectorAll('[role="tab"]')];
     const slides=[...dom.window.document.querySelectorAll('.settings-panel__body > [role="tabpanel"]')];
     assert.equal(slides.length,8);
+    assert.equal(slides.filter(panel=>panel.getAttribute('aria-hidden')==='false').length,1);
     assert.deepEqual(tabs.map(tab=>tab.getAttribute('aria-controls')),slides.map(slide=>slide.id));
     assert(tabs.some(tab=>tab.textContent==='自动摘要管理'));
     assert(tabs.some(tab=>tab.textContent==='原文档案'));
@@ -37,29 +38,25 @@ test('settings tab positions match rendered slides with both summaries and origi
   }
 });
 
-test('all settings tabs stay aligned through long jumps, rapid switches and viewport changes',async()=>{
+test('settings targets actual slides and loads only visited pages',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'serein-settings-resize-'));
   const dom=new JSDOM('<div id="root"></div>',{url:'http://synthetic.invalid',pretendToBeVisual:true});
   const globals=['window','document','navigator','HTMLElement','Event','CustomEvent','Node','ResizeObserver','fetch','IS_REACT_ACT_ENVIRONMENT'];
   const saved=new Map(globals.map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
   const channels=[],NativeChannel=globalThis.MessageChannel;
   globalThis.MessageChannel=class extends NativeChannel{constructor(){super();channels.push(this);}};
-  let root,act,resize,width=372.4;
+  let root,act,width=332.4;const requests=[],scrolls=[];
   try {
     for(const key of globals.slice(0,7))Object.defineProperty(globalThis,key,{value:dom.window[key],configurable:true});
     Object.defineProperty(globalThis,'IS_REACT_ACT_ENVIRONMENT',{value:true,configurable:true});
-    Object.defineProperty(globalThis,'ResizeObserver',{value:class {constructor(callback){resize=callback;}observe(){}disconnect(){}},configurable:true});
-    // Keep unrelated configuration requests unresolved; this fixture exercises
-    // real tab navigation and dimensions without a backend or model calls.
-    Object.defineProperty(globalThis,'fetch',{value:()=>new Promise(()=>{}),configurable:true});
+    Object.defineProperty(globalThis,'fetch',{value:url=>{requests.push(url);return new Promise(()=>{});},configurable:true});
     dom.window.matchMedia=()=>({matches:false});
-    dom.window.HTMLElement.prototype.scrollTo=function({left=0}){this.scrollLeft=left;};
-    dom.window.HTMLElement.prototype.getBoundingClientRect=function(){
-      const panels=[...document.querySelectorAll('.settings-panel__body > [role="tabpanel"]')];
-      const index=panels.indexOf(this);
-      return {left:index<0?58:58+index*width-this.parentElement.scrollLeft,width};
-    };
-    Object.defineProperty(dom.window.HTMLElement.prototype,'clientWidth',{configurable:true,get:()=>Math.round(width)});
+    dom.window.HTMLElement.prototype.scrollTo=function(options){scrolls.push(options);this.scrollLeft=options.left;};
+    // DOM tests verify targets/semantics only. Native browser checks cover the
+    // intermediate animation, snap, CSS sizing and viewport-change behavior.
+    Object.defineProperty(dom.window.HTMLElement.prototype,'offsetLeft',{configurable:true,get(){
+      return [...document.querySelectorAll('.settings-panel__body > [role=tabpanel]')].indexOf(this)*width;
+    }});
     const output=await build({stdin:{contents:`
       import React,{act} from 'react';import {createRoot} from 'react-dom/client';
       import {SettingsPanel} from './src/components/SettingsPanel.jsx';
@@ -73,35 +70,51 @@ test('all settings tabs stay aligned through long jumps, rapid switches and view
     const path=join(directory,'bundle.mjs');await writeFile(path,output.outputFiles[0].text);
     const fixture=await import(pathToFileURL(path));act=fixture.act;
     await act(async()=>{root=fixture.mount();});
+    assert.deepEqual(requests,[],'Opening appearance does not start hidden configuration or import requests');
+    const selected=key=>{
+      const panels=[...document.querySelectorAll('.settings-panel__body > [role=tabpanel]')];
+      assert.equal(panels.length,8);
+      assert.deepEqual(panels.filter(panel=>panel.getAttribute('aria-hidden')==='false').map(panel=>panel.id),['settings-content-'+key]);
+      assert.equal(document.querySelector('[role=tab][aria-selected=true]').id,'settings-tab-'+key);
+      for(const panel of panels)assert.equal(panel.hidden,false,'All panels retain layout slots for sliding');
+    };
     const pages=document.querySelector('.settings-panel__body');
-    await act(async()=>{document.getElementById('settings-tab-originals').click();});
-    width=332.4;
-    await act(async()=>{resize?.();await new Promise(resolve=>setTimeout(resolve,520));});
-    assert(Math.abs(pages.scrollLeft-5*width)<0.01,'The final snap uses the current panel position, including fractional widths');
-    assert.equal(document.getElementById('settings-tab-originals').getAttribute('aria-selected'),'true');
-    assert.equal(document.getElementById('settings-content-originals').getAttribute('aria-hidden'),'false');
-    assert.equal(document.getElementById('settings-content-imports').getAttribute('aria-hidden'),'true');
-    assert.equal(document.getElementById('settings-content-originals').getBoundingClientRect().left,58);
-    width=254;
-    await act(async()=>{resize?.();});
-    assert.equal(pages.scrollLeft,5*width,'Idle viewport changes keep the current tab aligned');
-    // Appearance -> summary crosses several pages, using the same navigation
-    // path as originals. Cover every rendered panel, not only the archive.
-    for(const key of ['appearance','summary','models','configuration','features','imports','migration','originals']){
-      await act(async()=>{document.getElementById('settings-tab-'+key).click();});
-      width+=.6;
-      await act(async()=>{resize?.();await new Promise(resolve=>setTimeout(resolve,500));});
-      assert(Math.abs(document.getElementById('settings-content-'+key).getBoundingClientRect().left-58)<.01,key+' is aligned');
-      assert.equal(document.querySelector('[role="tab"][aria-selected="true"]').id,'settings-tab-'+key);
-      assert.equal(document.querySelectorAll('[role="tabpanel"][aria-hidden="false"]').length,1);
-    }
-    await act(async()=>{document.getElementById('settings-tab-appearance').click();});
-    await act(async()=>{document.getElementById('settings-tab-imports').click();});
     await act(async()=>{document.getElementById('settings-tab-summary').click();});
-    width=332.4;
-    await act(async()=>{resize?.();await new Promise(resolve=>setTimeout(resolve,520));});
-    assert.equal(pages.scrollLeft,4*width,'Only the latest requested tab wins after quick consecutive changes');
-    assert.equal(document.getElementById('settings-tab-summary').getAttribute('aria-selected'),'true');
+    assert.equal(scrolls.at(-1).behavior,'smooth','Native sliding remains enabled');
+    assert.equal(pages.scrollLeft,4*width);
+    width=254.6;
+    await act(async()=>{pages.dispatchEvent(new window.Event('scrollend',{bubbles:true}));});
+    assert.equal(pages.scrollLeft,4*width,'A resize during sliding settles at the current panel position');
+    for(const key of ['summary','appearance','originals','models','configuration','features','imports','migration','summary']){
+      await act(async()=>{document.getElementById('settings-tab-'+key).click();});
+      selected(key);
+      const index=[...document.querySelectorAll('[role=tab]')].findIndex(item=>item.id==='settings-tab-'+key);
+      assert.equal(pages.scrollLeft,index*width);
+    }
+    const modelPage=document.getElementById('settings-content-models');
+    const importPage=document.getElementById('settings-content-imports');
+    await act(async()=>{
+      document.getElementById('settings-tab-appearance').click();
+      document.getElementById('settings-tab-imports').click();
+      document.getElementById('settings-tab-summary').click();
+    });
+    selected('summary');
+    assert.equal(pages.scrollLeft,4*width);
+    assert.equal(document.getElementById('settings-content-models'),modelPage,'Shared model editor remains mounted');
+    assert.equal(document.getElementById('settings-content-imports'),importPage,'Visited import editor remains mounted');
+    await act(async()=>{document.getElementById('settings-tab-summary').dispatchEvent(new window.KeyboardEvent('keydown',{key:'End',bubbles:true}));});
+    selected('migration');assert.equal(document.activeElement.id,'settings-tab-migration');
+    await act(async()=>{document.activeElement.dispatchEvent(new window.KeyboardEvent('keydown',{key:'Home',bubbles:true}));});
+    selected('appearance');assert.equal(document.activeElement.id,'settings-tab-appearance');
+    await act(async()=>{window.dispatchEvent(new window.CustomEvent('serein:open-settings-tab',{detail:'summary'}));});
+    selected('summary');
+    dom.window.matchMedia=()=>({matches:true});
+    await act(async()=>{document.getElementById('settings-tab-originals').click();});
+    assert.equal(pages.scrollLeft,5*width,'Reduced motion settles immediately');
+    await act(async()=>{pages.dispatchEvent(new window.Event('pointerdown',{bubbles:true}));pages.scrollLeft=width;pages.dispatchEvent(new window.Event('scroll',{bubbles:true}));});
+    selected('features');
+    assert(scrolls.some(item=>item.behavior==='instant'),'Reduced motion uses immediate alignment');
+    assert.equal(requests.filter(url=>url==='/__serein/settings').length,3,'Each visited data editor loads once, not once per switch');
   } finally {
     if(root)await act(async()=>root.unmount());dom.window.close();stop();
     for(const channel of channels){channel.port1.close();channel.port2.close();}globalThis.MessageChannel=NativeChannel;

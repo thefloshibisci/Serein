@@ -17,7 +17,11 @@
 
 在设置的“自动摘要管理”页选择执行方式和三个角色 `track_router`、`event_curator`、`event_writer` 的模型。API 模式需要三个模型配置完整；Agent 模式领取和提交任务，不调用这些模型；旧版混合配置中未选模型的阶段等待 Agent。在“功能”页开启自动摘要后，后台白天归线，默认北京时间 03:00 结算 Event。配置页“继续整理”可立即处理最近已完成的对话。
 
-外部 Agent 使用前，先在“自动摘要管理”页开启「自动摘要 Agent 工具」并保存，默认关闭。此开关统一控制 MCP 和 HTTP 扩展的 `pipeline_next`、`pipeline_submit`、`pipeline_rebuild`；关闭后缓存的工具调用也被拒绝，已有任务和结果保留。自动摘要自身的启停、配置页整理和修复操作仍由各自入口控制。
+外部 Agent 使用前，先在“自动摘要管理”页开启「自动摘要 Agent 工具」并保存，默认关闭。此开关统一控制 MCP 和 HTTP 扩展的 `pipeline_next`、`pipeline_submit`、`pipeline_rebuild`，以及 `pipeline_pending_list/read/resume/finish/reopen`；关闭后缓存的工具调用也被拒绝，已有任务和结果保留。自动摘要自身的启停、配置页整理和修复操作仍由各自入口控制。
+
+卡住的材料可直接交给 Agent 处理：`pipeline_pending_list()` 返回全部未结束项的准确总数及编号，使用 `next_before_id` 分页；`pipeline_pending_read(pending_id)` 分页读取完整原话和失败原因。值得整理的调用 `pipeline_pending_resume(pending_id)`，然后继续 `pipeline_next` / `pipeline_submit`。原方案确实不适用或版本不兼容时才显式传 `replan=true`；已能证明只是轮次门槛的旧材料在明确继续时直接进入正常证据审阅，不再等待更多对话。一两句闲聊等没有独立整理必要的材料，读完后调用 `pipeline_pending_finish(pending_id, confirm="ARCHIVE_PENDING_ORIGINALS")`：原话完整保留，待处理项立即消失，重复调用返回同一回执。不能因为没读懂错误就清空待办；共享来源或正在执行的材料会受原有检查与租约保护。HTTP 对应 `POST /v1/extensions/<工具名>`，参数相同。`pipeline_next` 无新任务时也会返回 `pending_count` 与处理指引。
+
+撤掉额外的等待分类、自动到期重审和自动保留原话扫描；普通上游整理流程继续运行，是否结束某项由明确的人工或 Agent 处理决定。误点保留原话后，可以按精确编号调用 `pipeline_pending_reopen(pending_id, confirm="RESTORE_PENDING_ORIGINALS")`。它核对旧回执、原话哈希、处理归属和在途依赖后，返回一个新的待处理编号；旧终态回执仍保存，重复恢复返回同一结果。随后用新编号调用 `pipeline_pending_resume(pending_id, replan=true)`。恢复只支持有可验证保留原话回执的项；不恢复已变更原话、已另行结算或共享在途材料。已有 Event 可能引用尚未结清的桥接原话；恢复保留这些 Event 和来源绑定，再交由现有切分与证据检查决定如何继续，不批量重新打开历史记录。
 
 HTTP `POST /v1/extensions/pipeline_next` 接受 `{"include_recent":true}`，返回下一份任务或本批结果。任务含 `job_id`、`role` 和冻结 `request`，其中 `prompt` 为最新完整提示、`rules` 为对应 AGENTS.md。提交到 `POST /v1/extensions/pipeline_submit`，body 为 `{"job_id":"...","output":{...}}`，之后再调用 next。MCP 同名工具使用同样参数。重试相同结果幂等；不同结果不能覆盖已接收阶段。
 

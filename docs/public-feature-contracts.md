@@ -221,7 +221,7 @@ Writer 正文通常以 500 字为软预算，复杂经历可适当超出；host 
 
 「记忆候选工具」（`features.memory_candidates`）默认关闭；可写实例开启后才动态注册 `propose_memory`、`list_candidates`、`review_memory`，关闭即拒绝旧缓存调用，已有候选保留。`propose_memory` 的 draft 仍用 `title`、`body_md`、`cues`、`date`，可选收藏意图；修改提案仍带 `document_id` 和 `expected_revision`。接受候选在事务内检查类型，历史 Event / Narrative 候选只能在此忽略，不能借接受操作绕过写入边界。
 
-「自动摘要 Agent 工具」（`features.pipeline_agent`）默认关闭；可写实例开启后才注册 `pipeline_next`、`pipeline_submit`、`pipeline_rebuild`，HTTP 扩展同样核对开关。工具暴露与 `pipeline.auto_enabled` 独立：关闭工具不改变后台摘要启停，不删除任务，也不影响配置页的内部整理／修复入口。两组工具都继续服从 `mcp_tools` 白名单。
+「自动摘要 Agent 工具」（`features.pipeline_agent`）默认关闭；可写实例开启后才注册 `pipeline_next`、`pipeline_submit`、`pipeline_rebuild` 及 `pipeline_pending_list/read/resume/finish/reopen`，HTTP 扩展同样核对开关。待处理工具可读取原话、恢复执行，或将无需单独整理的材料结束为只保留原话；结束项不再进入待处理列表，原话和已保存 Event 不删除，终态回执仍留内部核验。工具暴露与 `pipeline.auto_enabled` 独立：关闭工具不改变后台摘要启停，不删除任务，也不影响配置页的内部整理／修复入口。两组工具都继续服从 `mcp_tools` 白名单。
 
 Event 正文交给原话整理流程。主模型自行写叙事卷仍使用 `narrative_volume`：开启“主模型读写叙事卷”，读取正文与材料，自己写作，预览，再确认保存；不会额外调用 Writer 模型。Event 升 Scene 工具仍继承原 Event 的证据。网页编辑入口保持原有契约。
 

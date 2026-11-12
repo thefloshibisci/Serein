@@ -305,7 +305,7 @@ def test_optional_candidate_and_agent_tools_refresh_and_reject_cached_calls(tmp_
     with TestClient(create_app(settings,token='test',live=True),headers={'Authorization':'Bearer test'}) as client:
         assert client.post('/v1/extensions/pipeline_next',json={}).status_code==404
         client.patch('/v1/settings',json={'features':{'pipeline_agent':True}}).raise_for_status()
-        assert client.post('/v1/extensions/pipeline_next',json={}).json()=={'status':'synthetic'}
+        assert client.post('/v1/extensions/pipeline_next',json={}).json()=={'status':'synthetic','pending_count':0,'pending_material_ids':[]}
         client.patch('/v1/settings',json={'features':{'pipeline_agent':False}}).raise_for_status()
         assert client.post('/v1/extensions/pipeline_submit',json={'job_id':'synthetic','output':{}}).status_code==404
 

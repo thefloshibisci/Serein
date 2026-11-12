@@ -7,7 +7,7 @@ import {pathToFileURL} from 'node:url';
 import {createRequire} from 'node:module';
 const webRoot=resolve(process.cwd()),require=createRequire(join(webRoot,'package.json'));
 const {build,stop}=require('esbuild'),{JSDOM}=require('jsdom');
-const dom=new JSDOM('<div id="root"></div>',{url:'https://synthetic.invalid'});
+const dom=new JSDOM('<div id="root"></div>',{url:'https://synthetic.invalid',pretendToBeVisual:true});
 for(const key of ['window','document','navigator','HTMLElement','Event','Node'])Object.defineProperty(globalThis,key,{value:dom.window[key],configurable:true});
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 dom.window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
@@ -48,7 +48,9 @@ test('pending summaries do not fetch originals until explicitly opened',async()=
   assert.equal(document.querySelector('.pending-originals article pre').textContent,'SYNTHETIC_ORIGINAL');
 });
 test('continuing a pending item sends its id and starts work only after resume',async()=>{
-  await render();await click('从失败步骤继续');assert.deepEqual(requests[0].body,{pending_id:17,replan:false});assert(requests.some(r=>r.url.endsWith('/next')));assert.match(document.body.textContent,/event-synthetic/);
+  await render();await click('从失败步骤继续');assert.deepEqual(requests[0].body,{pending_id:17,replan:false});assert(requests.some(r=>r.url.endsWith('/next')));
+  assert.equal(document.querySelectorAll('.pending-material').length,0);assert.match(document.body.textContent,/暂无待处理材料/);
+  assert(!document.body.textContent.includes('event-synthetic'));assert(!document.body.textContent.includes('已处理记录'));
 });
 test('a busy pipeline does not start another task',async()=>{
   await render();busy=true;await click('从失败步骤继续');busy=false;assert(!requests.some(r=>r.url.endsWith('/next')));assert.match(document.body.textContent,/整理正在运行/);
@@ -71,7 +73,8 @@ test('skipping is limited to the selected batch and requires a preview plus conf
   await click('取消');assert(!requests.some(r=>r.url.endsWith('/skip-batch')));
   await click('跳过本批，保留原话');assert.equal(document.querySelector('.pending-finish-dialog').open,true);await click('确认结束整理');
   assert.deepEqual(requests.find(r=>r.url.endsWith('/skip-batch')).body,{batch_id:'synthetic',confirm:'SKIP_PIPELINE_BATCH'});
-  assert.match(document.body.textContent,/已手动跳过，原话保留/);
+  assert.match(document.body.textContent,/已结束这批 2 条原话的整理，原话保留/);
+  assert.equal(document.querySelectorAll('.pending-material').length,0);assert(!document.body.textContent.includes('已处理记录'));
   assert(!requests.some(r=>r.url.endsWith('/next')));
 });
 
@@ -131,6 +134,71 @@ test('a standalone poll started before archiving cannot undo its terminal state 
   }
 });
 
+test('standalone polling pauses when inactive or hidden and preserves confirmed finishes on return',async()=>{
+  if(root)await act(async()=>root.unmount());root=null;
+  const originalFetch=globalThis.fetch,originalInterval=globalThis.setInterval,originalClear=globalThis.clearInterval;
+  let hidden=false,nextTimer=0,reads=0,delay=false,releasePoll;
+  const timers=new Map(),observed=[];
+  const onStatus=value=>observed.push(value);
+  const pending={status:'idle',pending_materials:[{...item,can_archive:true}]};
+  Object.defineProperty(document,'hidden',{get:()=>hidden,configurable:true});
+  globalThis.setInterval=callback=>{timers.set(++nextTimer,callback);return nextTimer;};
+  globalThis.clearInterval=id=>timers.delete(id);
+  globalThis.fetch=async(url,options)=>{
+    if(url.endsWith('/status')){
+      reads++;
+      if(delay){delay=false;return new Promise(resolve=>{releasePoll=()=>resolve({ok:true,json:async()=>structuredClone(pending)});});}
+      // Deliberately keep returning stale open data after a successful archive.
+      return {ok:true,json:async()=>structuredClone(pending)};
+    }
+    return originalFetch(url,options);
+  };
+  try{
+    await act(async()=>{root=mount(undefined,{active:false,onStatus});});
+    assert.equal(reads,0);assert.equal(timers.size,0);
+    await act(async()=>update(root,undefined,{active:true,onStatus}));
+    assert.equal(reads,1);assert.equal(timers.size,1);
+    const retired=[...timers.values()][0];
+    await act(async()=>update(root,undefined,{active:false,onStatus}));
+    await act(async()=>retired());
+    assert.equal(reads,1,'Queued callbacks cannot poll an inactive panel');assert.equal(timers.size,0);
+    await act(async()=>update(root,undefined,{active:true,onStatus}));
+    assert.equal(reads,2);
+    hidden=true;await act(async()=>document.dispatchEvent(new Event('visibilitychange')));
+    assert.equal(timers.size,0);assert.equal(reads,2);
+    hidden=false;await act(async()=>document.dispatchEvent(new Event('visibilitychange')));
+    assert.equal(timers.size,1);assert.equal(reads,3);
+    delay=true;await act(async()=>{[...timers.values()][0]();});
+    assert.equal(reads,4);
+    await act(async()=>update(root,undefined,{active:false,onStatus}));
+    await act(async()=>update(root,undefined,{active:true,onStatus}));
+    assert.equal(reads,4,'Resuming waits for an outstanding read');
+    await click('只保留原话');await click('确认结束整理');
+    assert.equal(document.querySelectorAll('.pending-material').length,0);
+    await act(async()=>releasePoll());
+    assert.equal(reads,6,'Old read completion starts exactly one current poll');
+    assert.equal(observed.at(-1).pending_materials[0].status,'archived_only');
+    assert.equal(document.querySelectorAll('.pending-material').length,0,'Stale reads and resume cannot revive a confirmed finish');
+    delay=true;await act(async()=>{[...timers.values()][0]();});
+    assert.equal(reads,7);
+    hidden=true;await act(async()=>document.dispatchEvent(new Event('visibilitychange')));
+    hidden=false;await act(async()=>document.dispatchEvent(new Event('visibilitychange')));
+    assert.equal(reads,7,'Visibility resume does not overlap a pending read');
+    const beforeReturn=observed.length;
+    await act(async()=>releasePoll());
+    assert.equal(reads,8,'Visibility resume refreshes immediately after old read finishes');
+    assert.equal(observed.length,beforeReturn+1,'Only the fresh visibility response is accepted');
+    assert.equal(observed.at(-1).pending_materials[0].status,'archived_only');
+    await act(async()=>update(root,{status:'idle',pending_materials:pending.pending_materials},{active:false,onStatus}));
+    assert.equal(timers.size,0,'Parent-supplied work never starts standalone polling');
+    assert.equal(document.querySelectorAll('.pending-material').length,0);
+  }finally{
+    if(root)await act(async()=>root.unmount());root=null;
+    delete document.hidden;
+    globalThis.fetch=originalFetch;globalThis.setInterval=originalInterval;globalThis.clearInterval=originalClear;
+  }
+});
+
 test('an archive error stays in the visible dialog and does not claim completion',async()=>{
   await render();await act(async()=>update(root,{status:'idle',pending_materials:[{...item,can_archive:true}]}));
   const originalFetch=globalThis.fetch;
@@ -150,17 +218,18 @@ test('a running task still permits material inspection while preventing competin
   await click('查看原话与最后输出');assert.equal(requests.length,1);
 });
 
-test('parked short chats are listed apart and never counted as work to do',async()=>{
-  const parked={...item,id:18,batch_id:'parked',waiting_for_continuation:true,plan_compatible:true,reason:'Synthetic park'};
+test('unfinished short chats stay actionable in one list until explicitly finished',async()=>{
+  const parked={...item,id:18,batch_id:'parked',waiting_for_continuation:true,plan_compatible:true,reason:'等待后续对话',can_archive:true};
   if(root)await act(async()=>root.unmount());requests.length=0;
   await act(async()=>{root=mount({status:'idle',pending_materials:[parked]});});
-  assert.match(document.body.textContent,/暂无待处理材料/);assert(!document.body.textContent.includes('批材料待处理'));
-  const group=document.querySelector('.pending-materials__waiting');
-  assert.equal(group.querySelector('summary').textContent,'等后续的对话（1）');assert.equal(group.open,false);
-  assert.match(group.textContent,/不需要你处理/);assert.match(group.querySelector('h4').textContent,/待办 18 · 等后续的对话/);
-  assert.equal(button('从失败步骤继续'),undefined);assert(button('重新切分，保留归线'));
+  assert.match(document.body.textContent,/有 1 批材料待处理/);assert(!document.body.textContent.includes('暂无待处理材料'));
+  assert.equal(document.querySelector('.pending-materials__waiting'),null);
+  assert(!document.body.textContent.includes('等后续'));assert(!document.body.textContent.includes('等待后续'));assert(!document.body.textContent.includes('不需要你处理'));
+  assert.match(document.querySelector('.pending-material h4').textContent,/待办 18 · 已切分待补写/);
+  assert(button('从失败步骤继续'));assert(button('重新切分，保留归线'));
+  assert(button('只保留原话'));assert.match(document.body.textContent,/MCP/);
   await act(async()=>{root.unmount();root=mount({status:'idle',pending_materials:[parked,item]});});
-  assert.match(document.body.textContent,/有 1 批材料待处理/);assert.equal(document.querySelectorAll('.pending-materials__waiting article').length,1);
+  assert.match(document.body.textContent,/有 2 批材料待处理/);assert.equal(document.querySelectorAll('.pending-materials > .pending-material').length,2);
 });
 
 test('a plan frozen by an older build offers only a rebuild, not a continue that must fail',async()=>{
@@ -170,12 +239,45 @@ test('a plan frozen by an older build offers only a rebuild, not a continue that
   await click('重新切分，保留归线');assert.deepEqual(requests[0].body,{pending_id:17,replan:true});
 });
 
-test('an unresolved review remains actionable alongside chats waiting for continuation',async()=>{
+test('finished receipts do not appear as another list or count as pending',async()=>{
   if(root)await act(async()=>root.unmount());
   await act(async()=>{root=mount({status:'idle',pending_materials:[{...item,waiting_for_continuation:false},
-    {...item,id:18,waiting_for_continuation:true}]});});
-  assert.match(document.body.textContent,/有 1 批材料待处理/);
+    {...item,id:18,waiting_for_continuation:true},
+    {...item,id:19,status:'archived_only',summary:'FINISHED_ORIGINAL_ONLY'},
+    {...item,id:20,status:'resolved',summary:'FINISHED_EVENT',resolved_event_ids:['event-finished']}]});});
+  assert.match(document.body.textContent,/有 2 批材料待处理/);
   assert.equal(document.querySelector('.pending-materials > .pending-material').getAttribute('aria-label'),'待办 17');
   assert(button('从失败步骤继续'));
-  assert.match(document.querySelector('.pending-materials__waiting').textContent,/会结束整理，只保留原话/);
+  assert.equal(document.querySelectorAll('.pending-material').length,2);
+  for(const text of ['已处理记录','FINISHED_ORIGINAL_ONLY','FINISHED_EVENT','event-finished'])assert(!document.body.textContent.includes(text));
+  await act(async()=>update(root,{status:'idle',pending_materials:[{...item,status:'archived_only'}]}));
+  assert.match(document.body.textContent,/暂无待处理材料/);assert.equal(document.querySelectorAll('.pending-material').length,0);
+});
+
+test('MCP completion removes open details and invalidates an outstanding original read',async()=>{
+  await render();await click('查看原话与最后输出');
+  assert(document.querySelector('.pending-material-detail'));
+  await act(async()=>update(root,{status:'idle',pending_materials:[{...item,status:'archived_only'}]}));
+  assert.equal(document.querySelector('.pending-material-detail'),null);
+  assert.equal(document.querySelectorAll('.pending-material').length,0);
+  await render();
+  const originalFetch=globalThis.fetch;let resolveRead;
+  globalThis.fetch=(url,options)=>url.endsWith('/pending/17')?new Promise(resolve=>{resolveRead=()=>resolve({ok:true,json:async()=>({id:17,status:'open',messages:[{id:101,content:'STALE_ORIGINAL'}]})});}):originalFetch(url,options);
+  try{
+    await act(async()=>{button('查看原话与最后输出').click();});
+    await act(async()=>update(root,{status:'idle',pending_materials:[]}));
+    await act(async()=>resolveRead());
+    assert.equal(document.querySelector('.pending-material-detail'),null);
+    assert(!document.body.textContent.includes('STALE_ORIGINAL'));
+    assert.match(document.body.textContent,/暂无待处理材料/);
+  }finally{globalThis.fetch=originalFetch;}
+});
+
+test('MCP completion dismisses a pending confirmation instead of leaving a finished task behind',async()=>{
+  await render();await act(async()=>update(root,{status:'idle',pending_materials:[{...item,can_archive:true}]}));
+  await click('只保留原话');assert(document.querySelector('.pending-finish-dialog').open);
+  await act(async()=>update(root,{status:'idle',pending_materials:[]}));
+  assert.equal(document.querySelector('.pending-finish-dialog').open,false);
+  assert.equal(document.querySelectorAll('.pending-material').length,0);
+  assert(!requests.some(request=>request.url.endsWith('/archive-pending')));
 });
