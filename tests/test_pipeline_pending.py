@@ -502,4 +502,5 @@ from test_pipeline_auto_source_guard import (
     test_deleted_context_blocks_request_even_if_owned_survives,
     test_transient_recovery_has_durable_limit,
     test_exact_evidence_reconciles_ledger_without_new_event,
+    test_bound_source_ids_are_not_raw_message_ids,
 )

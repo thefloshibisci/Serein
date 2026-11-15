@@ -130,3 +130,18 @@ def test_exact_evidence_reconciles_ledger_without_new_event(settings):
         assert st.conn.execute('SELECT count(*) FROM fact_events').fetchone()[0]==before
         assert st.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0]==2
         assert st.conn.execute('SELECT status FROM pipeline_pending_materials').fetchone()[0]=='resolved'
+
+
+def test_bound_source_ids_are_not_raw_message_ids(settings):
+    from serein.pipeline_source_guard import message_ids
+    ingest(settings)
+    with Store(settings.database) as st:
+        original=p.task_message(st.conn.execute('SELECT * FROM raw_events WHERE id=1').fetchone())
+    bound={'id':9999,'role':'user','source_system':'test','message_id':'u1',
+           'content':'Book club plan 1','session_id':'books'}
+    frozen={'messages':[original],'base_event_candidates':[{'source_refs':[bound]}]}
+    assert message_ids(frozen)=={1}
+    check(settings.database,frozen)
+    # Even an existing raw ID must not be confused with a bound-source row.
+    bound['id']=2
+    assert message_ids({'source_refs':[bound]})==set()

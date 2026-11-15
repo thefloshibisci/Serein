@@ -313,7 +313,9 @@ def test_reopen_rolls_back_if_its_recovery_receipt_cannot_be_saved(settings):
 
 def test_scheduler_never_automatically_finishes_or_reopens_old_material(settings, monkeypatch):
     from test_route_scope_holds import Clock
-    item = parked(settings, chars=400)
+    # Evidence-insufficient work remains untouched. Proven round-gate waits
+    # have their own automatic recovery test and are intentionally resumable.
+    item = retained(settings)
     before = snapshot(settings)
     monkeypatch.setattr(p, 'datetime', Clock)
     def forbidden(*args, **kwargs):
@@ -321,7 +323,7 @@ def test_scheduler_never_automatically_finishes_or_reopens_old_material(settings
     monkeypatch.setattr(pending, 'settle_stale', forbidden, raising=False)
     monkeypatch.setattr(pending, 'archive_stale', forbidden, raising=False)
     for _ in range(3):
-        assert asyncio.run(p.scheduled_advance(settings.database))['status'] in ('current', 'settled_today')
+        assert asyncio.run(p.scheduled_advance(settings.database))['status'] == 'pending_materials'
     assert snapshot(settings) == before
     assert active_materials(settings.database)['items'][0]['id'] == item['id']
     with Store(settings.database, read_only=True) as store:
