@@ -30,6 +30,7 @@ EVENT_CURATOR_MAX_ACTIVE_LEAVES_PER_TRACK=8
 # frozen role protocol. Keep the exact deployed predecessor's requests and
 # budgets resumable. Unknown revisions still require explicit review.
 EXECUTION_COMPATIBLE_REVISIONS=frozenset({
+    '796b395a54a516634e0a37fceca551509af60ff2bd183a868febf7adf5f276ae',
     # Commit 52add3d: Git/LF archive and Windows/CRLF deployment respectively.
     '414a9a433fc0b9d30d665b79cdae8b249599179a0b3c5e719571c452de813a81',
     'd05811a7b720b16e23b75228c8e43edd4c808d03c52645f5a8cfa5e2b75db507',
@@ -124,6 +125,8 @@ def initialize(database):
                   ON b.upload_id=json_extract(m.value,'$.metadata.import_upload_id') AND b.released=0)""")
         # A code upgrade is not permission to rebuild frozen work or reset its
         # failure budget. Retain requests, outputs, provenance and existing holds.
+        from ..pipeline_source_guard import invalidate_deleted
+        invalidate_deleted(store.conn)
         pending_materials.retain_legacy_batches(store.conn)
         compact_completed_snapshots(store)
         expire_completed_media(store)
@@ -1304,6 +1307,8 @@ def _submit(database,job_id,output):
         if row is None:raise ValueError('Unknown pipeline job')
         frozen_request=row['request_json'];existing_output=row['output_json'];status=row['status']
     request=hydrate_request_images(database,row['batch_id'],json.loads(frozen_request))
+    from ..pipeline_source_guard import check
+    check(database,request)
     if request['role'] not in ROLES:
         raise ValueError('This pipeline stage is retired; request the next task')
     output=prepare_stage_output(request,output)
@@ -1337,6 +1342,8 @@ def _submit(database,job_id,output):
         if row['output_json']:
             if row['output_json']!=encoded_output:raise Conflict('This job already has a different result')
             return {'status':'unchanged','job_id':job_id}
+        from ..pipeline_source_guard import assert_readable
+        assert_readable(store.conn,request)
         store.conn.execute('UPDATE pipeline_jobs SET output_json=? WHERE id=?',(encoded_output,job_id))
     return {'status':'accepted','job_id':job_id}
 
@@ -1428,6 +1435,8 @@ async def job(database,batch,request,key,runner):
     with Store(database) as store,store.transaction(immediate=True):
         store.conn.execute('INSERT OR IGNORE INTO pipeline_jobs(id,batch_id,role,request_json) VALUES (?,?,?,?)',(identifier,batch['id'],key,encoded_request))
         row=store.conn.execute('SELECT * FROM pipeline_jobs WHERE id=?',(identifier,)).fetchone()
+    from ..pipeline_source_guard import check
+    check(database,json.loads(row['request_json']))
     incoming=request
     current_execution=request['execution']
     request=hydrate_request_images(database,batch['id'],json.loads(row['request_json']))
@@ -1759,6 +1768,7 @@ def settle(database,batch,data,routed,plans):
             'pending':len({m['id'] for m in data['messages']+data['parked']}-set(processed)),
             'skipped':sum(value=='skipped' for value in processed.values()),
             'deferred':len(deferred),
+            'admission_receipts':[entry for _,plan,_ in plans for entry in plan.get('admission_receipts',[])],
             'attempted_source_message_ids':sorted(all_new),
             'observed_source_message_ids':[m['id'] for m in data['routing_messages']],
             'protected_deferrals':[entry for _,plan,_ in plans for entry in plan['hard_skips'] if entry.get('reason')!='no_new_sources'],
@@ -1778,6 +1788,9 @@ def settle(database,batch,data,routed,plans):
     result['task_snapshot_compacted']=not bool(remaining)
     encoded_result=encode(result)
     def finish(conn):
+        from ..pipeline_source_guard import assert_readable
+        assert_readable(conn,data)
+        for component,_,_ in plans:assert_readable(conn,component)
         from .pipeline_recovery import record_routes
         record_routes(conn,batch['id'],assignments,preserve_existing=bool(routed.get('recovered_route_sources')))
         for item,detail in zip(items,details):
@@ -1967,6 +1980,8 @@ async def _advance_frozen(database,*,include_recent=False,runner=None,retry_repa
     batch=new_batch(database,include_recent,retry_repair=retry_repair)
     if not batch:return held_result(database) or {'status':'current','note':'No unreviewed stable dialogue units are ready; deferred originals remain pending.'}
     data=json.loads(batch['input_json']);plans=[]
+    from ..pipeline_source_guard import check
+    check(database,data)
     if not runtime_compatible(data):
         return json.loads(batch['result_json'])
     try:
@@ -2139,6 +2154,8 @@ async def _publish_routes(database,batch,data,runner=None):
     output=await route_batch(database,batch,data,runner)
     assignments,updates,_=route_result(data,output)
     with Store(database) as store,store.transaction(immediate=True):
+        from ..pipeline_source_guard import assert_readable
+        assert_readable(store.conn,data)
         validate_routing_result(data,output)
         data['routing_result']=output
         track_state.persist(store.conn,output['track_state_updates'],data['scope'],preserve_newer=True)
@@ -2263,10 +2280,21 @@ async def _flush_routes_frozen(database,*,batch_limit=None):
 
 
 async def scheduled_advance(database):
+    from ..pipeline_automatic import observe
+    observe(database,checked_at=now(),phase='checking')
     if not read_settings(database)['pipeline']['auto_enabled']:
-        return {'status':'auto_paused'}
-    from ..work_tasks import execute
-    return await execute(database,'pipeline',lambda:_scheduled_advance(database))
+        result={'status':'auto_paused'}
+    else:
+        from ..work_tasks import execute
+        try:
+            result=await execute(database,'pipeline',lambda:_scheduled_advance(database))
+        except Exception as error:
+            from ..work_tasks import failure_reason
+            observe(database,finished_at=now(),phase='failed',error=failure_reason(error))
+            raise
+    observe(database,finished_at=now(),phase=result.get('status','unknown'),
+            error=result.get('reason',''),batch_id=result.get('batch_id'),events=result.get('events',0))
+    return result
 
 
 async def _scheduled_advance(database):
@@ -2288,10 +2316,18 @@ async def _scheduled_advance(database):
     # Settle ready old material before routing all of today's uploads. A slow
     # or failing daytime Router must not starve an independent ready Event.
     result=await _advance(database)
+    if result['status']=='current':
+        from ..pipeline_automatic import resume_gate_wait,resume_transient_failure
+        if resume_gate_wait(database) or resume_transient_failure(database):result=await _advance(database)
     if result['status'] in ('current','needs_repair','blocked'):
         await flush_routes(database,batch_limit=1)
         result=await _advance(database)
     if result['status']=='current' and not held_result(database):
+        from ..pipeline_automatic import pending_status
+        retained=pending_status(database)
+        if retained:
+            with Store(database) as store:store.conn.execute('INSERT OR REPLACE INTO pipeline_schedule VALUES (?,0)',(day,))
+            return retained
         with Store(database) as store:store.conn.execute('INSERT OR REPLACE INTO pipeline_schedule VALUES (?,1)',(day,))
         if row and row[0]:return {'status':'settled_today'}
     elif row and row[0]:

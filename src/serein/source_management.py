@@ -95,8 +95,6 @@ class SourceManagement:
         tables={r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if 'fact_event_sources' in tables and conn.execute('SELECT 1 FROM fact_event_sources WHERE content_sha256=? LIMIT 1',(sha,)).fetchone():
             reasons.append('已有事件来源引用此原话')
-        if 'pipeline_batches' in tables and conn.execute("SELECT 1 FROM pipeline_batches WHERE status IN ('pending','paused_failure') LIMIT 1").fetchone():
-            reasons.append('有未完成的原话整理批次；请先完成或处置该批次')
         return reasons
 
     def preview_delete(self, ids: list[str]) -> dict:
@@ -131,4 +129,6 @@ class SourceManagement:
                         (number,row['text'],row['source'],row['conversation_id'],row['session_id']))
                 store.conn.execute('DELETE FROM raw_events WHERE id=?',(number,))
                 deleted.append('raw:'+str(number))
+            from .pipeline_source_guard import invalidate_deleted
+            invalidate_deleted(store.conn)
         return {'deleted_ids':deleted,'count':len(deleted)}
