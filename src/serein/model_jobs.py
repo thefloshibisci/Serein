@@ -15,9 +15,18 @@ async def run(application):
         previous=None
         while True:
             try:
-                result=await scheduled_advance(settings.database)
+                config=read_settings(settings.database)
+                # Each pass is bounded; cancellation releases its existing lease.
+                result=await asyncio.wait_for(scheduled_advance(settings.database),
+                    timeout=max(900,config['pipeline']['timeout_seconds']*12))
                 if result.get('status')!='busy':
                     previous=report(result,previous,logging.getLogger(__name__))
+            except asyncio.CancelledError:
+                # Model reconfiguration cancels this worker deliberately. A
+                # cancelled child pass must not silently kill the timer itself.
+                if asyncio.current_task().cancelling():raise
+                from .pipeline_automatic import observe
+                observe(settings.database,phase='interrupted',error='本轮执行中断，自动检查将在下一轮继续。')
             except Exception:
                 logging.getLogger(__name__).exception('Event pipeline failed; originals remain pending')
             await asyncio.sleep(30)

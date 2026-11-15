@@ -150,8 +150,11 @@ def load_tracks(store, source, session, before_id, message, *, lookback_days=3, 
             previous=anchors.get(track_id)
             if previous is None or (stamp,row['id'])>(previous[0],previous[1]['id']):
                 anchors[track_id]=(stamp,row)
+    revoked_row=store.conn.execute("SELECT value_json FROM background_state WHERE name='pipeline_deleted_source_tracks'").fetchone()
+    revoked=set(json.loads(revoked_row[0])) if revoked_row else set()
     cards=[];history_cache={};receipts=[]
     for row in store.conn.execute('SELECT id,card_json,scope FROM pipeline_tracks ORDER BY id'):
+        if row['id'] in revoked:continue
         anchor=anchors.get(row['id'])
         if anchor is None:continue
         card=json.loads(row['card_json'])

@@ -225,6 +225,8 @@ def park(database,batch,error):
     from . import pipeline as p
     with Store(database) as store,store.transaction(immediate=True):
         row=store.conn.execute('SELECT * FROM pipeline_batches WHERE id=?',(batch['id'],)).fetchone()
+        if row['status'].startswith('superseded_'):
+            return {'status':'cancelled_source_deleted','batch_id':batch['id'],'reason':'原文已删除，旧结果未保存。'}
         data=json.loads(row['input_json'])
         ids=[m['id'] for m in data.get('messages',data.get('routing_messages',[]))
              if not store.conn.execute('SELECT 1 FROM raw_processing WHERE raw_id=?',(m['id'],)).fetchone()]
@@ -261,6 +263,8 @@ def entries(conn, *, limit=100):
     for row in rows:
         data=json.loads(row['input_json']);ids=json.loads(row['source_ids_json'])
         cards=data.get('routing_result',{}).get('tracks',data.get('tracks',[]))
+        relevant={t for c in data.get('components',[]) if set(ids).intersection(m['id'] for m in c['messages']) for t in c.get('track_ids',[])}
+        if relevant:cards=[c for c in cards if c.get('track_id') in relevant]
         source=[m for m in data.get('routing_messages',[]) if m['id'] in ids]
         attempt=last_attempt(conn,row['batch_id'],data,compact=True)
         result.append({key:row[key] for key in ('id','batch_id','scope','status','kind','reason','updated_at')} |
@@ -302,6 +306,8 @@ def detail(database,pending_id):
         if row is None:raise ValueError('找不到待处理材料')
         batch=store.conn.execute('SELECT input_json,status FROM pipeline_batches WHERE id=?',(row['batch_id'],)).fetchone()
         data=json.loads(batch['input_json']);ids=set(json.loads(row['source_ids_json']))
+        from ..pipeline_source_guard import assert_readable
+        assert_readable(store.conn,data)
         messages=[m for m in data.get('routing_messages',[]) if m['id'] in ids]
         jobs=[{'role':j['role'],'output':json.loads(j['output_json']) if j['output_json'] else None}
               for j in store.conn.execute('SELECT role,output_json FROM pipeline_jobs WHERE batch_id=? ORDER BY rowid',(row['batch_id'],))]

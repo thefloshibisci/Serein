@@ -695,5 +695,8 @@
   "src/serein/extensions/pipeline_agent.py",
   "tests/test_pipeline_pending_agent.py",
   "web/src/hooks/useVisiblePolling.js",
-  "web/tests/settings-polling.dom.mjs"
+  "web/tests/settings-polling.dom.mjs",
+  "src/serein/pipeline_source_guard.py",
+  "src/serein/pipeline_automatic.py",
+  "tests/test_pipeline_auto_source_guard.py"
 ]

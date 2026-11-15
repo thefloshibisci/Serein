@@ -144,6 +144,10 @@ def test_upgrade_retires_pending_scene_protocol_and_keeps_history(settings,monke
     ingest(settings)
     asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
     ingest(settings,2)
+    # Build the legacy task in an independent scope: reusing the current
+    # protocol's completed route correctly fails before a legacy job exists.
+    with Store(settings.database) as store:
+        store.conn.execute("UPDATE raw_events SET source='legacy-test',session_id='legacy-books' WHERE id IN (3,4)")
     current_contract=p.CONTRACT
     monkeypatch.setattr(p,'CONTRACT','public-event-message-tracks-v2')
     task=asyncio.run(p.advance(settings.database,include_recent=True))

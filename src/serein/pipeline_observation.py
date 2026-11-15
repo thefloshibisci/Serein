@@ -1,6 +1,6 @@
 """Report returned pipeline holds, not only raised exceptions, without polling spam."""
 
-HOLD_STATES = frozenset({'blocked', 'needs_repair', 'paused', 'retry_wait', 'retained', 'awaiting_agent'})
+HOLD_STATES = frozenset({'blocked', 'needs_repair', 'paused', 'retry_wait', 'retained', 'awaiting_agent', 'pending_materials'})
 
 
 def report(result, previous, logger):

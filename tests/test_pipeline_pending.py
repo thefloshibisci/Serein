@@ -491,3 +491,15 @@ def test_refused_resume_reports_the_reason_without_failing_the_pipeline(settings
     after=client.get('/v1/pipeline/status').json()
     assert after['status']==before['status']!='failed' and not after.get('error')
     assert client.post('/v1/pipeline/resume-pending',json={'pending_id':item['id'],'replan':True}).json()['status']=='resumed'
+
+
+# Keep the automatic/deletion regressions in the existing deployment CI suite.
+from test_pipeline_auto_source_guard import (
+    test_delete_revokes_pending_snapshot_and_inflight_input,
+    test_running_writer_deleted_mid_request_cannot_publish,
+    test_gate_only_wait_is_resumed_by_timer,
+    test_timer_does_not_claim_completed_with_pending,
+    test_deleted_context_blocks_request_even_if_owned_survives,
+    test_transient_recovery_has_durable_limit,
+    test_exact_evidence_reconciles_ledger_without_new_event,
+)
