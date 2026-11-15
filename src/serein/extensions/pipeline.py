@@ -2280,18 +2280,17 @@ async def _flush_routes_frozen(database,*,batch_limit=None):
 
 
 async def scheduled_advance(database):
+    if not read_settings(database)['pipeline']['auto_enabled']:
+        return {'status':'auto_paused'}
     from ..pipeline_automatic import observe
     observe(database,checked_at=now(),phase='checking')
-    if not read_settings(database)['pipeline']['auto_enabled']:
-        result={'status':'auto_paused'}
-    else:
-        from ..work_tasks import execute
-        try:
-            result=await execute(database,'pipeline',lambda:_scheduled_advance(database))
-        except Exception as error:
-            from ..work_tasks import failure_reason
-            observe(database,finished_at=now(),phase='failed',error=failure_reason(error))
-            raise
+    from ..work_tasks import execute
+    try:
+        result=await execute(database,'pipeline',lambda:_scheduled_advance(database))
+    except Exception as error:
+        from ..work_tasks import failure_reason
+        observe(database,finished_at=now(),phase='failed',error=failure_reason(error))
+        raise
     observe(database,finished_at=now(),phase=result.get('status','unknown'),
             error=result.get('reason',''),batch_id=result.get('batch_id'),events=result.get('events',0))
     return result
