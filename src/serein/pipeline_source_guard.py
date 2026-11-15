@@ -12,7 +12,8 @@ def message_ids(value):
     def walk(node):
         if isinstance(node,dict):
             key=node.get('id')
-            if type(key) is int and key>0 and node.get('role') in ('user','assistant'):
+            if (type(key) is int and key>0 and node.get('role') in ('user','assistant')
+                    and 'source' in node and 'source_event_id' in node):
                 result.add(key)
             for key in node.get('recent_source_message_ids',[]):
                 if type(key) is int and key>0:result.add(key)
