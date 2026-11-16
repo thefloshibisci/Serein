@@ -23,6 +23,8 @@ QUEUE_COMPATIBLE_ROUTER_REVISIONS = {
     '37fb670e9d095d0b018c5377d673acb052f84285c5049b2e65ff10b3af2323a5',
     '8e44cd8a8da8f21d32f6a46c77bdde11eb970413bb3d38acd84471136f93adc1',
     '791b61c3ba4f2231d73b056aa51bfd0fd63d38a3e2898d74eb9ed437425bf7b5',
+    # 2026-11-15 repair build: deletion/source-guard fixes changed no Router contract.
+    '7e6ed975d56cd50f2945173aa408bb2fc635a42fd394028119b499893ae6a36d',
 }
 MESSAGE_KEYS = ('id', 'source', 'source_event_id', 'original_session_id',
                 'session_id', 'role', 'content', 'created_at')
