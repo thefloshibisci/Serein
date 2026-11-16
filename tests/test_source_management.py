@@ -98,3 +98,20 @@ def test_upload_allowlist_tracks_opt_in_and_readonly_state(live):
             await server.call_tool('source_message_upload',{})
 
     asyncio.run(exercise())
+
+
+def test_identical_text_in_another_message_does_not_block_delete(live):
+    import json
+    settings,client=live
+    first=upload(client).json()['items'][0]['id']
+    second=upload(client,message_id='m2').json()['items'][0]['id']
+    with Store(settings.database) as store:
+        row=store.conn.execute('select source,session_id,source_event_id from raw_events where id=?',
+            (int(first.split(':')[1]),)).fetchone()
+        store.add_source(json.dumps([row[0],row[1],row[2]]),'A retained original.',metadata={})
+    blocked=client.post('/v1/originals/delete-preview',json={'ids':[first]}).json()
+    assert not blocked['can_delete']
+    free=client.post('/v1/originals/delete-preview',json={'ids':[second]}).json()
+    assert free['can_delete'],free
+    assert client.post('/v1/originals/delete',json={'items':free['items'],'confirm':True}).status_code==200
+    assert Originals(settings.database).source_message_read([first])['items']

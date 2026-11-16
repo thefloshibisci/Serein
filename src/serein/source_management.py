@@ -87,14 +87,37 @@ class SourceManagement:
             'instruction':'Read returned raw IDs to verify. Upload stores originals; it does not claim automatic complete capture or create a Scene.'}
 
     @staticmethod
+    def _references(rows,identity):
+        """True when a same-text evidence row points at this message, or has no
+        message identity at all (legacy copies stay conservatively protected)."""
+        for ref in rows:
+            if not ref: return True
+            if ref==identity: return True
+        return False
+
+    @staticmethod
+    def _source_identity(key):
+        try:
+            parts=json.loads(key)
+        except (TypeError,ValueError):
+            return ''
+        return parts[-1] if isinstance(parts,list) and len(parts)==3 and isinstance(parts[-1],str) else ''
+
+    @staticmethod
     def blockers(conn,row):
-        reasons=[]; sha=digest(row['text'])
-        # Conservative protection includes detached and historical evidence copies.
-        if conn.execute('SELECT 1 FROM sources WHERE content_sha256=? LIMIT 1',(sha,)).fetchone():
+        # Same text is not the same message: an evidence copy only protects the
+        # original it names. Copies without a message identity remain blocking.
+        reasons=[]; sha=digest(row['text']); identity=row['source_event_id'] or ''
+        copies=[SourceManagement._source_identity(r[0]) for r in
+            conn.execute('SELECT source_key FROM sources WHERE content_sha256=?',(sha,))]
+        if copies and (not identity or SourceManagement._references(copies,identity)):
             reasons.append('已有记忆证据副本引用此原话；需先处理引用，不能只删档案造成误解')
         tables={r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if 'fact_event_sources' in tables and conn.execute('SELECT 1 FROM fact_event_sources WHERE content_sha256=? LIMIT 1',(sha,)).fetchone():
-            reasons.append('已有事件来源引用此原话')
+        if 'fact_event_sources' in tables:
+            refs=[r[0] or '' for r in conn.execute(
+                'SELECT message_id FROM fact_event_sources WHERE content_sha256=?',(sha,))]
+            if refs and (not identity or SourceManagement._references(refs,identity)):
+                reasons.append('已有事件来源引用此原话')
         return reasons
 
     def preview_delete(self, ids: list[str]) -> dict:
