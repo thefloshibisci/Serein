@@ -28,3 +28,29 @@ def test_auto_arc_scout_requires_two_materials_for_new_collecting_arc():
     assert routed[0]['source_diary_ids'] == ['7'] and routed[0]['source_scene_ids'] == ['scene_room']
     item['materials'] = item['materials'][:1]
     assert normalize_new_roll_candidates({'candidates':[item]}, corridors, existing_rolls=[]) == []
+
+
+import hashlib
+from types import SimpleNamespace
+import pytest
+from serein.compat.germany.narrative_scan import NarrativeScout
+
+
+@pytest.mark.parametrize("content", ["  original text  ", "\n原文保持换行\n", "\t原文\t"])
+def test_scout_verifies_exact_source_before_formatting(content):
+    event={'status':'active','fingerprint':'synthetic','source_refs':[{
+        'content':content,'content_sha256':hashlib.sha256(content.encode()).hexdigest()}]}
+    scout=NarrativeScout()
+    scout.events=SimpleNamespace(read=lambda *a,**k:event)
+    result=scout._hydrate_event_scout_material({'source_type':'event','source_id':'synthetic'})
+    assert result['source_excerpt']==content.strip()
+    assert event['source_refs'][0]['content']==content
+
+
+def test_scout_still_rejects_modified_source():
+    event={'status':'active','source_refs':[{'content':'changed',
+        'content_sha256':hashlib.sha256(b'original').hexdigest()}]}
+    scout=NarrativeScout()
+    scout.events=SimpleNamespace(read=lambda *a,**k:event)
+    with pytest.raises(RuntimeError,match='event_source_drift'):
+        scout._hydrate_event_scout_material({'source_type':'event','source_id':'synthetic'})

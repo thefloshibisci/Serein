@@ -102,10 +102,11 @@ def test_deleted_context_blocks_request_even_if_owned_survives(tmp_path):
     with pytest.raises(Conflict):check(s.database,frozen)
 
 
-def test_transient_recovery_has_durable_limit(tmp_path):
+@pytest.mark.parametrize("reason", ["Upstream returned HTTP 503", "Upstream returned HTTP 513", "Upstream returned HTTP 529"])
+def test_transient_recovery_has_durable_limit(tmp_path,reason):
     s,_,_,_=seed_deleted_case(tmp_path)
     from serein.pipeline_automatic import resume_transient_failure
-    error={'error':'Upstream returned HTTP 503','created_at':'2026-11-01T00:00:00+00:00'}
+    error={'error':reason,'created_at':'2026-11-01T00:00:00+00:00'}
     with patch.object(pending,'last_attempt',return_value=error),patch.object(pending,'resume',return_value={'status':'resumed'}) as resume:
         assert resume_transient_failure(s.database)['status']=='resumed'
         assert resume.call_count==1
@@ -145,3 +146,13 @@ def test_bound_source_ids_are_not_raw_message_ids(settings):
     # Even an existing raw ID must not be confused with a bound-source row.
     bound['id']=2
     assert message_ids({'source_refs':[bound]})==set()
+
+
+@pytest.mark.parametrize("reason", ["Upstream returned HTTP 400", "Upstream returned HTTP 401", "Upstream returned HTTP 403", "Upstream returned HTTP 501", "Upstream returned HTTP 505", "HTTP 5130", "证据不足", "用户暂停"])
+def test_automatic_recovery_leaves_permanent_errors_alone(tmp_path,reason):
+    s,_,_,_=seed_deleted_case(tmp_path)
+    from serein.pipeline_automatic import resume_transient_failure
+    error={'error':reason,'created_at':'2026-11-01T00:00:00+00:00'}
+    with patch.object(pending,'last_attempt',return_value=error),patch.object(pending,'resume') as resume:
+        assert resume_transient_failure(s.database) is None
+        resume.assert_not_called()

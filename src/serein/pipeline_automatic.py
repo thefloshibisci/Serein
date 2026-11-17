@@ -6,6 +6,7 @@ reviewed without inventing evidence or discarding originals.
 """
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from .core.store import Store, encode, now
 
@@ -57,7 +58,13 @@ def resume_transient_failure(database):
             data=json.loads(row['input_json'])
             error=pending.last_attempt(store.conn,row['batch_id'],data,errors_only=True)
             reason=str(error['error'] if error else '')
-            if not any(token in reason for token in ('HTTP 429','HTTP 500','HTTP 502','HTTP 503','HTTP 504','无法连接上游','超时','timed out','Timeout')):continue
+            status=re.search(r'\bHTTP\s+(\d{3})\b',reason)
+            code=int(status.group(1)) if status else None
+            # Providers also use nonstandard 5xx codes (513, 529, ...).
+            # Keep the durable retry cap; unsupported operations/protocols
+            # and credential/request errors cannot be repaired by waiting.
+            retryable_http=code==429 or (code is not None and 500<=code<600 and code not in (501,505))
+            if not retryable_http and not any(token in reason for token in ('无法连接上游','超时','timed out','Timeout')):continue
             key='pipeline_auto_retry:'+str(row['id'])
             old=store.conn.execute('SELECT value_json FROM background_state WHERE name=?',(key,)).fetchone()
             receipt=json.loads(old[0]) if old else {'attempts':0}

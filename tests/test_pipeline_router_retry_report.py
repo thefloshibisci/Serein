@@ -154,3 +154,31 @@ def test_old_2274_attempt_records_do_not_grant_unlimited_new_retries(settings, m
         assert store.conn.execute('SELECT count(*) FROM pipeline_attempts').fetchone()[0] == 2277
         assert {row[0] for row in store.conn.execute('SELECT DISTINCT job_id FROM pipeline_attempts')} == {key}
         assert store.conn.execute('SELECT max(attempt) FROM pipeline_attempts').fetchone()[0] == 2277
+
+
+def test_nonstandard_server_error_recovers_retained_daytime_route(settings,monkeypatch):
+    from serein.pipeline_automatic import resume_transient_failure
+    configure(settings,daytime=True)
+    calls=[]
+    failing=True
+    def reply(request,frozen):
+        calls.append(frozen['role'])
+        if failing:return httpx.Response(513,request=request)
+        return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(short_output(frozen['role'],frozen))}}]},request=request)
+    transport(settings,monkeypatch,reply)
+    for _ in range(3):
+        asyncio.run(p.flush_routes(settings.database))
+        with Store(settings.database) as store:
+            store.conn.execute("UPDATE pipeline_batches SET result_json=json_set(result_json,'$.next_retry_at','2000-01-01T00:00:00+00:00') WHERE status='retry_wait'")
+    assert len(calls)==3
+    with Store(settings.database) as store:
+        assert store.conn.execute("SELECT count(*) FROM pipeline_pending_materials WHERE status='open'").fetchone()[0]==1
+        store.conn.execute("UPDATE pipeline_attempts SET created_at='2000-01-01T00:00:00+00:00'")
+    failing=False
+    assert resume_transient_failure(settings.database)['status']=='resumed'
+    result=asyncio.run(p.advance(settings.database,include_recent=True))
+    assert result['events']>=1
+    with Store(settings.database) as store:
+        assert store.conn.execute("SELECT count(*) FROM pipeline_pending_materials WHERE status IN ('open','running')").fetchone()[0]==0
+        assert store.conn.execute('SELECT count(*) FROM raw_events').fetchone()[0]==10
+        assert store.conn.execute("SELECT count(*) FROM pipeline_attempts WHERE error LIKE '%HTTP 513%'").fetchone()[0]==3
