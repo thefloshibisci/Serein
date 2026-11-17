@@ -179,11 +179,11 @@ class NarrativeScout:
             raise RuntimeError(f'narrative_scout_event_drift:{event_id}')
         excerpts = []
         for ref in event.get('source_refs') or []:
-            content = str(ref.get('content') or '').strip()
+            content = str(ref.get('content') or '')
             expected_hash = str(ref.get('content_sha256') or '').strip().lower()
-            if not content or hashlib.sha256(content.encode('utf-8')).hexdigest() != expected_hash:
+            if not content.strip() or hashlib.sha256(content.encode('utf-8')).hexdigest() != expected_hash:
                 raise RuntimeError(f'narrative_scout_event_source_drift:{event_id}')
-            excerpts.append(content)
+            excerpts.append(content.strip())
         hydrated = dict(item)
         hydrated['source_excerpt'] = '\n'.join(excerpts)[:2400]
         hydrated['fingerprint'] = str(event.get('fingerprint') or '')
