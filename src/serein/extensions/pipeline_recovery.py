@@ -302,6 +302,45 @@ def late_reply_route_receipts(database, units, cached):
     return receipts
 
 
+def _proved_late_suffix(expected, wanted, linked, candidates, frames_by_batch):
+    """Two complete, overlapping accepted frames cannot supply one coherent card."""
+    if set(linked) != set(expected) or len(set(linked.values())) != 2:
+        return False
+    ids = list(expected)
+    old, new = linked[ids[0]], linked[ids[-1]]
+    if old == new:
+        return False
+    left, right = frames_by_batch.get(old, []), frames_by_batch.get(new, [])
+    if len(left) != 1 or len(right) != 1:
+        return False
+    a, b = left[0], right[0]
+    if not (a.get('source_proof_complete') and b.get('source_proof_complete')):
+        return False
+    first, second = ([m['id'] for m in f['messages']] for f in (a, b))
+    if not second or second[0] not in first:
+        return False
+    split = first.index(second[0])
+    overlap = first[split:]
+    if not split or second[:len(overlap)] != overlap or len(second) <= len(overlap):
+        return False
+    if first[:split] + second != ids:
+        return False
+    if [linked[i] for i in ids] != [old]*split + [new]*len(second):
+        return False
+    for batch_id, frame in ((old, a), (new, b)):
+        if any(_message_key(m) != _message_key(expected[m['id']]) for m in frame['messages']):
+            return False
+        for assignment in frame['assignments']:
+            i = assignment['source_message_id']
+            if linked[i] == batch_id and assignment != wanted[i]:
+                return False
+    receipt = {'action': 'reroute_expanded_dialogue_unit', 'source_message_ids': second,
+               'previously_routed_source_message_ids': overlap,
+               'new_source_message_ids': second[len(overlap):], 'producer_batch_ids': [old],
+               'reason': 'complete_late_reply_extends_accepted_envelope'}
+    return receipt in json.loads(candidates[new]['input_json']).get('late_reply_route_receipts', [])
+
+
 def recover_cached_routes(database, data, assignments):
     """Return a fully proved historical result, or None for legacy cache fallback.
 
@@ -351,6 +390,7 @@ def recover_cached_routes(database, data, assignments):
         raise p.RoutingRecoveryError('route history exceeds bounded producer recovery limit')
     possibilities = {key: {} for key in expected}
     wider_frames = {key: {} for key in expected}
+    frames_by_batch = {}
     for batch in candidates.values():
         try:
             frames = _frames(database, batch)
@@ -358,6 +398,7 @@ def recover_cached_routes(database, data, assignments):
             if batch['id'] in linked.values():
                 raise p.RoutingRecoveryError('cannot verify recorded route producer: '+str(error)) from error
             continue  # Unlinked malformed history is not evidence.
+        frames_by_batch[batch['id']] = frames
         for frame in frames:
             source_messages = {m['id']: m for m in frame['messages']}
             wider = max(source_messages) > upper
@@ -390,6 +431,8 @@ def recover_cached_routes(database, data, assignments):
         if all(possibilities[key] or wider_frames[key] for key in expected):
             raise p.RouteCacheRangeMismatch('recorded route history cannot prove the frozen input range: '
                                            'verified producer frame extends beyond this batch')
+        if _proved_late_suffix(expected, wanted, linked, candidates, frames_by_batch):
+            raise p.RouteCacheRangeMismatch('verified late reply replaced the tail of an accepted Router frame')
         if linked:
             raise p.RoutingRecoveryError('recorded route history cannot prove the frozen input range')
         return None
