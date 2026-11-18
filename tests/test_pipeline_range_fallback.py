@@ -11,6 +11,29 @@ from serein.core.store import Store, encode
 from serein.extensions import pipeline as p
 
 
+@pytest.mark.parametrize('damage',[None,'source','receipt','assignment','proof','owner'])
+def test_overlapping_replacement_requires_complete_exact_proof(damage):
+    from serein.extensions.pipeline_recovery import _proved_late_suffix
+    messages={i:{'id':i,'content':str(i)} for i in range(1,6)}
+    wanted={i:{'source_message_id':i,'primary_track_id':'new' if i>=3 else 'old'} for i in messages}
+    linked={i:'b' if i>=3 else 'a' for i in messages}
+    receipt={'action':'reroute_expanded_dialogue_unit','source_message_ids':[3,4,5],
+             'previously_routed_source_message_ids':[3,4],'new_source_message_ids':[5],
+             'producer_batch_ids':['a'],'reason':'complete_late_reply_extends_accepted_envelope'}
+    frames={}
+    for key,ids in [('a',[1,2,3,4]),('b',[3,4,5])]:
+        frames[key]=[{'messages':[dict(messages[i]) for i in ids],
+                      'source_proof_complete':True,
+                      'assignments':[dict(wanted[i],primary_track_id='old' if key=='a' else 'new') for i in ids]}]
+    if damage=='source': frames['a'][0]['messages'][-1]['content']='changed'
+    if damage=='receipt': receipt['producer_batch_ids']=[]
+    if damage=='assignment': frames['b'][0]['assignments'][0]['primary_track_id']='other'
+    if damage=='proof': frames['a'][0]['source_proof_complete']=False
+    if damage=='owner': linked[3]='a'
+    candidates={'b':{'input_json':encode({'late_reply_route_receipts':[receipt]})}}
+    assert _proved_late_suffix(messages,wanted,linked,candidates,frames) is (damage is None)
+
+
 def wider_producer(settings):
     raw_archive(settings).ingest([
         {'source_event_id':str(i),'session_id':'range','role':'user' if i%2 else 'assistant',

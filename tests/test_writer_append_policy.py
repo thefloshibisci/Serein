@@ -26,7 +26,8 @@ def test_new_event_eligibility_is_generated_by_host(settings, model_value):
         assert store.conn.execute("SELECT recallable FROM fact_events WHERE status='active'").fetchone()[0] == 1
 
 
-def test_normal_extension_appends_and_preserves_existing_settings_and_sources(settings):
+@pytest.mark.parametrize('writer_title', ['', 'A different title'])
+def test_normal_extension_appends_and_preserves_existing_settings_and_sources(settings, writer_title):
     ingest(settings)
     asyncio.run(p.advance(settings.database,include_recent=True,runner=synthetic_runner))
     with Store(settings.database,read_only=True) as store:
@@ -39,7 +40,7 @@ def test_normal_extension_appends_and_preserves_existing_settings_and_sources(se
         assert old['body'] in request['prompt']
         assert 'Agreed to plan 1' not in request['prompt']
         result=output_for(role,request)
-        result.update(title='A different title',recallable=False)
+        result.update(title=writer_title,recallable=False)
         return result
     assert asyncio.run(p.advance(settings.database,include_recent=True,runner=runner))['events']==1
     with Store(settings.database,read_only=True) as store:
