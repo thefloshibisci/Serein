@@ -25,50 +25,68 @@ def ready(settings):
     return engine
 
 
-@pytest.mark.parametrize('failure',[TimeoutError(), asyncio.CancelledError(), ValueError('empty'), UpstreamError(httpx.Response(429))])
-@pytest.mark.parametrize('retry_succeeds',[True, False])
-def test_dream_retries_once_after_restart_without_redrawing(live, monkeypatch, failure, retry_succeeds):
+@pytest.mark.parametrize('failure',[TimeoutError(), ValueError('empty'), UpstreamError(httpx.Response(429))])
+def test_failed_request_retries_immediately_and_saves_dream(live,failure):
+    settings,_=live
+    engine=ready(settings)
+    stamp=datetime(2026,9,14,4,tzinfo=engine.tz)
+    engine._call_dream_model.side_effect=[failure,'Synthetic dream text.']
+    result=asyncio.run(engine.generate(None,now=stamp))
+    assert result['status']=='created'
+    assert engine._call_dream_model.await_count==2
+    assert len(engine.list_records())==1
+    assert asyncio.run(engine.run_due(None,now=stamp+timedelta(hours=1)))['status']=='exists'
+    assert engine._call_dream_model.await_count==2
+
+
+@pytest.mark.parametrize('failure',[TimeoutError(), ValueError('empty'), UpstreamError(httpx.Response(429))])
+def test_second_failure_stops_until_next_day(live,failure):
     settings,_=live
     engine=ready(settings)
     stamp=datetime(2026,9,14,4,tzinfo=engine.tz)
     engine._call_dream_model.side_effect=failure
     with pytest.raises(type(failure)):
         asyncio.run(engine.generate(None,now=stamp))
+    assert engine._call_dream_model.await_count==2
     restarted=ready(settings)
-    def unexpected_roll():
-        pytest.fail('An already selected dream must not roll again')
-    monkeypatch.setattr('serein.compat.germany.dream_engine.random.random',unexpected_roll)
-    if retry_succeeds:
-        assert asyncio.run(restarted.run_due(None,now=stamp+timedelta(hours=1)))['status']=='created'
-        assert len(restarted.list_records())==1
-    else:
-        restarted._call_dream_model.side_effect=failure
-        with pytest.raises(type(failure)):
-            asyncio.run(restarted.run_due(None,now=stamp+timedelta(hours=1)))
-        again=ready(settings)
-        assert asyncio.run(again.run_due(None,now=stamp+timedelta(hours=2)))['reason']=='daily_attempt_already_started'
-        assert again._call_dream_model.await_count==0
+    assert asyncio.run(restarted.run_due(None,now=stamp+timedelta(hours=1)))['reason']=='daily_attempt_already_started'
+    assert restarted._call_dream_model.await_count==0
+    next_day=asyncio.run(restarted.generate(None,now=stamp+timedelta(days=1),force=True))
+    assert next_day['status']=='created'
     assert restarted._call_dream_model.await_count==1
 
 
-def test_dream_draft_survives_failed_publication_and_restart(live):
+def test_interrupted_request_retries_after_restart(live):
+    settings,_=live
+    engine=ready(settings)
+    stamp=datetime(2026,9,14,4,tzinfo=engine.tz)
+    engine._call_dream_model.side_effect=asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(engine.generate(None,now=stamp))
+    restarted=ready(settings)
+    assert asyncio.run(restarted.run_due(None,now=stamp+timedelta(hours=1)))['status']=='created'
+    assert restarted._call_dream_model.await_count==1
+    assert len(restarted.list_records())==1
+
+
+def test_dream_draft_is_published_without_calling_model_again(live):
     settings,_=live
     engine=ready(settings)
     stamp=datetime(2026,9,14,4,tzinfo=engine.tz)
     log_event=engine.log_event
+    failed=[]
     def fail_after_save(store, event, payload):
-        if event=='generated':
+        if event=='generated' and not failed:
+            failed.append(True)
             raise OSError('Synthetic publication failure after inserting dream')
         log_event(store,event,payload)
     engine.log_event=fail_after_save
-    with pytest.raises(OSError):
-        asyncio.run(engine.generate(None,now=stamp))
-    assert not engine.list_records()
+    result=asyncio.run(engine.generate(None,now=stamp))
+    assert result['status']=='created'
+    assert [r.body for r in engine.list_records()]==['Synthetic dream text.']
+    assert engine._call_dream_model.await_count==1
     restarted=ready(settings)
-    restarted.client=None
-    assert asyncio.run(restarted.run_due(None,now=stamp+timedelta(hours=5)))['status']=='created'
-    assert [r.body for r in restarted.list_records()]==['Synthetic dream text.']
-    assert restarted._call_dream_model.await_count==0
+    assert len(restarted.list_records())==1
     with Store(settings.database,read_only=True) as store:
         assert not store.conn.execute("SELECT 1 FROM background_state WHERE name GLOB 'dream-draft:*'").fetchone()
         assert store.conn.execute("SELECT count(*) FROM historical_work_events WHERE event='generated'").fetchone()[0]==1

@@ -44,14 +44,29 @@ class Dreams(DreamEngine):
                                            raw_event_store=raw_event_store)
         return await super().run_due(bucket_mgr, embedding_engine, now, raw_event_store)
 
-    async def generate(self, *args, **kwargs):
+    async def generate(self, bucket_mgr, embedding_engine=None, now=None, force=False, raw_event_store=None):
         # The OS releases this lock on exit, including after a crash.
         with ExitStack() as stack:
             try:
                 stack.enter_context(exclusive_lock(self.database.with_suffix('.dream.lock')))
             except RuntimeError:
                 return {'status': 'skipped', 'reason': 'dream_in_progress'}
-            return await super().generate(*args, **kwargs)
+            try:
+                return await super().generate(bucket_mgr, embedding_engine, now, force, raw_event_store)
+            except Exception:
+                # Empty responses, timeouts and request failures all get one
+                # immediate second attempt. A process interruption is retried
+                # by run_due after restart instead of suppressing cancellation.
+                with Store(self.database, read_only=True) as store:
+                    row = store.conn.execute("SELECT name FROM background_state WHERE name GLOB 'dream-draft:*' ORDER BY name LIMIT 1").fetchone()
+                if row is not None:
+                    record = self._finish_draft(row['name'])
+                    if record is not None:
+                        return {'status': 'created', 'id': record.dream_id, 'date': record.metadata['local_date']}
+                date_key = self._now(now).date().isoformat()
+                if self._daily_decision_for_date(date_key) != 'retry':
+                    raise
+                return await super().generate(bucket_mgr, embedding_engine, now, force, raw_event_store)
 
     def __init__(self, settings):
         self.database = settings.database
