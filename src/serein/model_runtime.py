@@ -259,13 +259,20 @@ class TaskClient:
         extra = payload.pop('extra_body', None)
         if extra:
             payload.update(extra)
-        if self.task == 'persona':
-            # The retained Persona engine carries a legacy generic thinking
-            # option. Replace it with only the control supported by this
-            # provider; unknown providers receive no private reasoning fields.
+        if self.task in ('persona','dreams'):
+            # Replace legacy generic reasoning controls with only the options
+            # this provider supports; unknown providers receive none.
             for key in ('thinking','reasoning','enable_thinking'):
                 payload.pop(key,None)
             payload.update(non_thinking_options(model))
+        if self.task == 'dreams':
+            # The legacy dream engine's sampling default is not accepted by
+            # every configured model. Use the provider default unless the user
+            # explicitly configured a temperature for this model.
+            if model.get('temperature') is None:
+                payload.pop('temperature',None)
+            else:
+                payload['temperature']=float(model['temperature'])
         import asyncio
         timeout = payload.pop('timeout', 120)
         result=await asyncio.wait_for(complete(model,payload), timeout=timeout)

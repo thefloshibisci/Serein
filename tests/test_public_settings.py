@@ -581,7 +581,7 @@ def test_optional_jobs_use_selected_models(deployment,monkeypatch):
     captured=[]
     async def complete(model,payload,**options):
         captured.append(model['model'])
-        assert payload['thinking']=={'type':'disabled'} and 'extra_body' not in payload
+        assert not {'thinking','reasoning','enable_thinking','extra_body'} & payload.keys()
         return {'choices':[{'message':{'content':'{"status":"ok"}'}}]}
     monkeypatch.setattr('serein.model_runtime.complete',complete)
     result=asyncio.run(jobs.dreams.client.chat.completions.create(model='stale',messages=[],extra_body={'thinking':{'type':'disabled'}}))
@@ -660,6 +660,24 @@ def test_persona_task_replaces_legacy_thinking_with_provider_option(deployment,m
     private={key:captured[0][key] for key in ('thinking','reasoning','enable_thinking') if key in captured[0]}
     assert private==expected
     assert captured[0]['response_format']=={'type':'json_object'}
+
+
+@pytest.mark.parametrize('configured,expected',[(None,None),(0.7,0.7)])
+def test_dream_task_uses_provider_defaults_and_supported_reasoning(deployment,monkeypatch,configured,expected):
+    import asyncio
+    from serein.model_runtime import TaskClient
+    settings,_=deployment;captured=[]
+    selected={'id':'dream','label':'Dream','model':'kimi-k3.1-pro','protocol':'openai',
+              'base_url':'https://provider.example/v1','api_key':'','temperature':configured}
+    monkeypatch.setattr('serein.model_runtime.task_model',lambda database,task:selected)
+    async def complete(chosen,payload,**options):
+        captured.append(payload)
+        return {'choices':[{'message':{'content':'A dream'}}]}
+    monkeypatch.setattr('serein.model_runtime.complete',complete)
+    asyncio.run(TaskClient(settings.database,'dreams').create(messages=[],temperature=.85,
+        extra_body={'thinking':{'type':'disabled'}}))
+    assert captured[0].get('temperature')==expected
+    assert not {'thinking','reasoning','enable_thinking'} & captured[0].keys()
 
 
 def test_legacy_models_explicit_null_clears_tokenizer_but_omission_preserves_it(deployment):
