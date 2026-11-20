@@ -33,6 +33,12 @@ def test_overlapping_replacement_requires_complete_exact_proof(damage):
     candidates={'b':{'input_json':encode({'late_reply_route_receipts':[receipt]})}}
     assert _proved_late_suffix(messages,wanted,linked,candidates,frames) is (damage is None)
 
+    if damage is None:
+        tail = {i: messages[i] for i in (2, 3, 4, 5)}
+        owners = {i: linked[i] for i in tail}
+        assert _proved_late_suffix(tail, wanted, owners, candidates, frames, {1})
+        assert not _proved_late_suffix(tail, wanted, owners, candidates, frames, set())
+
 
 def wider_producer(settings):
     raw_archive(settings).ingest([

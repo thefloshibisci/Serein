@@ -302,7 +302,7 @@ def late_reply_route_receipts(database, units, cached):
     return receipts
 
 
-def _proved_late_suffix(expected, wanted, linked, candidates, frames_by_batch):
+def _proved_late_suffix(expected, wanted, linked, candidates, frames_by_batch, processed=()):
     """Two complete, overlapping accepted frames cannot supply one coherent card."""
     if set(linked) != set(expected) or len(set(linked.values())) != 2:
         return False
@@ -323,16 +323,19 @@ def _proved_late_suffix(expected, wanted, linked, candidates, frames_by_batch):
     overlap = first[split:]
     if not split or second[:len(overlap)] != overlap or len(second) <= len(overlap):
         return False
-    if first[:split] + second != ids:
+    if ids[0] not in first[:split]:
         return False
-    if [linked[i] for i in ids] != [old]*split + [new]*len(second):
+    start = first.index(ids[0])
+    if not set(first[:start]).issubset(processed) or first[start:split] + second != ids:
+        return False
+    if [linked[i] for i in ids] != [old]*(split-start) + [new]*len(second):
         return False
     for batch_id, frame in ((old, a), (new, b)):
-        if any(_message_key(m) != _message_key(expected[m['id']]) for m in frame['messages']):
+        if any(_message_key(m) != _message_key(expected[m['id']]) for m in frame['messages'] if m['id'] in expected):
             return False
         for assignment in frame['assignments']:
             i = assignment['source_message_id']
-            if linked[i] == batch_id and assignment != wanted[i]:
+            if linked.get(i) == batch_id and assignment != wanted[i]:
                 return False
     receipt = {'action': 'reroute_expanded_dialogue_unit', 'source_message_ids': second,
                'previously_routed_source_message_ids': overlap,
@@ -431,7 +434,13 @@ def recover_cached_routes(database, data, assignments):
         if all(possibilities[key] or wider_frames[key] for key in expected):
             raise p.RouteCacheRangeMismatch('recorded route history cannot prove the frozen input range: '
                                            'verified producer frame extends beyond this batch')
-        if _proved_late_suffix(expected, wanted, linked, candidates, frames_by_batch):
+        prefix = {m['id'] for frames in frames_by_batch.values() for frame in frames
+                  for m in frame['messages'] if m['id'] < min(expected)}
+        with Store(database, read_only=True) as store:
+            processed = {row[0] for row in store.conn.execute(
+                'SELECT raw_id FROM raw_processing WHERE raw_id IN (SELECT value FROM json_each(?))',
+                (encode(sorted(prefix)),))} if prefix else set()
+        if _proved_late_suffix(expected, wanted, linked, candidates, frames_by_batch, processed):
             raise p.RouteCacheRangeMismatch('verified late reply replaced the tail of an accepted Router frame')
         if linked:
             raise p.RoutingRecoveryError('recorded route history cannot prove the frozen input range')
