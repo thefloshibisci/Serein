@@ -20,6 +20,10 @@ logger = logging.getLogger('serein_brain.dream')
 RAW_RESIDUE_NOISE_RE = re.compile('(测试召回|召回测试|测试一下召回|测一下|试试看|还记得吗|有没有被注入|被注入了吗|笔友都有谁|debug\\s*injection)', re.IGNORECASE)
 DREAM_PROMPT = '你在睡梦中。你会收到最近新建的最多五条 Event／Scene；只有两者都没有时，材料才来自新写的日记。\n从这些材料里提取物、声音、颜色、动作或空间等意象，写成一个梦境。不要复述、总结或解释材料，也不要把材料当成必须遵守的剧情。\n用 dreamer 的第一人称、现在时。可以逻辑错乱、无厘头、前言不搭后语；允许跳跃、错位、误认和突然断掉，不必有完整故事弧。不要给建议，不要写“我意识到”“这象征着”，不要提 source、metadata 或 prompt。\n写 80 到 220 字，只返回梦境正文。\n'
 
+class EmptyDreamResponse(ValueError):
+    pass
+
+
 @dataclass
 class DreamRecord:
     metadata: dict
@@ -378,7 +382,7 @@ class DreamEngine:
             cleaned = cleaned.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
         cleaned = re.sub('^\\s*(梦境|正文)[:：]\\s*', '', cleaned).strip()
         if not cleaned:
-            raise ValueError('dream model returned empty text')
+            raise EmptyDreamResponse('dream model returned empty text')
         return cleaned
 
     def _dream_prompt(self):
@@ -487,6 +491,14 @@ class DreamEngine:
             cues = ['熟悉的话突然陌生', '夜里想起未说完的话']
         return (dream_text, core_affect, cues)
 
+    def _request_failed(self, date_key, error, *, force=False):
+        pass
+
+    def _publish_dream(self, metadata, body):
+        record = self._write_record(metadata, body)
+        self._log_event('generated', {k: metadata[k] for k in ('dream_id', 'generated_at', 'local_date', 'ai_name')})
+        return record
+
     async def generate(self, bucket_mgr, embedding_engine=None, now: datetime | None=None, force: bool=False, raw_event_store=None) -> dict:
         if not self.enabled:
             return {'status': 'disabled'}
@@ -505,26 +517,28 @@ class DreamEngine:
         materials = await self.select_materials(bucket_mgr, now_local)
         if len(materials) < self.min_material_count:
             return {'status': 'skipped', 'reason': 'not_enough_materials', 'materials': len(materials)}
-        if not force:
+        if not force and decision != 'retry':
             roll = random.random()
             if roll >= self.daily_probability:
                 decided_at = now_local.astimezone(timezone.utc).isoformat(timespec='seconds')
                 self._log_event('probability_skipped', {'local_date': date_key, 'decided_at': decided_at, 'probability': self.daily_probability, 'roll': round(roll, 4), 'material_count': len(materials)})
                 return {'status': 'skipped', 'reason': 'daily_probability_miss', 'date': date_key, 'probability': self.daily_probability}
-        # Persist before the paid request: failures and interrupted requests must
-        # not silently start another attempt after a poll, model change or restart.
+        payload = self._payload_for(materials)
+        # Persist before the paid request so interrupted requests are not repeated.
         if not self._claim_generation_attempt(date_key, force=force):
             return {'status': 'skipped', 'reason': 'daily_attempt_already_started', 'date': date_key}
-        payload = self._payload_for(materials)
-        dream_text = await self._call_dream_model(payload)
+        try:
+            dream_text = await self._call_dream_model(payload)
+        except Exception as error:
+            self._request_failed(date_key, error, force=force)
+            raise
         core_affect = self._core_affect_from_materials(materials)
         recall_cues = self._recall_cues_from_dream_text(dream_text)
         dream_id = f"dream_{now_local.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         source_ids = [str(bucket.get('id') or bucket.get('metadata', {}).get('id') or '') for bucket in materials]
         generated_at = now_local.astimezone(timezone.utc).isoformat(timespec='seconds')
         metadata = {'dream_id': dream_id, 'generated_at': generated_at, 'local_date': date_key, 'ai_name': self.identity.get('ai_name') or 'AI', 'dream_model': self.model, 'core_affect': core_affect, 'recall_cues': recall_cues, 'source_bucket_ids': source_ids, 'material_count': len(materials), 'surfaced': False, 'surfaced_at': None}
-        record = self._write_record(metadata, dream_text)
-        self._log_event('generated', {'dream_id': dream_id, 'generated_at': generated_at, 'local_date': date_key, 'ai_name': self.identity.get('ai_name') or 'AI'})
+        record = self._publish_dream(metadata, dream_text)
         if embedding_engine is not None and getattr(embedding_engine, 'enabled', False):
             try:
                 await embedding_engine.generate_and_store(dream_id, '；'.join(recall_cues))
