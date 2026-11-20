@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from serein.compat.dreams import Dreams
-from serein.compat.germany.dream_engine import DreamEngine, EmptyDreamResponse
+from serein.compat.germany.dream_engine import DreamEngine
 from serein.core.store import Store
 from serein.model_runtime import UpstreamError
 from test_live_clients import live
@@ -25,25 +25,7 @@ def ready(settings):
     return engine
 
 
-@pytest.mark.parametrize('failure',[TimeoutError, asyncio.CancelledError])
-def test_failed_dream_stays_stopped_after_restart_but_next_day_is_new(live,failure):
-    settings,_=live
-    engine=ready(settings)
-    stamp=datetime(2026,9,14,4,tzinfo=engine.tz)
-    engine._call_dream_model.side_effect=failure('Synthetic request failure')
-    with pytest.raises(failure): asyncio.run(engine.generate(None,now=stamp))
-    assert engine._call_dream_model.await_count==1
-    for worker in (engine,ready(settings)):
-        result=asyncio.run(worker.generate(None,now=stamp+timedelta(hours=1)))
-        assert result['reason']=='daily_attempt_already_started'
-    restarted=ready(settings)
-    result=asyncio.run(restarted.generate(None,now=stamp+timedelta(days=1)))
-    assert result['status']=='created'
-    assert restarted._call_dream_model.await_count==1
-    assert asyncio.run(restarted.generate(None,now=stamp+timedelta(days=1,hours=1)))['status']=='exists'
-    assert restarted._call_dream_model.await_count==1
-
-@pytest.mark.parametrize('failure',[EmptyDreamResponse('empty'), UpstreamError(httpx.Response(429))])
+@pytest.mark.parametrize('failure',[TimeoutError(), asyncio.CancelledError(), ValueError('empty'), UpstreamError(httpx.Response(429))])
 @pytest.mark.parametrize('retry_succeeds',[True, False])
 def test_dream_retries_once_after_restart_without_redrawing(live, monkeypatch, failure, retry_succeeds):
     settings,_=live
@@ -98,16 +80,19 @@ def test_competing_dream_workers_cannot_issue_two_requests(live):
     first,second=ready(settings),ready(settings)
     stamp=datetime(2026,9,14,4,tzinfo=first.tz)
     async def run():
-        both=asyncio.Event(); arrivals=0
-        async def materials(*args):
-            nonlocal arrivals
-            arrivals+=1
-            if arrivals==2: both.set()
-            await both.wait()
-            rows=[{'id':'synthetic','content':'Synthetic material','metadata':{}}]*5
-            return rows
-        first.select_materials=second.select_materials=materials
-        return await asyncio.gather(first.generate(None,now=stamp),second.generate(None,now=stamp))
+        entered=asyncio.Event(); release=asyncio.Event()
+        async def model(*args):
+            entered.set()
+            await release.wait()
+            return 'Synthetic dream text.'
+        first._call_dream_model.side_effect=model
+        running=asyncio.create_task(first.generate(None,now=stamp))
+        await asyncio.wait_for(entered.wait(), timeout=3)
+        try:
+            competing=await second.generate(None,now=stamp)
+        finally:
+            release.set()
+        return await running, competing
     results=asyncio.run(run())
     assert sum(result['status']=='created' for result in results)==1
     assert first._call_dream_model.await_count+second._call_dream_model.await_count==1

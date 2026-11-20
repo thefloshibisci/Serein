@@ -2,12 +2,14 @@
 
 import json
 import logging
+from contextlib import ExitStack
 from pathlib import Path
 from datetime import datetime, timezone
 
 from ..core.store import Store, digest, encode, now
+from ..file_lock import exclusive_lock
 from .background import germany_config
-from .germany.dream_engine import DreamEngine, DreamRecord, EmptyDreamResponse
+from .germany.dream_engine import DreamEngine, DreamRecord
 
 
 class Dreams(DreamEngine):
@@ -36,7 +38,20 @@ class Dreams(DreamEngine):
                         except Exception:
                             logging.getLogger(__name__).exception('Recovered dream cue indexing failed')
                     return {'status': 'created', 'id': record.dream_id, 'date': record.metadata['local_date']}
+            local = self._now(now)
+            if self._daily_decision_for_date(local.date().isoformat()) == 'retry':
+                return await self.generate(bucket_mgr, embedding_engine, local,
+                                           raw_event_store=raw_event_store)
         return await super().run_due(bucket_mgr, embedding_engine, now, raw_event_store)
+
+    async def generate(self, *args, **kwargs):
+        # The OS releases this lock on exit, including after a crash.
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(exclusive_lock(self.database.with_suffix('.dream.lock')))
+            except RuntimeError:
+                return {'status': 'skipped', 'reason': 'dream_in_progress'}
+            return await super().generate(*args, **kwargs)
 
     def __init__(self, settings):
         self.database = settings.database
@@ -50,14 +65,14 @@ class Dreams(DreamEngine):
     def _attempt_state(store, date_key):
         events = [row[0] for row in store.conn.execute(
             "SELECT event FROM historical_work_events WHERE event IN "
-            "('generation_started','generated','probability_skipped','generation_retryable') "
+            "('generation_started','generated','probability_skipped') "
             "AND json_extract(metadata_json,'$.local_date')=?", (date_key,))]
         if 'generated' in events or store.conn.execute(
                 "SELECT 1 FROM historical_works WHERE kind='dream' AND json_extract(metadata_json,'$.local_date')=? LIMIT 1",
                 (date_key,)).fetchone():
             return 'generated'
         started = events.count('generation_started')
-        if started == 1 and 'generation_retryable' in events:
+        if started == 1:
             return 'retry'
         if started:
             return 'attempted'
@@ -74,13 +89,6 @@ class Dreams(DreamEngine):
             self.log_event(store, 'generation_started', {
                 'local_date': date_key, 'started_at': now(), 'manual': force})
         return True
-
-    def _request_failed(self, date_key, error, *, force=False):
-        from ..model_runtime import UpstreamError
-
-        status = error.response.status_code if isinstance(error, UpstreamError) else getattr(error, 'status_code', None)
-        if not force and (isinstance(error, EmptyDreamResponse) or status == 429):
-            self._log_event('generation_retryable', {'local_date': date_key})
 
     def _publish_dream(self, metadata, body):
         key = 'dream-draft:' + metadata['dream_id']
