@@ -626,5 +626,13 @@
   "src/serein/core/feelings.py",
   "src/serein/core/plans.py",
   "src/serein/core/schema_v10.sql",
-  "src/serein/recall/warmup.py"
+  "src/serein/recall/warmup.py",
+  "web/src/utils/sceneTime.js",
+  "web/tests/memory-time.test.mjs",
+  "tests/test_memory_order_projection.py",
+  "web/tests/settings-panel-order.test.mjs",
+  "web/tests/memory-order.dom.mjs",
+  "web/src/hooks/useVisiblePolling.js",
+  "web/tests/settings-polling.dom.mjs",
+  "web/tests/memory-refresh.dom.mjs"
 ]

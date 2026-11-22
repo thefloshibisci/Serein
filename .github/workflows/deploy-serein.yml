@@ -45,7 +45,7 @@ jobs:
           tests/test_resume_shadows.py tests/test_chat_resume.py
           tests/test_release_boundaries.py tests/test_surface_selection.py
           tests/test_recall_candidate_budget.py tests/test_passages_entities.py
-          tests/test_personal.py
+          tests/test_personal.py tests/test_memory_order_projection.py
       - run: python -m compileall -q src .github/deploy
       - run: npm ci --ignore-scripts
         working-directory: web
@@ -53,7 +53,7 @@ jobs:
         working-directory: web
       - run: npm test
         working-directory: web
-      - run: node tests/resume-page.dom.mjs && node tests/scene-restore.dom.mjs
+      - run: node tests/resume-page.dom.mjs && node tests/scene-restore.dom.mjs && node tests/memory-order.dom.mjs && node tests/memory-refresh.dom.mjs && node tests/settings-polling.dom.mjs
         working-directory: web
       - run: node --test tests/pending-materials.dom.mjs tests/pipeline-recovery.dom.mjs
         working-directory: web

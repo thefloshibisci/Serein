@@ -29,39 +29,44 @@ export function SettingsPanel({
   onResetComposition,
 }) {
   const [tab, setTab] = useState("appearance");
+  const [visited, setVisited] = useState(() => new Set(["appearance"]));
   const [recallThreshold,setRecallThreshold]=useState(null);
   const [candidateThresholdDraft,setCandidateThresholdDraft]=useState({});
   const [passageDraft,setPassageDraft]=useState({});
   const pages = useRef(null);
-  const snapTimer = useRef(null);
   const targetPage = useRef(null);
+  const selectedTab = useRef("appearance");
+  function pageLeft(element, index) {
+    // offsetLeft and scrollLeft are both layout coordinates, including zoom.
+    const panels = element.children;
+    return panels[index] ? panels[index].offsetLeft - panels[0].offsetLeft : 0;
+  }
+  function selectTab(key) {
+    selectedTab.current = key;
+    setVisited(current => current.has(key) ? current : new Set([...current, key]));
+    setTab(key);
+  }
   function showTab(key) {
     const index = tabs.findIndex(([name]) => name === key);
     if (index < 0) return;
-    setTab(key);
-    const element = pages.current;
-    if (!element || !open) return;
-    window.clearTimeout(snapTimer.current);
+    selectTab(key);
     targetPage.current = index;
-    const left = element.clientWidth * index;
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    element.style.scrollSnapType = "none";
-    element.scrollTo({ left, behavior: reduced ? "instant" : "smooth" });
-    snapTimer.current = window.setTimeout(() => {
-      element.scrollTo({ left, behavior: "instant" });
-      element.style.scrollSnapType = "";
-      setTab(key);
-      targetPage.current = null;
-    }, reduced ? 0 : 480);
   }
   useLayoutEffect(() => {
-    if (open && pages.current) pages.current.scrollTo({ left: pages.current.clientWidth * tabs.findIndex(([key]) => key === tab), behavior: "instant" });
+    if (open && pages.current) pages.current.scrollTo({ left: pageLeft(pages.current, tabs.findIndex(([key]) => key === selectedTab.current)), behavior: "instant" });
   }, [open]);
-  useEffect(() => () => window.clearTimeout(snapTimer.current), []);
+  useLayoutEffect(() => {
+    if (!open || !pages.current) return;
+    if (targetPage.current === null) return;
+    const element = pages.current;
+    const index = targetPage.current;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    // Begin after the selected page has mounted, so native snap sees its final
+    // layout. Preserve the upstream slide instead of running a second animation.
+    element.scrollTo({ left: pageLeft(element, index), behavior: reduced ? "instant" : "smooth" });
+  }, [open, tab]);
   useEffect(() => {
-    const openTab = (event) => {
-      if (tabs.some(([key]) => key === event.detail)) showTab(event.detail);
-    };
+    const openTab = event => showTab(event.detail);
     window.addEventListener("serein:open-settings-tab", openTab);
     return () => window.removeEventListener("serein:open-settings-tab", openTab);
   }, [open]);
@@ -107,12 +112,26 @@ export function SettingsPanel({
           </button>)}
         </div>
 
-        <div className="settings-panel__body settings-panel__body--slides" ref={pages} onScroll={event => {
-          if (targetPage.current !== null || !open) return;
-          const element = event.currentTarget;
-          const index = Math.min(tabs.length - 1, Math.max(0, Math.round(element.scrollLeft / Math.max(1, element.clientWidth))));
-          setTab(tabs[index][0]);
-        }}>
+        <div className="settings-panel__body settings-panel__body--slides" ref={pages}
+          onPointerDown={() => { targetPage.current = null; }} onWheel={() => { targetPage.current = null; }}
+          onScrollEnd={event => {
+            const element = event.currentTarget;
+            if (targetPage.current === null) return;
+            // Rotation or a keyboard can change widths during native scrolling.
+            // Settle once at the current destination, only after scrolling ends.
+            const left = pageLeft(element, targetPage.current);
+            targetPage.current = null;
+            if (Math.abs(element.scrollLeft - left) > 1) element.scrollTo({ left, behavior: "instant" });
+          }}
+          onScroll={event => {
+            const element = event.currentTarget;
+            if (!open || targetPage.current !== null) return;
+            let nearest = 0;
+            for (let index = 1; index < tabs.length; index++) {
+              if (Math.abs(pageLeft(element, index) - element.scrollLeft) < Math.abs(pageLeft(element, nearest) - element.scrollLeft)) nearest = index;
+            }
+            selectTab(tabs[nearest][0]);
+          }}>
           <div role="tabpanel" id="settings-content-appearance" aria-labelledby="settings-tab-appearance" aria-hidden={tab !== "appearance"} inert={tab !== "appearance"}>
           <section className="settings-group" aria-labelledby="settings-cover-title">
             <div className="settings-group__heading">
@@ -229,13 +248,14 @@ export function SettingsPanel({
           </details>
           </div>
           <div role="tabpanel" id="settings-content-features" aria-labelledby="settings-tab-features" aria-hidden={tab !== "features"} inert={tab !== "features"}>
-            {open && <FeatureSettings onOpenSummary={openSummary} />}
+            {open && visited.has("features") && <FeatureSettings onOpenSummary={openSummary} />}
           </div>
-          {open && <ModelSettings page={tab} onOpenEventGuide={onOpenEventGuide} recallThreshold={recallThreshold} setRecallThreshold={setRecallThreshold}
+          {open && ["models", "configuration", "summary"].some(key => visited.has(key)) ? <ModelSettings page={tab} onOpenEventGuide={onOpenEventGuide} recallThreshold={recallThreshold} setRecallThreshold={setRecallThreshold}
             candidateThresholdDraft={candidateThresholdDraft} setCandidateThresholdDraft={setCandidateThresholdDraft}
-            passageDraft={passageDraft} setPassageDraft={setPassageDraft} onOpenPipeline={()=>showTab("imports")} onOpenCatalog={()=>showTab("models")} onOpenAssignments={()=>showTab("configuration")} />}
+            passageDraft={passageDraft} setPassageDraft={setPassageDraft} onOpenPipeline={()=>showTab("imports")} onOpenCatalog={()=>showTab("models")} onOpenAssignments={()=>showTab("configuration")} /> :
+            tabs.slice(2, 5).map(([key]) => <div key={key} role="tabpanel" id={`settings-content-${key}`} aria-labelledby={`settings-tab-${key}`} aria-hidden="true" inert />)}
           <div role="tabpanel" id="settings-content-imports" aria-labelledby="settings-tab-imports" aria-hidden={tab !== "imports"} inert={tab !== "imports"}>
-            {open && <PipelineSettings onOpenSummary={openSummary} />}
+            {open && visited.has("imports") && <PipelineSettings active={tab === "imports"} onOpenSummary={openSummary} />}
           </div>
           <div role="tabpanel" id="settings-content-migration" aria-labelledby="settings-tab-migration" aria-hidden={tab !== "migration"} inert={tab !== "migration"}>
             {open && tab === "migration" && <LegacyMigration />}

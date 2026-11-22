@@ -1,5 +1,6 @@
 import {useEffect,useRef,useState} from 'react';
 import {importProgressSummary} from '../utils/importProgress.js';
+import {useVisiblePolling} from '../hooks/useVisiblePolling.js';
 
 async function request(path='',body) {
   const response=await fetch('/__serein/imports'+path,{method:body?'POST':'GET',
@@ -9,17 +10,17 @@ async function request(path='',body) {
   return result;
 }
 
-export function ConversationImport({onImported}) {
+export function ConversationImport({onImported,active=true}) {
   const [mode,setMode]=useState('auto'),[tagging,setTagging]=useState(true),[job,setJob]=useState(null);
   const [history,setHistory]=useState([]),[tags,setTags]=useState({}),[status,setStatus]=useState(''),[busy,setBusy]=useState(false);
   const [dragging,setDragging]=useState(false);
   const [largeBatch,setLargeBatch]=useState(false);
   const running=['queued','running'].includes(job?.task?.status);
-  const mounted=useRef(true),notified=useRef(new Set()),polling=useRef(false);
+  const mounted=useRef(true),notified=useRef(new Set());
   const [tagErrors,setTagErrors]=useState([]);
   useEffect(()=>{setLargeBatch(job?.task?.arguments?.large_batch===true);},[job?.id]);
-  async function refresh() {
-    const result=await request();if(!mounted.current)return;
+  async function refresh(shouldApply=()=>true) {
+    const result=await request();if(!mounted.current||!shouldApply())return;
     setHistory(result.items);setTags(result.tagging);setTagErrors(result.tagging_errors||[]);
     setJob(current=>result.items.find(item=>item.id===current?.id)||current||result.items.find(item=>['queued','running'].includes(item.task?.status))||result.items[0]||null);
     for(const item of result.items)if(item.task?.status==='completed'&&item.format!=='operit'&&item.inserted&&!notified.current.has(item.id)){
@@ -29,13 +30,12 @@ export function ConversationImport({onImported}) {
   }
   useEffect(()=>{
     mounted.current=true;
-    const poll=async()=>{if(polling.current)return;polling.current=true;
-      try{await refresh();}catch(error){if(mounted.current)setStatus(error.message);}finally{polling.current=false;}};
-    poll();const timer=setInterval(poll,2000);
-    const visible=()=>{if(!document.hidden)poll();};
-    document.addEventListener('visibilitychange',visible);
-    return()=>{mounted.current=false;clearInterval(timer);document.removeEventListener('visibilitychange',visible);};
+    return()=>{mounted.current=false;};
   },[]);
+  useVisiblePolling(active,2000,async current=>{
+    try{await refresh(current);}
+    catch(error){if(current())setStatus(error.message);}
+  });
   async function preview(file) {
     if(!file || busy)return;
     if(file.size>32_000_000){setStatus('文件超过 32 MB，请按会话拆分后导入。');return;}

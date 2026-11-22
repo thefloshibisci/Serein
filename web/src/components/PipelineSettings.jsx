@@ -3,11 +3,13 @@ import {ConversationImport} from './ConversationImport.jsx';
 import {instanceSettings} from '../storage/instanceStore.js';
 import {PendingMaterials} from './PendingMaterials.jsx';
 
-export function PipelineSettings({onOpenSummary}) {
+import {useVisiblePolling} from '../hooks/useVisiblePolling.js';
+
+export function PipelineSettings({onOpenSummary,active=true}) {
   const [task,setTask]=useState(null),[output,setOutput]=useState(''),[status,setStatus]=useState(''),[busy,setBusy]=useState(false);
   const [work,setWork]=useState(null);
   const [limits,setLimits]=useState(null);
-  const mounted=useRef(true),polling=useRef(false),rebuildDialog=useRef(null),restoreDialog=useRef(null);
+  const mounted=useRef(true),acceptedVersion=useRef(0),rebuildDialog=useRef(null),restoreDialog=useRef(null);
   const [rebuildTarget,setRebuildTarget]=useState('');
   const recoveryDialog=useRef(null);
   const [recovery,setRecovery]=useState(null),[recoveryLimit,setRecoveryLimit]=useState('');
@@ -40,20 +42,18 @@ export function PipelineSettings({onOpenSummary}) {
     if(!response.ok)throw new Error(result.detail || '整理暂未完成，原话会保留，请稍后重试。');
     return result;
   }
-  function accept(result){setWork(result);setTask(result.status==='awaiting_agent'?result.result:null);}
+  function accept(result){acceptedVersion.current++;setWork(result);setTask(result.status==='awaiting_agent'?result.result:null);}
   useEffect(()=>{
     mounted.current=true;
     instanceSettings().then(value=>{if(mounted.current){setLimits(value.pipeline);}}).catch(error=>{if(mounted.current)setStatus(error.message);});
-    const refresh=async()=>{
-      if(polling.current)return;polling.current=true;
-      try{const result=await call('status');if(mounted.current)accept(result);}
-      catch(error){if(mounted.current)setStatus(error.message);}finally{polling.current=false;}
-    };
     const saved=event=>setLimits(event.detail.pipeline);window.addEventListener('serein:settings-saved',saved);
-    refresh();const timer=setInterval(refresh,2000);
-    const visible=()=>{if(!document.hidden)refresh();};document.addEventListener('visibilitychange',visible);
-    return()=>{window.removeEventListener('serein:settings-saved',saved);mounted.current=false;clearInterval(timer);document.removeEventListener('visibilitychange',visible);};
+    return()=>{window.removeEventListener('serein:settings-saved',saved);mounted.current=false;};
   },[]);
+  useVisiblePolling(active,2000,async current=>{
+    const version=acceptedVersion.current;
+    try{const result=await call('status');if(current()&&version===acceptedVersion.current)accept(result);}
+    catch(error){if(current()&&version===acceptedVersion.current)setStatus(error.message);}
+  });
   async function next() {
     if(busy||running)return;
     setBusy(true);setStatus(runtimeContractRepair?'正在请求继续整理其他聊天；旧计划仍等待明确重建…':needsRepair?'正在请求重新校验归线材料…':'正在提交后台整理任务…');
@@ -164,7 +164,7 @@ export function PipelineSettings({onOpenSummary}) {
   }
   return <section className="settings-group"><div className="settings-group__heading"><h3>原话整理</h3>
     <p>归线 → 切分与转录 → Event 写作。在“自动摘要管理”页选择执行方式、三阶段模型和整理参数。Scene 由聊天中的 agent 主动写。</p></div>
-    <ConversationImport onImported={()=>setStatus('原话已导入。点击继续整理，进入下一步。')} />
+    <ConversationImport active={active} onImported={()=>setStatus('原话已导入。点击继续整理，进入下一步。')} />
     {limits&&<p>{autoMessage}</p>}
     {work?.auto_boundary_originals>0&&<p>有 {work.auto_boundary_originals} 条原话在开启自动整理时被划到边界外。它们仍保存在原话档案中，点击“继续整理”不会处理这些原话。<button type="button" disabled={busy||running} onClick={()=>restoreDialog.current.showModal()}>恢复并整理这批原话</button></p>}
     <button type="button" className="settings-link" onClick={onOpenSummary}>自动摘要管理</button>
