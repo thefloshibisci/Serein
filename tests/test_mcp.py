@@ -183,7 +183,7 @@ def test_scene_only_schema_edit_preservation_and_proposal_boundary(tmp_path):
                 assert schema['additionalProperties'] is False
             if tool.name == 'write_scene':
                 assert set(tool.inputSchema['required']) == {'content','cues'}
-                assert set(tool.inputSchema['properties']) == {'title','content','cues','date','domain','evidence_refs','favorite'}
+                assert set(tool.inputSchema['properties']) == {'title','content','cues','date','domain','evidence_refs','favorite','feel_sources'}
                 assert tool.inputSchema['additionalProperties'] is False
             if tool.name == 'edit_scene':
                 assert set(tool.inputSchema['required']) == {'scene_id','expected_updated_at'}

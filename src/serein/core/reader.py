@@ -8,7 +8,7 @@ from .notebook import read_entry, resolve_entry
 from .store import Store
 
 
-KINDS = {"scene", "event", "narrative", "diary", "darkroom", "upload", "shadow", "dream"}
+KINDS = {"scene", "event", "narrative", "diary", "darkroom", "upload", "shadow", "dream", "feel", "plan"}
 
 
 class Reader:
@@ -34,6 +34,8 @@ class Reader:
                 kind = row[0]
             elif target.startswith("upload_"):
                 kind = "upload"
+            elif target.startswith('plan_'):
+                kind = 'plan'
             elif target.startswith(("window_", "dream_")):
                 kind = "shadow" if target.startswith("window_") else "dream"
             elif re.fullmatch(r"(?:diary-vps-)?\d+", target) or target.startswith(("diary_source_", "dr_", "legacy_darkroom:")):
@@ -49,8 +51,17 @@ class Reader:
         return {"kind": kind, "id": target, "status": status, "readable": False,
                 "document": None, "evidence": [], "comments": [], **extra}
 
-    def read(self, identifier, *, kind=None, revision=None, with_evidence=True, include_blob=False, at=None):
+    def read(self, identifier, *, kind=None, revision=None, with_evidence=True, include_blob=False, at=None,
+             with_related=True):
         kind, target = self._identity(identifier, kind)
+        if kind == 'plan':
+            from .plans import read_plan, public_plan
+            plan = public_plan(self.store, read_plan(self.store, target, revision))
+            if not plan:
+                return self._result(kind, target, 'missing')
+            return self._result(kind, target, plan['status'], readable=True, plan=plan,
+                document={'title': plan['content'][:40], 'body_md': plan['content'], 'revision': plan['revision'],
+                          'metadata': plan}, surface_state={'can_surface': False, 'reasons': ['intention_not_fact']})
         if kind in {"shadow", "dream"}:
             if self.store.conn.execute("SELECT 1 FROM deletions WHERE document_id=?", (target,)).fetchone():
                 return self._result(kind, target, "deleted")
@@ -120,23 +131,33 @@ class Reader:
         if current is None:
             deleted = self.store.conn.execute("SELECT 1 FROM deletions WHERE document_id=?", (target,)).fetchone()
             return self._result(kind, target, "deleted" if deleted else "missing")
-        if kind and kind != current["kind"]:
+        is_feel = current['metadata'].get('memory_role') == 'feel'
+        if kind and kind != current["kind"] and not (kind == 'feel' and is_feel):
             return self._result(kind, target, "wrong_kind")
-        kind = current["kind"]
+        kind = 'feel' if kind == 'feel' else current["kind"]
         if current["lifecycle"] == "deleted":
             return self._result(kind, target, "deleted")
+        from .feelings import access_status
+        if access_status(self.store, current) != 'available':
+            return self._result(kind, target, 'locked')
         document = current if revision is None else self.store.read(target, revision=revision)
         if document is None:
             return self._result(kind, target, "revision_missing")
+        if access_status(self.store, document) != 'available':
+            return self._result(kind, target, 'locked')
         historical = document["body_revision"] != current["revision"]
         result = self._result(kind, target, current["lifecycle"], readable=True,
                               document=document, surface_state=self.store.surface_state(target),
                               evidence_scope="unavailable_for_revision" if historical else "current_bindings")
-        if self.store.conn.execute('PRAGMA user_version').fetchone()[0]>=9:
+        if is_feel:
+            from .feelings import source_views
+            result.update(memory_role='feel', semantic_kind='feel', feel_sources=source_views(self.store, document),
+                          evidence_scope='subjective_feeling_not_evidence')
+        if with_related and self.store.conn.execute('PRAGMA user_version').fetchone()[0]>=9:
             result['annotations']=[{'id':r['key'],**json.loads(r['payload_json']),'created_at':r['created_at']}
                 for r in self.store.conn.execute("SELECT * FROM personal_records WHERE scope='annotation' AND document_id=? AND deleted=0 ORDER BY created_at,key",(target,))]
             result['annotations_scope']='current_personal_notes_not_evidence'
-        if with_evidence and not historical:
+        if with_evidence and not historical and not is_feel:
             result["evidence"] = [{"binding_id": row["id"], "source_id": row["source_id"],
                                    "source_key": row["source_key"], "content": row["content"],
                                    "content_sha256": row["content_sha256"], "metadata": json.loads(row["metadata_json"])}
@@ -162,10 +183,11 @@ class Reader:
         return references
 
     def materials(self, identifier, *, revision=None, include_mentions=False, with_evidence=False,
-                  offset=0, limit=20, at=None):
+                  offset=0, limit=20, at=None, with_related=True):
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("offset must be nonnegative and limit must be 1..100")
-        owner = self.read(identifier, kind="narrative", revision=revision, with_evidence=False, at=at)
+        owner = self.read(identifier, kind="narrative", revision=revision, with_evidence=False, at=at,
+                          with_related=with_related)
         if not owner["readable"]:
             return {"narrative_id": owner["id"], "status": owner["status"], "items": [], "total": 0, "next_offset": None}
         document = owner["document"]
@@ -199,7 +221,8 @@ class Reader:
             # Keep a source alias when reading: it can bind an exact historical
             # snapshot and must not be replaced with an unrestricted numeric ID.
             requested = next((i for i in group["requested_ids"] if i.startswith("diary_source_")), group["requested_ids"][0])
-            result = self.read(requested, kind=group["kind"], with_evidence=with_evidence, at=at)
+            result = self.read(requested, kind=group["kind"], with_evidence=with_evidence, at=at,
+                               with_related=with_related)
             items.append({**group, "selection": "selected", "object": result})
         return {"narrative_id": owner["id"], "revision": number, "status": owner["status"], "items": items,
                 "total": len(ordered), "offset": offset,

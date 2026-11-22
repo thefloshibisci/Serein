@@ -1,9 +1,11 @@
 """Model registry transport shared by chat and optional authoring tasks."""
 import asyncio
+import hashlib
 from copy import deepcopy
 from time import monotonic
 import json
 import logging
+import re
 import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -92,6 +94,27 @@ def deepseek_tool_reasoning_compat(model, payload, *, window_id=''):
     return result, count
 
 
+SEREIN_USER_AGENT = 'serein/0.1'
+
+
+def identity_headers(model, *, window_id=''):
+    """Identify Serein honestly; OpenCode Go also asks for a stable session id."""
+    headers = {'User-Agent': SEREIN_USER_AGENT}
+    host = (urlsplit(str(model.get('base_url') or '')).hostname or '').lower()
+    if host == 'opencode.ai' or host.endswith('.opencode.ai'):
+        if window_id:
+            # Window IDs may contain Unicode and are allowed up to 200 characters.
+            # Hash the full identity so headers are ASCII-safe without merging
+            # distinct windows that share a long prefix or exposing their names.
+            session = 'serein-window-' + hashlib.sha256(str(window_id).encode('utf-8')).hexdigest()
+        else:
+            # Background tasks have no chat window; keep one stable id per upstream model.
+            seed = (str(model.get('base_url') or '') + '|' + str(model.get('model') or '')).encode()
+            session = 'serein-task-' + hashlib.sha256(seed).hexdigest()[:16]
+        headers['x-opencode-session'] = session
+    return headers
+
+
 def request_for(model, payload, *, window_id=''):
     adapter = ClientContext()
     payload = {**payload, 'model': model['model']}
@@ -114,7 +137,7 @@ def request_for(model, payload, *, window_id=''):
                 converted['system'] = system + rules
             else:
                 converted['system'] = [*system, {'type':'text','text':rules}]
-        headers = {'x-api-key': model.get('api_key', ''), 'anthropic-version': model.get('anthropic_version') or '2023-06-01'}
+        headers = {**identity_headers(model, window_id=window_id), 'x-api-key': model.get('api_key', ''), 'anthropic-version': model.get('anthropic_version') or '2023-06-01'}
         if model.get('anthropic_beta'):
             headers['anthropic-beta'] = model['anthropic_beta']
         return model['base_url'] + '/messages', headers, converted
@@ -124,7 +147,9 @@ def request_for(model, payload, *, window_id=''):
             payload.setdefault('prompt_cache_retention', model['prompt_cache_retention'])
     if model.get('prompt_cache') == 'anthropic':
         payload.setdefault('cache_control', adapter._anthropic_cache_control(model))
-    headers = {'Authorization': 'Bearer ' + model['api_key']} if model.get('api_key') else {}
+    headers = identity_headers(model, window_id=window_id)
+    if model.get('api_key'):
+        headers['Authorization'] = 'Bearer ' + model['api_key']
     return model['base_url'] + '/chat/completions', headers, payload
 
 
@@ -144,6 +169,34 @@ def normalize_response(model, result):
                       'cache_creation_input_tokens':usage.get('cache_creation_input_tokens',0)}}
 
 
+def normalize_json_response(payload, result):
+    """Unwrap one complete JSON fence only when the caller requested JSON.
+
+    Do not repair syntax, extract prose fragments, or alter ordinary chat.
+    Consumers still validate the object against their task-specific schema.
+    """
+    if (payload.get('response_format') or {}).get('type') not in ('json_object', 'json_schema'):
+        return result
+    normalized = result
+    for index, choice in enumerate(result.get('choices', [])):
+        content = choice.get('message', {}).get('content')
+        if not isinstance(content, str) or choice.get('finish_reason') == 'length':
+            continue
+        match = re.fullmatch(r'\s*```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```\s*', content)
+        if not match:
+            continue
+        try:
+            value = json.loads(match[1])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        if normalized is result:
+            normalized = deepcopy(result)
+        normalized['choices'][index]['message']['content'] = match[1]
+    return normalized
+
+
 async def complete(model, payload, *, window_id=''):
     url, headers, body = request_for(model, {**payload, 'stream':False}, window_id=window_id)
     timeout=httpx.Timeout(model.get('request_timeout_seconds',120),connect=15,pool=15)
@@ -153,7 +206,7 @@ async def complete(model, payload, *, window_id=''):
             response = await client.post(url, headers=headers, json=body)
             if not response.is_success:
                 raise UpstreamError(response)
-            return normalize_response(model, response.json())
+            return normalize_json_response(payload, normalize_response(model, response.json()))
     except (httpx.TimeoutException,asyncio.CancelledError) as error:
         annotate_timeout(error,timeout,monotonic()-started)
         raise
@@ -206,13 +259,20 @@ class TaskClient:
         extra = payload.pop('extra_body', None)
         if extra:
             payload.update(extra)
-        if self.task == 'persona':
-            # The retained Persona engine carries a legacy generic thinking
-            # option. Replace it with only the control supported by this
-            # provider; unknown providers receive no private reasoning fields.
+        if self.task in ('persona','dreams'):
+            # Replace legacy generic reasoning controls with only the options
+            # this provider supports; unknown providers receive none.
             for key in ('thinking','reasoning','enable_thinking'):
                 payload.pop(key,None)
             payload.update(non_thinking_options(model))
+        if self.task == 'dreams':
+            # The legacy dream engine's sampling default is not accepted by
+            # every configured model. Use the provider default unless the user
+            # explicitly configured a temperature for this model.
+            if model.get('temperature') is None:
+                payload.pop('temperature',None)
+            else:
+                payload['temperature']=float(model['temperature'])
         import asyncio
         timeout = payload.pop('timeout', 120)
         result=await asyncio.wait_for(complete(model,payload), timeout=timeout)

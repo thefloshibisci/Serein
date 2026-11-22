@@ -622,5 +622,9 @@
   "tests/test_narrative_delete.py",
   "tests/test_narrative_rename.py",
   "web/tests/narrative-errors.test.mjs",
-  "web/tests/narrative-flow.test.mjs"
+  "web/tests/narrative-flow.test.mjs",
+  "src/serein/core/feelings.py",
+  "src/serein/core/plans.py",
+  "src/serein/core/schema_v10.sql",
+  "src/serein/recall/warmup.py"
 ]

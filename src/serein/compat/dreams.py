@@ -1,10 +1,13 @@
 """Existing Dream model rules over retained SQLite works and atomic surfacing."""
 
 import json
+import logging
+from contextlib import ExitStack
 from pathlib import Path
 from datetime import datetime, timezone
 
 from ..core.store import Store, digest, encode, now
+from ..file_lock import exclusive_lock
 from .background import germany_config
 from .germany.dream_engine import DreamEngine, DreamRecord
 
@@ -20,10 +23,50 @@ class Dreams(DreamEngine):
         self.identity = identity(self.database)
         return super()._payload_for(*args, **kwargs)
 
-    async def run_due(self, *args, **kwargs):
+    async def run_due(self, bucket_mgr, embedding_engine=None, now=None, raw_event_store=None):
         from ..deployment import read_settings
         self.daily_probability = float(read_settings(self.database)['dream']['daily_probability'])
-        return await super().run_due(*args, **kwargs)
+        if self.enabled and self.auto_enabled:
+            with Store(self.database, read_only=True) as store:
+                row = store.conn.execute("SELECT name FROM background_state WHERE name GLOB 'dream-draft:*' ORDER BY name LIMIT 1").fetchone()
+            if row is not None:
+                record = self._finish_draft(row['name'])
+                if record is not None:
+                    if embedding_engine is not None and getattr(embedding_engine, 'enabled', False):
+                        try:
+                            await embedding_engine.generate_and_store(record.dream_id, '；'.join(record.metadata['recall_cues']))
+                        except Exception:
+                            logging.getLogger(__name__).exception('Recovered dream cue indexing failed')
+                    return {'status': 'created', 'id': record.dream_id, 'date': record.metadata['local_date']}
+            local = self._now(now)
+            if self._daily_decision_for_date(local.date().isoformat()) == 'retry':
+                return await self.generate(bucket_mgr, embedding_engine, local,
+                                           raw_event_store=raw_event_store)
+        return await super().run_due(bucket_mgr, embedding_engine, now, raw_event_store)
+
+    async def generate(self, bucket_mgr, embedding_engine=None, now=None, force=False, raw_event_store=None):
+        # The OS releases this lock on exit, including after a crash.
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(exclusive_lock(self.database.with_suffix('.dream.lock')))
+            except RuntimeError:
+                return {'status': 'skipped', 'reason': 'dream_in_progress'}
+            try:
+                return await super().generate(bucket_mgr, embedding_engine, now, force, raw_event_store)
+            except Exception:
+                # Empty responses, timeouts and request failures all get one
+                # immediate second attempt. A process interruption is retried
+                # by run_due after restart instead of suppressing cancellation.
+                with Store(self.database, read_only=True) as store:
+                    row = store.conn.execute("SELECT name FROM background_state WHERE name GLOB 'dream-draft:*' ORDER BY name LIMIT 1").fetchone()
+                if row is not None:
+                    record = self._finish_draft(row['name'])
+                    if record is not None:
+                        return {'status': 'created', 'id': record.dream_id, 'date': record.metadata['local_date']}
+                date_key = self._now(now).date().isoformat()
+                if self._daily_decision_for_date(date_key) != 'retry':
+                    raise
+                return await super().generate(bucket_mgr, embedding_engine, now, force, raw_event_store)
 
     def __init__(self, settings):
         self.database = settings.database
@@ -33,20 +76,53 @@ class Dreams(DreamEngine):
             from ..model_runtime import TaskClient
             self.client=TaskClient(settings.database,'dreams')
 
+    @staticmethod
+    def _attempt_state(store, date_key):
+        events = [row[0] for row in store.conn.execute(
+            "SELECT event FROM historical_work_events WHERE event IN "
+            "('generation_started','generated','probability_skipped') "
+            "AND json_extract(metadata_json,'$.local_date')=?", (date_key,))]
+        if 'generated' in events or store.conn.execute(
+                "SELECT 1 FROM historical_works WHERE kind='dream' AND json_extract(metadata_json,'$.local_date')=? LIMIT 1",
+                (date_key,)).fetchone():
+            return 'generated'
+        started = events.count('generation_started')
+        if started == 1:
+            return 'retry'
+        if started:
+            return 'attempted'
+        return 'probability_miss' if 'probability_skipped' in events else ''
+
+    def _daily_decision_for_date(self, date_key):
+        with Store(self.database, read_only=True) as store:
+            return self._attempt_state(store, date_key)
+
     def _claim_generation_attempt(self, date_key, *, force=False):
-        # Serialize competing workers before recording the first request of the day.
-        with Store(self.database) as store:
-            store.conn.execute('BEGIN IMMEDIATE')
-            existing = store.conn.execute(
-                "SELECT 1 FROM historical_work_events WHERE event IN "
-                "('generation_started','generated','probability_skipped') "
-                "AND json_extract(metadata_json,'$.local_date')=? LIMIT 1", (date_key,)).fetchone()
-            if existing and not force:
+        with Store(self.database) as store, store.transaction(immediate=True):
+            if not force and self._attempt_state(store, date_key) not in ('', 'retry'):
                 return False
             self.log_event(store, 'generation_started', {
                 'local_date': date_key, 'started_at': now(), 'manual': force})
-            store.conn.commit()
         return True
+
+    def _publish_dream(self, metadata, body):
+        key = 'dream-draft:' + metadata['dream_id']
+        with Store(self.database) as store, store.transaction(immediate=True):
+            store.conn.execute('INSERT INTO background_state VALUES (?,?)',
+                               (key, encode({'metadata': metadata, 'body': body})))
+        return self._finish_draft(key) or DreamRecord(metadata, body, Path(metadata['dream_id']))
+
+    def _finish_draft(self, key):
+        with Store(self.database) as store, store.transaction(immediate=True):
+            row = store.conn.execute('SELECT value_json FROM background_state WHERE name=?', (key,)).fetchone()
+            if row is None:
+                return None  # Another worker already published it.
+            draft = json.loads(row[0])
+            metadata = draft['metadata']
+            record = self.save_record(store, metadata, draft['body'])
+            self.log_event(store, 'generated', {k: metadata[k] for k in ('dream_id', 'generated_at', 'local_date', 'ai_name')})
+            store.conn.execute('DELETE FROM background_state WHERE name=?', (key,))
+            return record
 
     @staticmethod
     def record(row):

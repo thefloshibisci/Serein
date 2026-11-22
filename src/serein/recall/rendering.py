@@ -13,7 +13,9 @@ def _arcs(reader, hits, arc_key=None):
         return by_owner, menus
     rows = reader.store.conn.execute("SELECT id FROM documents WHERE kind='narrative' AND lifecycle='active' ORDER BY id")
     for row in rows:
-        obj = reader.read(row['id'], with_evidence=False)
+        obj = reader.read(row['id'], with_evidence=False, with_related=False)
+        if not obj['readable']:
+            continue
         doc = obj['document']
         meta = doc['metadata'].get('legacy_registry', doc['metadata'])
         key = meta.get('arc_key')
@@ -27,7 +29,7 @@ def _arcs(reader, hits, arc_key=None):
                 continue
         members, offset = [], 0
         while True:
-            page = reader.materials(row['id'], offset=offset, limit=100)
+            page = reader.materials(row['id'], offset=offset, limit=100, with_related=False)
             members.extend(page['items'])
             if page['next_offset'] is None:
                 break
@@ -104,16 +106,40 @@ def render(hits, *, reader=None, body_char_limit=1200, scope_arc_key='', deliver
         body = GatewayService._clip_text(source.strip(), max(160, min(2400, int(body_char_limit or 1200))))
         if not body:
             continue
+        is_feel = doc['metadata'].get('memory_role') == 'feel'
+        # Keep the Scene transport ref for existing cooldown/delivery clients;
+        # the explicit semantic kind prevents subjective prose becoming fact.
         ref = f"{hit['kind']}:{hit['id']}"
         title = str(doc['title'] or hit['id']).strip()
         card = {'id': ref, 'source': 'serein', 'source_kind': hit['kind'], 'title': title,
                 'text': body, 'score': round(float(hit.get('score') or 0), 4), 'render_shape': 'typed_memory',
                 **memory_dates(doc, hit['kind'])}
+        if is_feel:
+            card.update(memory_role='feel', semantic_kind='feel', fact_evidence=False)
         if excerpt:
             card['source_spans'] = spans
             card['reranker_input_tokens'] = excerpt.get('input_tokens')
         cards.append(card)
         lines = [f'[typed_memory ref={ref}]', f'title: {title}']
+        if is_feel:
+            from ..core.feelings import source_views
+            lines.append('type: feel — 当时的主观感受，不是事实证据')
+            views = source_views(reader.store, doc) if reader else hit['object'].get('feel_sources', [])
+            selected_ids = {h['id'] for h in hits}
+            source_lines = []
+            # Reference expansions share a small budget even for multi-source
+            # feelings. Full version/hash provenance remains on explicit read.
+            for origin in views[:3]:
+                line = f"trigger: {origin['kind']}:{origin['id']} revision={origin.get('revision')} sha256={origin.get('sha256')} status={origin['status']}"
+                if origin['status'] == 'available' and origin['id'] not in selected_ids:
+                    line += ' ' + origin.get('summary', '')[:120]
+                source_lines.append(line)
+            if len(views) > 3:
+                source_lines.append(f'additional_triggers: {len(views) - 3}; use read_feel for full references')
+            lines.extend(source_lines)
+            # Compact Hook consumers render card.text, not the full context.
+            card['text'] = '当时的主观感受（非事实证据）：\n' + body + '\n' + '\n'.join(source_lines)
+            card['feel_sources'] = views
         lines.extend(date_lines(card))
         arcs = by_owner.get(hit['id'], [])
         arc = next((c for c in arcs if c['arc_key'] == scope_arc_key), None) if scope_arc_key else (arcs[0] if len(arcs) == 1 else None)

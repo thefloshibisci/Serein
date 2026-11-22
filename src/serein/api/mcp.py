@@ -120,7 +120,7 @@ def create_server(app: Application, *, private=False, http=False):
             return content
         return pipeline_next
 
-    def read_memory(identifier: str, kind: Literal["scene", "event", "narrative", "diary", "darkroom", "upload", "shadow", "dream"] | None = None,
+    def read_memory(identifier: str, kind: Literal["scene", "event", "narrative", "diary", "darkroom", "upload", "shadow", "dream", "feel", "plan"] | None = None,
                     revision: int | None = None, with_evidence: bool = False) -> str:
         """Read a memory by its own ID from recall or /resume (typed Event/Scene IDs are accepted). Default reads return the memory body without bound evidence. Set with_evidence=True to return its body and all currently active bound original evidence in one call; do not collect separate original-message IDs first. For independent chat transcripts use source_message_search then source_message_read. Deleted/locked bodies stay hidden; historical revisions may not have evidence membership."""
         if not private:
@@ -138,8 +138,18 @@ def create_server(app: Application, *, private=False, http=False):
                       min_cosine: float | None = .5, topic: str | None = None,
                       intent: Literal["direct", "latest", "progress", "timeline", "narrative", "exact"] = "direct",
                       exclude_ids: list[str] | None = None, use_passages: bool | None = None,
-                      fallback: bool = True) -> str:
-        """Recall with separate Event/Scene rules. Omit method (or pass null) to follow the current effective embedding configuration on every call: semantic when configured, lexical otherwise, with cosine cutoff 0.5. With default mode/method and direct intent, an empty result or published route skip tries one labelled lexical lookup, restricted to currently surface-eligible memories. Set fallback=false, or explicitly choose mode/method, to disable this retry. Errors never trigger fallback. Explicit surface keeps lexical/cue matches as candidates unless named by full title; explicit lookup permits intentional browsing. Narrative/quote intent redirects to dedicated reads."""
+                      fallback: bool = True, kind: Literal['feel'] | None = None,
+                      source_id: str = '', offset: int = 0) -> str:
+        """Recall with separate Event/Scene rules. Omit method (or pass null) to follow the current effective embedding configuration on every call: semantic when configured, lexical otherwise, with cosine cutoff 0.5. With default mode/method and direct intent, an empty result or published route skip tries one labelled lexical lookup, restricted to currently surface-eligible memories. Set fallback=false, or explicitly choose mode/method, to disable this retry. Errors never trigger fallback. Explicit surface keeps lexical/cue matches as candidates unless named by full title; explicit lookup permits intentional browsing. Narrative/quote intent redirects to dedicated reads. For subjective feelings only, kind=feel selects literal lookup with optional source_id and offset; read_memory reads returned IDs."""
+        if kind == 'feel':
+            if mode is not None or method is not None or topic is not None or intent != 'direct' or exclude_ids or use_passages is not None:
+                raise ValueError('Feel lookup uses query, limit, offset and optional source_id only')
+            from ..core.feelings import Feelings
+            page = Feelings(app.settings.database).search(query, source_id=source_id, limit=limit, offset=offset)
+            return '\n\n'.join([*(memory_text(item, with_evidence=False) for item in page['items']),
+                f"method: literal\nhas_more: {str(page['has_more']).lower()}\nnext_offset: {page['next_offset']}"])
+        if source_id or offset:
+            raise ValueError('source_id and offset are only used with kind=feel')
         if method in (None, "semantic") and min_cosine is None:
             min_cosine = .5
         result = services.recall(query, mode=mode or "surface", limit=limit, with_evidence=True, method=method, min_cosine=min_cosine,

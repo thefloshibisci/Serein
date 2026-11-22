@@ -487,6 +487,11 @@ class DreamEngine:
             cues = ['熟悉的话突然陌生', '夜里想起未说完的话']
         return (dream_text, core_affect, cues)
 
+    def _publish_dream(self, metadata, body):
+        record = self._write_record(metadata, body)
+        self._log_event('generated', {k: metadata[k] for k in ('dream_id', 'generated_at', 'local_date', 'ai_name')})
+        return record
+
     async def generate(self, bucket_mgr, embedding_engine=None, now: datetime | None=None, force: bool=False, raw_event_store=None) -> dict:
         if not self.enabled:
             return {'status': 'disabled'}
@@ -505,17 +510,16 @@ class DreamEngine:
         materials = await self.select_materials(bucket_mgr, now_local)
         if len(materials) < self.min_material_count:
             return {'status': 'skipped', 'reason': 'not_enough_materials', 'materials': len(materials)}
-        if not force:
+        if not force and decision != 'retry':
             roll = random.random()
             if roll >= self.daily_probability:
                 decided_at = now_local.astimezone(timezone.utc).isoformat(timespec='seconds')
                 self._log_event('probability_skipped', {'local_date': date_key, 'decided_at': decided_at, 'probability': self.daily_probability, 'roll': round(roll, 4), 'material_count': len(materials)})
                 return {'status': 'skipped', 'reason': 'daily_probability_miss', 'date': date_key, 'probability': self.daily_probability}
-        # Persist before the paid request: failures and interrupted requests must
-        # not silently start another attempt after a poll, model change or restart.
+        payload = self._payload_for(materials)
+        # Count the attempt even when the process exits mid-request.
         if not self._claim_generation_attempt(date_key, force=force):
             return {'status': 'skipped', 'reason': 'daily_attempt_already_started', 'date': date_key}
-        payload = self._payload_for(materials)
         dream_text = await self._call_dream_model(payload)
         core_affect = self._core_affect_from_materials(materials)
         recall_cues = self._recall_cues_from_dream_text(dream_text)
@@ -523,8 +527,7 @@ class DreamEngine:
         source_ids = [str(bucket.get('id') or bucket.get('metadata', {}).get('id') or '') for bucket in materials]
         generated_at = now_local.astimezone(timezone.utc).isoformat(timespec='seconds')
         metadata = {'dream_id': dream_id, 'generated_at': generated_at, 'local_date': date_key, 'ai_name': self.identity.get('ai_name') or 'AI', 'dream_model': self.model, 'core_affect': core_affect, 'recall_cues': recall_cues, 'source_bucket_ids': source_ids, 'material_count': len(materials), 'surfaced': False, 'surfaced_at': None}
-        record = self._write_record(metadata, dream_text)
-        self._log_event('generated', {'dream_id': dream_id, 'generated_at': generated_at, 'local_date': date_key, 'ai_name': self.identity.get('ai_name') or 'AI'})
+        record = self._publish_dream(metadata, dream_text)
         if embedding_engine is not None and getattr(embedding_engine, 'enabled', False):
             try:
                 await embedding_engine.generate_and_store(dream_id, '；'.join(recall_cues))

@@ -79,8 +79,16 @@ def tools_for(services, settings):
         return result
 
     def write_scene(content: str, cues: list[str], title: str = '', date: str = '', domain: str = '',
-                    evidence_refs: list[dict] | None = None, favorite: StrictBool | None = None):
-        """Save an authored Scene without summarization. Only content and 1..8 short cues are required. Title/date/domain are optional; IDs are generated internally. Omit evidence_refs by default and do not search for original-message IDs just to save a Scene; attach exact evidence only when explicitly requested. Optional favorite requires the favorites feature. Use edit_scene for an existing Scene. If a response is lost, read/check before repeating: independent calls create independent Scenes."""
+                    evidence_refs: list[dict] | None = None, favorite: StrictBool | None = None,
+                    feel_sources: list[dict] | None = None):
+        """Save an authored Scene without summarization, with content and 1..8 short cues. For a subjective feeling pass cues=[] and feel_sources=[{kind:event/scene/source,id,...}]; real readable source versions/hashes are frozen, never factual evidence, and automatic surfacing defaults off. Feel uses content/title only; other Scene options must be omitted. Ordinary Scenes omit feel_sources; evidence_refs are optional and only attached when explicitly requested. Use edit_scene for edits. Read/check before retrying a lost response: independent calls create independent Scenes."""
+        if feel_sources is not None:
+            if cues or date or domain or evidence_refs is not None or favorite is not None:
+                raise ValueError('Feel uses empty cues, content/title and feel_sources only')
+            from ..core.feelings import Feelings
+            result = Feelings(settings.database).create(content, feel_sources, title=title,
+                author=read_settings(settings.database)['identity']['ai_name'])
+            return f"已保存。\n[scene_id:{result['id']}]\n[type:feel — 主观感受，非事实证据]"
         cues = Scenes._cues(cues)
         if date:
             Date.fromisoformat(date)
@@ -105,7 +113,7 @@ def tools_for(services, settings):
 
     def edit_scene(scene_id: str, expected_updated_at: str, title: str | None = None,
                    content: str | None = None, cues: list[str] | None = None):
-        """Edit a Scene after reading its current updated_at. Omitted fields preserve their values and evidence. Stale timestamps never overwrite newer changes."""
+        """Edit a Scene or feeling after read_memory using its current updated_at. Omitted fields preserve evidence and frozen feeling sources. Feel accepts title/content, not cues. Stale timestamps never overwrite newer changes."""
         return sync_scene(scenes.edit(scene_id, expected_updated_at, title=title, content=content, cues=cues))
 
     def set_scene_status(scene_id: str, expected_updated_at: str, status: str, restore_surface: StrictBool = False):

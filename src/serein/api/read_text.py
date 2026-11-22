@@ -38,6 +38,10 @@ def comment_lines(result: dict[str, Any]) -> list[str]:
 
 def source_lines(evidence: list[dict[str, Any]], *, with_evidence: bool) -> list[str]:
     lines = [f"bound_sources: {len(evidence)}"]
+    if not with_evidence:
+        if evidence:
+            lines.append("Use read_memory(identifier=the memory ID, with_evidence=true) to read original sources.")
+        return lines
     for number, source in enumerate(evidence, 1):
         identity = (message_refs([source]) or [{}])[0]
         fields = [f"source_id={source.get('source_id') or 'unknown'}"]
@@ -49,8 +53,6 @@ def source_lines(evidence: list[dict[str, Any]], *, with_evidence: bool) -> list
         lines.append(f"[source {number}] " + " ".join(fields))
         if with_evidence:
             lines.extend(("text:", str(source.get("content") or "").strip()))
-    if evidence and not with_evidence:
-        lines.append("Use with_evidence=true to expand the numbered original sources.")
     return lines
 
 
@@ -83,6 +85,12 @@ def memory_text(result: dict[str, Any], *, with_evidence: bool) -> str:
     if document.get("author"):
         lines.append(f"author: {document['author']}")
     lines.extend(("body:", str(document.get("body_md") or "").strip()))
+    if result.get('memory_role') == 'feel':
+        lines.append('type: feel — 当时的主观感受，不是事实证据')
+        for source in result.get('feel_sources', []):
+            lines.append(f"trigger: {source['kind']}:{source['id']} revision={source.get('revision')} sha256={source.get('sha256')} status={source['status']}")
+            if source['status'] == 'available':
+                lines.append(source.get('summary', ''))
     lines.extend(comment_lines(result))
     if result.get("evidence_scope") == "unavailable_for_revision":
         lines.append("bound_sources: unavailable_for_revision")
@@ -115,6 +123,9 @@ def recall_text(result: dict[str, Any], *, with_evidence: bool) -> str:
             for hit in pool.get("items") or []:
                 obj = hit.get("object") or {}
                 lines.extend(("", f"[memory_details ref={hit.get('kind')}:{hit.get('id')}]"))
+                if hit.get('match_mode') == 'keyword_fallback':
+                    lines.extend(('match_mode: keyword_fallback (partial keyword match)',
+                                  'matched_keywords: ' + ', '.join(hit['matched_keywords'])))
                 lines.extend(version_lines(obj.get("document") or {}))
                 lines.extend(comment_lines(obj))
                 lines.extend(source_lines(obj.get("evidence") or [], with_evidence=with_evidence))
@@ -205,4 +216,3 @@ def favorites_text(result: dict[str, Any], *, with_evidence: bool) -> str:
     lines.extend((f"has_more: {str(bool(result.get('has_more'))).lower()}",
                   f"next_offset: {result.get('next_offset')}", "[/favorites]"))
     return "\n".join(lines)
-

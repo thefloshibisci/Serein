@@ -22,6 +22,7 @@ jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 mcp==1.27.0
 openai==2.32.0
+orjson==3.13.0
 pycparser==2.22
 pydantic==2.12.4
 pydantic-settings==2.13.1

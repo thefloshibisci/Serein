@@ -244,7 +244,20 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
         import_boundary+=pending_materials.reservation_clause()
         scopes=store.conn.execute('SELECT DISTINCT r.source,r.session_id FROM raw_events r WHERE NOT EXISTS (SELECT 1 FROM raw_processing p WHERE p.raw_id=r.id)'+complete_upload+import_boundary+' ORDER BY r.id').fetchall()
         for source,session in scopes:
-            if digest(encode([source,session]))[:20] in held_scopes:continue
+            scope=digest(encode([source,session]))[:20]
+            if scope in held_scopes:continue
+            attempted_today=set();observed_today=set()
+            for previous in store.conn.execute(
+                    "SELECT input_json,result_json FROM pipeline_batches WHERE scope=? AND status='done' "
+                    "AND json_extract(input_json,'$.day')=? "
+                    "AND json_array_length(result_json,'$.attempted_source_message_ids')>0",
+                    (scope,watermark.date().isoformat())):
+                frozen=json.loads(previous['input_json'])
+                if frozen.get('runtime_revision')!=runtime_revision() or frozen.get('input_policy')!=policy:
+                    continue
+                receipt=json.loads(previous['result_json'])
+                attempted_today.update(receipt['attempted_source_message_ids'])
+                observed_today.update(receipt.get('observed_source_message_ids',[]))
             rows=[task_message(row) for row in store.conn.execute('SELECT r.* FROM raw_events r WHERE source=? AND session_id=? AND NOT EXISTS (SELECT 1 FROM raw_processing p WHERE p.raw_id=r.id)'+complete_upload+import_boundary+' ORDER BY r.id',(source,session))]
             # Evaluate the watermark against full envelopes before filtering rows.
             eligible=[m for unit in dialogue_units(rows)
@@ -263,7 +276,8 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
                     ready=dialogue_unit_is_complete(unit) and (include_recent or datetime.fromisoformat(unit[-1]['created_at'].replace('Z','+00:00'))<=cutoff)
                     (stable if ready else parked).extend(unit)
                 if not stable:continue
-                scope=digest(encode([source,session]))[:20]
+                if {m['id'] for m in stable}<=attempted_today and {m['id'] for m in eligible}<=observed_today:
+                    continue
                 omitted_today=set()
                 for previous in store.conn.execute(
                     "SELECT result_json FROM pipeline_batches WHERE scope=? AND status='done' "
@@ -275,16 +289,13 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
                 if {item['id'] for item in stable}.intersection(omitted_today):
                     continue
                 with latest.identity_scope(identity(database)):
-                    routing_error=None
                     try:
                         tracks,ordinal=track_state.load_tracks(store,source,session,eligible[0]['id'],task_message,
                                                                lookback_days=policy.get('track_lookback_days',3))
-                    except RoutingRecoveryError as error:
+                    except RoutingRecoveryError:
                         tracks=[];ordinal=track_state.next_ordinal(scope,[{'track_id':row[0]} for row in store.conn.execute('SELECT id FROM pipeline_tracks')])
-                        routing_error=str(error)
                 recent=[task_message(row) for row in store.conn.execute('SELECT * FROM raw_events WHERE source=? AND session_id=? AND id<? AND julianday(created_at)<=julianday(?) ORDER BY id DESC LIMIT 6',(source,session,eligible[0]['id'],eligible[0]['created_at']))][::-1]
                 data={'contract':CONTRACT,'runtime_revision':runtime_revision(),'input_policy':policy,'messages':stable,'parked':parked,'routing_messages':eligible,'tracks':tracks,'next_track_ordinal':ordinal,'scope':scope,'source':source,'recent':recent,'day':watermark.date().isoformat(),'settlement_watermark':watermark.isoformat()}
-                if routing_error:data['routing_evidence_error']=routing_error
                 key='pipeline:'+digest(encode(data))
                 existing=store.conn.execute('SELECT status FROM pipeline_batches WHERE id=?',(key,)).fetchone()
                 if existing:continue
@@ -1120,7 +1131,7 @@ def validate(request,output):
                     transcriptions.setdefault(item['source_message_id'],[]).append(str(item.get('text') or ''))
             owned=[{**item,'evidence_texts':transcriptions.get(item.get('id'),[])}
                    for item in request.get('messages') or []]
-            errors=latest.validate_event_writer_result(output,owned)
+            errors=latest.validate_event_writer_result(output,owned,append_only=request.get('writer_mode')=='append')
             if errors:raise ValueError('; '.join(errors))
 
 
@@ -1683,6 +1694,8 @@ def settle(database,batch,data,routed,plans):
             'pending':len({m['id'] for m in data['messages']+data['parked']}-set(processed)),
             'skipped':sum(value=='skipped' for value in processed.values()),
             'deferred':len(deferred),
+            'attempted_source_message_ids':sorted(all_new),
+            'observed_source_message_ids':[m['id'] for m in data['routing_messages']],
             'protected_deferrals':[entry for _,plan,_ in plans for entry in plan['hard_skips'] if entry.get('reason')!='no_new_sources'],
             'no_new_source_deferrals':[entry for _,plan,_ in plans for entry in plan['hard_skips'] if entry.get('reason')=='no_new_sources'],
             'candidate_overflow_deferrals':[entry for _,plan,_ in plans for entry in plan.get('host_deferrals',[])],
@@ -1907,7 +1920,11 @@ async def _advance_frozen(database,*,include_recent=False,runner=None,retry_repa
             if router_jobs(database,batch):
                 routed=await route_batch(database,batch,data,runner)
             else:
-                routed=None if data.get('ignore_route_cache') else cached_route_result(database,data)
+                try:
+                    routed=None if data.get('ignore_route_cache') else cached_route_result(database,data)
+                except RoutingRecoveryError:
+                    if 'components' in data:raise
+                    routed=None
                 if routed is None:
                     if data.get('routing_evidence_error'):
                         raise RoutingRecoveryError(data['routing_evidence_error'])
@@ -2096,32 +2113,20 @@ async def _flush_routes_frozen(database):
         if scope in held:continue
         units=flushable_dialogue_units(messages,now=current)
         if len(units)<5:continue
-        # Only skip wholly cached units. Partial cache is visible repair evidence,
-        # never permission to reroute a suffix using a made-up envelope boundary.
-        partial=any(any(m['id'] in cached for m in u) and not all(m['id'] in cached for m in u) for u in units)
         units=[u for u in units if not all(m['id'] in cached for m in u)]
         if not units:continue
         messages=[row for unit in units for row in unit]
         with Store(database) as store:
             with latest.identity_scope(identity(database)):
-                routing_error=None
                 try:
                     tracks,ordinal=track_state.load_tracks(store,source,session,messages[0]['id'],task_message,
                                                            lookback_days=config['policy'].get('track_lookback_days',3))
-                except RoutingRecoveryError as error:
+                except RoutingRecoveryError:
                     tracks=[];ordinal=track_state.next_ordinal(scope,[{'track_id':row[0]} for row in store.conn.execute('SELECT id FROM pipeline_tracks')])
-                    routing_error=str(error)
             recent=[task_message(r) for r in store.conn.execute('SELECT * FROM raw_events WHERE source=? AND session_id=? AND id<? AND julianday(created_at)<=julianday(?) ORDER BY id DESC LIMIT 6',(source,session,messages[0]['id'],messages[0]['created_at']))][::-1]
             data={'contract':CONTRACT,'runtime_revision':runtime_revision(),'input_policy':config['policy'],'routing_messages':messages,'tracks':tracks,'next_track_ordinal':ordinal,'scope':scope,'recent':recent,'day':current.astimezone(TZ).date().isoformat()}
-            if routing_error:data['routing_evidence_error']=routing_error
             key='route:'+digest(encode(data));batch={'id':key,'scope':scope,'input_json':encode(data)}
             store.conn.execute("INSERT OR IGNORE INTO pipeline_batches(id,scope,input_json,status) VALUES (?,?,?,'routing_only')",(key,scope,batch['input_json']))
-        if routing_error:
-            mark_needs_repair(database,batch,RoutingRecoveryError(routing_error))
-            continue
-        if partial:
-            mark_needs_repair(database,batch,RoutingRecoveryError('Partially cached dialogue unit; review the complete frozen envelope.'))
-            continue
         try:await _publish_routes(database,batch,data)
         except RoutingRecoveryError as error:mark_needs_repair(database,batch,error)
         except PausedBatch as error:pending_materials.park(database,batch,error)
@@ -2139,20 +2144,56 @@ async def scheduled_advance(database):
     return await execute(database,'pipeline',lambda:_scheduled_advance(database))
 
 
+def _auto_unstick(database):
+    """Automatically rebuild unrouted holds and retry transient model pauses once."""
+    with Store(database,read_only=True) as store:
+        unrouted=[row['id'] for row in store.conn.execute(
+            "SELECT b.id FROM pipeline_batches b WHERE b.status='needs_repair' AND "+SCOPE_HEAD+
+            " AND NOT EXISTS (SELECT 1 FROM pipeline_jobs j WHERE j.batch_id=b.id AND (j.role LIKE 'event_curator:%' OR j.role LIKE 'event_writer:%'))")]
+        paused=[row['id'] for row in store.conn.execute(
+            "SELECT b.id FROM pipeline_batches b WHERE b.status='paused_failure' AND "+SCOPE_HEAD)]
+        retained=list(store.conn.execute(
+            "SELECT pm.id,b.status FROM pipeline_pending_materials pm JOIN pipeline_batches b ON b.id=pm.batch_id "
+            "WHERE pm.status='open' AND b.status IN ('waiting_materials','done')"))
+    from .pipeline_recovery import _rebuild
+    for batch_id in unrouted:
+        try:_rebuild(database,batch_id)
+        except Exception:pass
+    for batch_id in paused:
+        key='auto_retry:'+batch_id
+        with Store(database,read_only=True) as store:
+            if store.conn.execute('SELECT 1 FROM background_state WHERE name=?',(key,)).fetchone():continue
+        try:
+            retry_batch(database,batch_id)
+            with Store(database) as store:store.conn.execute('INSERT OR IGNORE INTO background_state VALUES (?,?)',(key,encode({'at':now()})))
+        except Exception:pass
+    for pending_id,batch_status in retained:
+        key='auto_pending:'+str(pending_id)
+        with Store(database,read_only=True) as store:
+            if store.conn.execute('SELECT 1 FROM background_state WHERE name=?',(key,)).fetchone():continue
+        try:
+            pending_materials.resume(database,pending_id,replan=batch_status!='done')
+            with Store(database) as store:store.conn.execute('INSERT OR IGNORE INTO background_state VALUES (?,?)',(key,encode({'at':now()})))
+        except Exception:pass
+
+
 async def _scheduled_advance(database):
     if not read_settings(database)['pipeline']['auto_enabled']:
         return {'status':'auto_paused'}
     initialize(database)
+    _auto_unstick(database)
     await flush_routes(database)
     current=datetime.now(TZ);day=current.date().isoformat()
     if current.hour<3:return {'status':'waiting_settlement_window'}
     with Store(database,read_only=True) as store:
         row=store.conn.execute('SELECT completed FROM pipeline_schedule WHERE day=?',(day,)).fetchone()
     held=held_result(database)
-    if row and row[0] and not held:return {'status':'settled_today'}
     if held:
         with Store(database) as store:store.conn.execute('INSERT OR REPLACE INTO pipeline_schedule VALUES (?,0)',(day,))
     result=await _advance(database)
     if result['status']=='current' and not held_result(database):
         with Store(database) as store:store.conn.execute('INSERT OR REPLACE INTO pipeline_schedule VALUES (?,1)',(day,))
+        if row and row[0]:return {'status':'settled_today'}
+    elif row and row[0]:
+        with Store(database) as store:store.conn.execute('INSERT OR REPLACE INTO pipeline_schedule VALUES (?,0)',(day,))
     return result

@@ -35,6 +35,8 @@ def scene_payload(doc):
           'type':'archived' if doc['lifecycle']=='archived' else 'scene'}
     # Legacy BucketManager reads trimmed prose; imported Markdown retains its
     # original boundary whitespace in SQLite. Keep legacy relation hashes valid.
+    if doc['metadata'].get('memory_role') == 'feel':
+        meta.update(memory_role='feel', semantic_kind='feel', fact_evidence=False)
     return {'id':doc['id'],'content':doc['body_md'].strip(),'metadata':meta,'object_kind':'scene'}
 
 
@@ -97,6 +99,14 @@ class Scenes:
             doc=writer.store.read(scene_id)
             if not doc or doc['kind']!='scene' or doc['lifecycle']=='deleted':
                 return {'status':'not_found','scene_id':scene_id}
+            if doc['metadata'].get('memory_role') == 'feel':
+                from ..core.feelings import access_status, surface_reasons
+                if access_status(writer.store, doc) != 'available':
+                    raise ValueError('Feel is unavailable')
+                if cues is not None or date is not None or metadata is not None:
+                    raise ValueError('Feel edits preserve frozen sources and accept title/content/status only')
+                if restore_surface and surface_reasons(writer.store, doc):
+                    raise ValueError('Feeling sources do not permit surfacing')
             if doc['updated_at']!=expected_updated_at:
                 return {'status':'conflict','scene_id':scene_id,'updated_at':doc['updated_at']}
             if doc['metadata'].get('source_record_immutable'): raise ValueError('Immutable source record')
@@ -129,6 +139,7 @@ class Scenes:
         with Writer(self.database) as writer,writer.store.transaction():
             doc=writer.store.read(scene_id)
             if not doc or doc['kind']!='scene' or doc['lifecycle']!='active':raise ValueError('Scene is not active')
+            if doc['metadata'].get('memory_role') == 'feel':raise ValueError('Feel triggers are not evidence bindings')
             writer.execute('scene_bind:'+uuid4().hex,'evidence',{'document_id':scene_id,'expected_revision':doc['revision'],
                             'bind':sources(evidence_refs),'actor':bound_by})
             map_evidence_ids(writer.store)
@@ -151,7 +162,9 @@ class Scenes:
         with Reader(self.database) as reader:
             items=[]
             for row in reader.store.conn.execute("SELECT id FROM documents WHERE kind='scene' AND lifecycle='active'"):
-                obj=reader.read(row[0]);doc=obj['document'];meta=doc['metadata']
+                obj=reader.read(row[0])
+                if not obj['readable']:continue
+                doc=obj['document'];meta=doc['metadata']
                 refs=[r for r in obj['evidence'] if json.loads(r['source_key'])[0]=='assistant_bridge']
                 at=str(meta.get('date') or meta.get('event_date') or meta.get('created') or doc['created_at'])
                 items.append({'id':doc['id'],'title':doc['title'],'layer':'scene','content':doc['body_md'].strip(),'date':at[:10],'created_at':at,

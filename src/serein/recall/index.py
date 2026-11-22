@@ -177,7 +177,8 @@ class Search:
         self.reader.store.close()
 
     def search(self, query, *, kind=None, mode="surface", limit=10, with_evidence=False,
-               query_embedding=None, min_cosine=None, use_passages=False, candidate_ids=None):
+               query_embedding=None, min_cosine=None, use_passages=False, candidate_ids=None,
+               keyword_fallback=False):
         """Return current eligible objects, not proof of successful injection.
 
         Surface mode permits only current surfaceable Event/Scene. Explicit lookup
@@ -264,4 +265,25 @@ class Search:
             canonical.rollback()
         result["suppressed"] = dict(suppressed)
         result["status"] = "matched" if result["items"] else "no_match"
+        # Explicit manual lookup may contain alternative names/topics. Keep
+        # strict matches first; only broaden an empty eligible result, never
+        # an automatic surface request. Each keyword retains all its tokens.
+        keywords=list(dict.fromkeys(re.split(r'[\s,，、;；]+', query.strip())))
+        keywords=[word for word in keywords if tokens(word)]
+        if keyword_fallback and query_embedding is None and not result['items'] and len(keywords)>1:
+            if len(keywords)>12:
+                raise ValueError('Use at most 12 separated memory keywords')
+            found, matches, ranks = {}, {}, Counter()
+            for keyword in keywords:
+                page=self.search(keyword,kind=kind,mode=mode,limit=100,
+                                 with_evidence=with_evidence,candidate_ids=candidate_ids)
+                for rank,hit in enumerate(page['items'],1):
+                    found[hit['id']]=hit
+                    matches.setdefault(hit['id'],[]).append(keyword)
+                    ranks[hit['id']]+=1/(60+rank)
+            ranked=sorted(found,key=lambda key:(-len(matches[key]),-ranks[key],key))
+            result.update(match_mode='keyword_fallback',candidates=len(found),
+                          items=[{**found[key],'match_mode':'keyword_fallback',
+                                  'matched_keywords':matches[key]} for key in ranked[:limit]])
+            result['status']='matched' if result['items'] else 'no_match'
         return result

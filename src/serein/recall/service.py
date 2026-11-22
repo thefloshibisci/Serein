@@ -115,6 +115,12 @@ class Recall:
                     if obj["readable"] and (visibility_mode == "lookup" or obj["surface_state"]["can_surface"]) and scene.cue_matches(obj["document"], query):
                         candidates.append({"id": row["id"], "kind": "scene", "object": obj, "score": None, "method": "cue"})
                         scene_count += 1
+            if not candidates and mode=='lookup' and method=='lexical':
+                for kind in ('event','scene'):
+                    pool=search.search(query.search_text,kind=kind,mode=visibility_mode,
+                                       limit=self.policy.candidate_limit,keyword_fallback=True)
+                    pools[kind]={**pool,'items':[]}
+                    candidates.extend({**hit,'method':pool['method']} for hit in pool['items'])
             from .entities import candidates as entity_candidates
             known={hit['id']:hit for hit in candidates}
             for hit in entity_candidates(search,discovery_query,self.policy,self.policy.candidate_limit):
@@ -132,6 +138,10 @@ class Recall:
         evidence = [{"ref": f"{hit['kind']}:{hit['id']}", "title": hit["object"]["document"]["title"],
                      "body": scene.evidence_text(hit["object"]["document"]) if hit["kind"] == "scene" else hit["object"]["document"]["body_md"]}
                     for hit in scored]
+        for hit, payload in zip(scored, evidence):
+            if hit['object']['document']['metadata'].get('memory_role') == 'feel':
+                payload['body'] = '当时的主观感受（不是事实证据）：\n' + payload['body']
+                payload['semantic_kind'] = 'feel'
         scores = self.reranker(text, evidence) if self.reranker and scored else {}
         for hit in candidates:
             document = hit["object"]["document"]
@@ -151,6 +161,9 @@ class Recall:
             for kind in ("event", "scene"):
                 if position < len(admitted[kind]):
                     merged.append(admitted[kind][position])
+        if any(hit.get('match_mode')=='keyword_fallback' for hit in merged):
+            # Coverage is comparable across lanes; lexical/vector scores are not.
+            merged.sort(key=lambda hit:-len(hit.get('matched_keywords',[])))
         ordered = arc.order_materials(merged, intent)
         if intent in {"latest", "progress", "timeline"}:
             rejected["not_selected_by_date"] += len(merged) - len(ordered)
@@ -218,4 +231,3 @@ class Recall:
         return {"query": text, "status": "matched" if cards else "no_match", "items": cards,
                 "match_mode": match_mode,
                 "scope_only": True, "narrative_body_included": False, "injected": False}
-

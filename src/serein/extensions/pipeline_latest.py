@@ -1020,6 +1020,8 @@ def build_event_writer_prompt(day: str, title: str, messages: list[dict[str, Any
             owned={int(m['id']) for m in messages}
             source_materials=[m for m in source_materials if m['source_message_id'] in owned]
     title_hint = f'事件提示：{title}' if str(title or '').strip() else '没有预设标题；请只根据绑定原文拟标题。'
+    if append_only:
+        title_hint = '追加段落沿用旧标题；title 可返回空字符串。'
     previous = []
     for item in previous_events or []:
         if not str(item.get('body') or '').strip():
@@ -1061,7 +1063,7 @@ def build_event_writer_repair_prompt(original_prompt, failed_result, violations)
     return original_prompt+f'\n请按原角色规则修正结构或证据校验错误，保留同一 Event 的归属、人物、原话的比喻及不确定程度。正文通常控制在 500 字以内，不必写满；复杂经历可适当超出。优先压缩逐轮复述、技术背景、旁支和重复解释，仍须保留关键依据、不同表达、真实转折与实际落点。不要新增事实、改变边界，或按词句数量机械改写文风。重新核对 self_review。\n'+json.dumps({'violations':violations,'failed_result':failed_result},ensure_ascii=False)
 
 
-def validate_event_writer_result(result: dict[str, Any], owned_sources: list[dict[str, Any]] | None = None) -> list[str]:
+def validate_event_writer_result(result: dict[str, Any], owned_sources: list[dict[str, Any]] | None = None, *, append_only: bool = False) -> list[str]:
     canonicalize_claim_group_ids(result)
     title = str(result.get('title') or '').strip()
     body = str(result.get('event_draft') or '').strip()
@@ -1083,7 +1085,7 @@ def validate_event_writer_result(result: dict[str, Any], owned_sources: list[dic
         if ('claim_groups' in result or 'sentence_evidence' in result) and (result.get('claim_groups') != [] or result.get('sentence_evidence') != []):
             violations.append('证据不足时 claim_groups 和 sentence_evidence 必须为空数组')
         return violations
-    if not title:
+    if not title and not append_only:
         violations.append('标题为空')
     if not body:
         violations.append('正文为空')
