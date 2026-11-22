@@ -48,6 +48,9 @@ EXECUTION_COMPATIBLE_REVISIONS=frozenset({
     # deployed files. Removing automatic expiry and adding explicit pending
     # tools leaves frozen role requests, accepted outputs and budgets intact.
     '69ebaffc64e1b0ac0bcae61cc7dcfa9438c0f06983e74222d9dbb4a7c0ddfcf3',
+    # Deployed 3944a83d: widening late-reply recovery across multiple/chained
+    # producers leaves frozen role requests, accepted outputs and budgets intact.
+    '7beb358964060f434c2033ce2c746c88be039292380cbb5cc02bcfb5e86c91c7',
 })
 
 _RUNTIME_CONTRACT_FILES = (

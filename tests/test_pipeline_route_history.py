@@ -862,3 +862,185 @@ def test_history_reset_uses_accepted_routing_independently_of_later_status(setti
         cards, _ = p.track_state.load_tracks(store, 'test', 'books', 5, p.task_message)
         assert len(cards) == 1 and cards[0]['track_id'].endswith('_0043')
         assert cards[0]['recent_source_message_ids'] == [4]
+
+
+def _late_message(raw_id):
+    return {'id': raw_id, 'source': 'test', 'source_event_id': str(raw_id),
+            'original_session_id': 'window', 'session_id': 1, 'role': 'user',
+            'content': 'original-'+str(raw_id), 'created_at': '2025-01-01T00:00:00Z'}
+
+
+def _late_assignment(raw_id, producer):
+    return {'source_message_id': raw_id, 'primary_track_id': 'track-'+producer,
+            'context_track_ids': [], 'routing_role': 'primary_activity'}
+
+
+def _late_frame(producer, ids):
+    return {'messages': [_late_message(i) for i in ids],
+            'assignments': [_late_assignment(i, producer) for i in ids],
+            'source_proof_complete': True}
+
+
+@pytest.mark.parametrize('damage', [
+    None, 'missing_receipt', 'different_new_ids', 'wrong_overlap',
+    'changed_early_assignment', 'changed_message', 'unfinished_frame',
+    'ambiguous_old_producer', 'missing_early_history', 'unprocessed_older_prefix',
+    'unexplained_override', 'conflicting_receipts',
+])
+def test_late_suffix_can_follow_earlier_verified_routes_without_guessing(damage):
+    expected = {i: _late_message(i) for i in range(1, 10)}
+    linked = {1: 'route:first', 2: 'route:first', 3: 'route:old', 4: 'route:old',
+              5: 'route:new', 6: 'route:new', 7: 'route:new',
+              8: 'route:after', 9: 'route:after'}
+    wanted = {i: _late_assignment(i, linked[i].split(':')[1]) for i in expected}
+    old_ids = [0, 3, 4, 5, 6] if damage == 'unprocessed_older_prefix' else [3, 4, 5, 6]
+    frames = {
+        'route:first': [_late_frame('first', [1, 2])],
+        'route:old': [_late_frame('old', old_ids)],
+        'route:new': [_late_frame('new', [5, 6, 7])],
+        'route:after': [_late_frame('after', [8, 9])],
+    }
+    second = [5, 6, 7]
+    receipt = {'action': 'reroute_expanded_dialogue_unit',
+               'source_message_ids': second, 'previously_routed_source_message_ids': [5, 6],
+               'new_source_message_ids': [7], 'producer_batch_ids': ['route:old'],
+               'reason': 'complete_late_reply_extends_accepted_envelope'}
+    receipts = [receipt]
+    candidates = {
+        'route:first': {},
+        'route:old': {},
+        'route:new': {'input_json': encode({'late_reply_route_receipts': receipts})},
+        'route:after': {},
+    }
+    if damage == 'missing_receipt':
+        candidates['route:new'] = {'input_json': encode({'late_reply_route_receipts': []})}
+    elif damage == 'different_new_ids':
+        receipt['new_source_message_ids'] = [8]
+        candidates['route:new'] = {'input_json': encode({'late_reply_route_receipts': receipts})}
+    elif damage == 'wrong_overlap':
+        receipt['previously_routed_source_message_ids'] = [3]
+        candidates['route:new'] = {'input_json': encode({'late_reply_route_receipts': receipts})}
+    elif damage == 'changed_early_assignment':
+        linked[4] = 'route:first'
+    elif damage == 'changed_message':
+        expected[4]['content'] = 'changed later'
+    elif damage == 'unfinished_frame':
+        frames['route:new'][0]['source_proof_complete'] = False
+    elif damage == 'ambiguous_old_producer':
+        receipt['producer_batch_ids'] = ['route:old', 'route:duplicate']
+        frames['route:duplicate'] = deepcopy(frames['route:old'])
+        candidates['route:duplicate'] = {}
+        candidates['route:new'] = {'input_json': encode({'late_reply_route_receipts': receipts})}
+    elif damage == 'missing_early_history':
+        frames.pop('route:first')
+    elif damage == 'unexplained_override':
+        frames['route:old'][0]['messages'].append(_late_message(8))
+        frames['route:old'][0]['assignments'].append(_late_assignment(8, 'old'))
+        frames['route:after'] = [_late_frame('after', [8, 9])]
+        linked[8] = 'route:after'
+        wanted[8] = _late_assignment(8, 'after')
+    elif damage == 'conflicting_receipts':
+        frames['route:rival'] = [_late_frame('rival', [5, 6, 7])]
+        candidates['route:rival'] = {'input_json': encode({'late_reply_route_receipts': [deepcopy(receipt)]})}
+
+    proof = recovery._proved_late_suffix(expected, wanted, linked, candidates, frames, processed=set())
+    assert proof is (damage is None)
+
+
+def test_late_reply_embedded_in_larger_new_frame_is_accepted():
+    expected = {i: _late_message(i) for i in range(1, 9)}
+    linked = {1: 'route:first', 2: 'route:first', 3: 'route:old', 4: 'route:old',
+              5: 'route:new', 6: 'route:new', 7: 'route:new', 8: 'route:new'}
+    wanted = {i: _late_assignment(i, linked[i].split(':')[1]) for i in expected}
+    frames = {
+        'route:first': [_late_frame('first', [1, 2])],
+        'route:old': [_late_frame('old', [3, 4, 5, 6])],
+        'route:new': [_late_frame('new', [5, 6, 7, 8])],
+    }
+    receipt = {'action': 'reroute_expanded_dialogue_unit',
+               'source_message_ids': [5, 6, 7], 'previously_routed_source_message_ids': [5, 6],
+               'new_source_message_ids': [7], 'producer_batch_ids': ['route:old'],
+               'reason': 'complete_late_reply_extends_accepted_envelope'}
+    candidates = {'route:first': {}, 'route:old': {},
+                  'route:new': {'input_json': encode({'late_reply_route_receipts': [receipt]})}}
+    assert recovery._proved_late_suffix(expected, wanted, linked, candidates, frames) is True
+
+
+def test_daytime_multi_producer_late_reply_and_chain_settle_without_repair(settings, monkeypatch):
+    from datetime import timedelta
+    from test_route_scope_holds import Clock, seed, api
+    from serein.compat.raw_archive import raw_archive
+
+    def router_with_fresh_track(request):
+        output = output_for(request['role'], request)
+        if request['role'] == 'track_router':
+            ids = [m['id'] for m in request['messages']]
+            if any(i in (15, 16) for i in ids):
+                key = 'new:1'
+                output['message_assignments'] = [
+                    {'source_message_id': m['id'], 'primary_track_ref': key,
+                     'context_track_refs': [], 'routing_role': 'origin' if idx == 0 else 'primary_activity'}
+                    for idx, m in enumerate(request['messages'])
+                ]
+                output['track_updates'] = [{'track_ref': key, 'subject': 'Late reply track',
+                                            'throughline': 'Expanded late reply',
+                                            'event_policy': 'default', 'status': 'active'}]
+        return output
+
+    saved_clock = Clock.value
+    try:
+        api(settings, monkeypatch, router_with_fresh_track)
+        archive = raw_archive(settings)
+        base = Clock.value.replace(hour=1, minute=0)
+
+        seed(settings, session='edge', start=base, count=5)
+        Clock.value = base + timedelta(hours=1)
+        asyncio.run(p.flush_routes(settings.database))
+
+        archive.ingest([
+            {'source_event_id': 'u2', 'session_id': 'edge', 'role': 'user', 'text': 'Second topic start', 'created_at': (base + timedelta(minutes=30)).isoformat()},
+            {'source_event_id': 'a2', 'session_id': 'edge', 'role': 'assistant', 'text': 'Second topic reply', 'created_at': (base + timedelta(minutes=31)).isoformat()},
+            {'source_event_id': 'u3', 'session_id': 'edge', 'role': 'user', 'text': 'Follow up question', 'created_at': (base + timedelta(minutes=32)).isoformat()},
+            {'source_event_id': 'a3', 'session_id': 'edge', 'role': 'assistant', 'text': 'Initial answer', 'created_at': (base + timedelta(minutes=33)).isoformat()},
+        ], source='test')
+        Clock.value = base + timedelta(hours=2)
+        asyncio.run(p.flush_routes(settings.database))
+
+        archive.ingest([
+            {'source_event_id': 'a3-late1', 'session_id': 'edge', 'role': 'assistant', 'text': 'Proactive check-in 1', 'created_at': (base + timedelta(minutes=40)).isoformat()},
+        ], source='test')
+        Clock.value = base + timedelta(hours=3)
+        asyncio.run(p.flush_routes(settings.database))
+
+        archive.ingest([
+            {'source_event_id': 'a3-late2', 'session_id': 'edge', 'role': 'assistant', 'text': 'Proactive check-in 2', 'created_at': (base + timedelta(minutes=50)).isoformat()},
+        ], source='test')
+        Clock.value = base + timedelta(hours=4)
+        asyncio.run(p.flush_routes(settings.database))
+
+        archive.ingest([
+            {'source_event_id': 'u4', 'session_id': 'edge', 'role': 'user', 'text': 'Back later', 'created_at': (base + timedelta(minutes=60)).isoformat()},
+            {'source_event_id': 'a4', 'session_id': 'edge', 'role': 'assistant', 'text': 'Welcome back', 'created_at': (base + timedelta(minutes=61)).isoformat()},
+        ], source='test')
+        Clock.value = base + timedelta(hours=5)
+        asyncio.run(p.flush_routes(settings.database))
+
+        with Store(settings.database, read_only=True) as store:
+            routed_batches = [
+                json.loads(r['input_json'])
+                for r in store.conn.execute("SELECT input_json FROM pipeline_batches WHERE status='routed' ORDER BY rowid")
+            ]
+            assert len(routed_batches) == 5
+            assert routed_batches[2].get('late_reply_route_receipts')
+            assert routed_batches[3].get('late_reply_route_receipts')
+
+        assert p.scope_holds(settings.database) == []
+        settled = asyncio.run(p.advance(settings.database, include_recent=True, runner=synthetic_runner))
+        assert settled['status'] == 'processed'
+        assert settled['processed_originals'] == 18
+        assert asyncio.run(p.advance(settings.database, include_recent=True, runner=synthetic_runner))['status'] == 'current'
+        with Store(settings.database, read_only=True) as store:
+            assert store.conn.execute("SELECT count(*) FROM pipeline_batches WHERE status='needs_repair'").fetchone()[0] == 0
+            assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0] == 18
+    finally:
+        Clock.value = saved_clock

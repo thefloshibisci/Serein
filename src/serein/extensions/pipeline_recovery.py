@@ -302,46 +302,199 @@ def late_reply_route_receipts(database, units, cached):
     return receipts
 
 
-def _proved_late_suffix(expected, wanted, linked, candidates, frames_by_batch, processed=()):
-    """Two complete, overlapping accepted frames cannot supply one coherent card."""
-    if set(linked) != set(expected) or len(set(linked.values())) != 2:
-        return False
+def _sublist_index(seq, sub):
+    if not sub or len(sub) > len(seq):
+        return None
+    for index in range(len(seq) - len(sub) + 1):
+        if seq[index:index+len(sub)] == sub:
+            return index
+    return None
+
+
+def _proved_late_suffix(expected, wanted, linked, candidates, frames_by_batch, processed=(),
+                        *, possibilities=None, wider_frames=None, database=None):
+    """Prove unresolved routes were only superseded by verified late-reply receipts.
+
+    Earlier messages and later normal batches may belong to other producers;
+    multiple or chained late replies in one batch are also allowed as long as
+    every unresolved message belongs to a complete accepted frame whose only
+    overridden members are explained by verified late-reply receipts.
+    """
     ids = list(expected)
-    old, new = linked[ids[0]], linked[ids[-1]]
-    if old == new:
+    if not ids or set(linked) != set(expected):
         return False
-    left, right = frames_by_batch.get(old, []), frames_by_batch.get(new, [])
-    if len(left) != 1 or len(right) != 1:
-        return False
-    a, b = left[0], right[0]
-    if not (a.get('source_proof_complete') and b.get('source_proof_complete')):
-        return False
-    first, second = ([m['id'] for m in f['messages']] for f in (a, b))
-    if not second or second[0] not in first:
-        return False
-    split = first.index(second[0])
-    overlap = first[split:]
-    if not split or second[:len(overlap)] != overlap or len(second) <= len(overlap):
-        return False
-    if ids[0] not in first[:split]:
-        return False
-    start = first.index(ids[0])
-    if not set(first[:start]).issubset(processed) or first[start:split] + second != ids:
-        return False
-    if [linked[i] for i in ids] != [old]*(split-start) + [new]*len(second):
-        return False
-    for batch_id, frame in ((old, a), (new, b)):
-        if any(_message_key(m) != _message_key(expected[m['id']]) for m in frame['messages'] if m['id'] in expected):
+
+    def frame_matches_expected(batch_id, frame):
+        if not frame.get('source_proof_complete'):
+            return False
+        if any(_message_key(m) != _message_key(expected[m['id']])
+               for m in frame['messages'] if m['id'] in expected):
             return False
         for assignment in frame['assignments']:
-            i = assignment['source_message_id']
-            if linked.get(i) == batch_id and assignment != wanted[i]:
+            raw_id = assignment['source_message_id']
+            if linked.get(raw_id) == batch_id and assignment != wanted[raw_id]:
                 return False
-    receipt = {'action': 'reroute_expanded_dialogue_unit', 'source_message_ids': second,
-               'previously_routed_source_message_ids': overlap,
-               'new_source_message_ids': second[len(overlap):], 'producer_batch_ids': [old],
-               'reason': 'complete_late_reply_extends_accepted_envelope'}
-    return receipt in json.loads(candidates[new]['input_json']).get('late_reply_route_receipts', [])
+        return True
+
+    if possibilities is not None:
+        resolved = {key for key in expected
+                    if possibilities.get(key) or (wider_frames and wider_frames.get(key))}
+    else:
+        resolved = set()
+        for key in expected:
+            owner = linked[key]
+            hits = [frame for frame in frames_by_batch.get(owner, [])
+                    if key in {m['id'] for m in frame['messages']}]
+            if len(hits) != 1 or not hits[0].get('source_proof_complete'):
+                continue
+            source_messages = {m['id']: m for m in hits[0]['messages']}
+            actual = {a['source_message_id']: a for a in hits[0]['assignments']}
+            overlap = expected.keys() & source_messages.keys()
+            if (overlap and [k for k in expected if k in overlap] == [k for k in source_messages if k in overlap]
+                    and all(_message_key(expected[k]) == _message_key(source_messages[k])
+                            and actual.get(k) == wanted[k] for k in overlap)):
+                resolved.add(key)
+
+    unresolved = set(expected) - resolved
+    if not unresolved:
+        return False
+
+    all_batches = dict(candidates)
+    all_frames = dict(frames_by_batch)
+
+    if database is not None:
+        scopes = {b.get('scope') for b in candidates.values() if isinstance(b, dict) and b.get('scope')}
+        scope = next(iter(scopes)) if len(scopes) == 1 else None
+        pending = list(all_batches.values())
+        with Store(database, read_only=True) as store:
+            while pending and len(all_batches) < MAX_HISTORY_BATCHES:
+                batch = pending.pop()
+                raw_input = batch.get('input_json') if isinstance(batch, dict) else None
+                if not raw_input:
+                    continue
+                for receipt in json.loads(raw_input).get('late_reply_route_receipts', []):
+                    if not isinstance(receipt, dict):
+                        continue
+                    for prev_batch_id in receipt.get('producer_batch_ids', []):
+                        if not isinstance(prev_batch_id, str) or prev_batch_id in all_batches:
+                            continue
+                        if len(all_batches) >= MAX_HISTORY_BATCHES:
+                            break
+                        row = store.conn.execute('SELECT * FROM pipeline_batches WHERE id=?', (prev_batch_id,)).fetchone()
+                        if row is None or row['status'] not in SOURCE_STATES or (scope and row['scope'] != scope):
+                            continue
+                        loaded = dict(row)
+                        try:
+                            loaded_frames = _frames(database, loaded)
+                        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+                            continue
+                        all_batches[prev_batch_id] = loaded
+                        all_frames[prev_batch_id] = loaded_frames
+                        pending.append(loaded)
+
+    replaced_by = {}
+    for new_id, batch in all_batches.items():
+        raw_input = batch.get('input_json') if isinstance(batch, dict) else None
+        if not raw_input:
+            continue
+        receipts = json.loads(raw_input).get('late_reply_route_receipts', [])
+        if not isinstance(receipts, list) or not receipts:
+            continue
+        new_frames = all_frames.get(new_id, [])
+        for receipt in receipts:
+            if not isinstance(receipt, dict):
+                continue
+            if (receipt.get('action') != 'reroute_expanded_dialogue_unit'
+                    or receipt.get('reason') != 'complete_late_reply_extends_accepted_envelope'):
+                continue
+            unit_ids = receipt.get('source_message_ids')
+            prev_ids = receipt.get('previously_routed_source_message_ids')
+            new_ids = receipt.get('new_source_message_ids')
+            old_ids = receipt.get('producer_batch_ids')
+            if (not isinstance(unit_ids, list) or not isinstance(prev_ids, list)
+                    or not isinstance(new_ids, list) or not isinstance(old_ids, list)
+                    or not prev_ids or not new_ids or not old_ids
+                    or len(set(unit_ids)) != len(unit_ids)
+                    or len(set(old_ids)) != len(old_ids)
+                    or unit_ids != prev_ids + new_ids
+                    or new_id in old_ids):
+                continue
+            matching_new = [
+                frame for frame in new_frames
+                if frame_matches_expected(new_id, frame)
+                and _sublist_index([m['id'] for m in frame['messages']], unit_ids) is not None
+            ]
+            if len(matching_new) != 1:
+                continue
+            if any(old_id not in all_frames for old_id in old_ids):
+                continue
+            matched_prev = {}
+            valid_receipt = True
+            for pid in prev_ids:
+                hits = [
+                    (old_id, frame)
+                    for old_id in old_ids
+                    for frame in all_frames.get(old_id, [])
+                    if frame_matches_expected(old_id, frame)
+                    and pid in {m['id'] for m in frame['messages']}
+                ]
+                if len(hits) != 1:
+                    valid_receipt = False
+                    break
+                matched_prev[pid] = hits[0]
+            if not valid_receipt:
+                continue
+            used_olds = {old_id for old_id, _ in matched_prev.values()}
+            if used_olds != set(old_ids):
+                continue
+            by_frame = {}
+            for pid in prev_ids:
+                old_id, frame = matched_prev[pid]
+                by_frame.setdefault((old_id, id(frame)), (frame, []))[1].append(pid)
+            if any(_sublist_index([m['id'] for m in frame['messages']], sub) is None
+                   for frame, sub in by_frame.values()):
+                continue
+            for pid, (old_id, _) in matched_prev.items():
+                existing = replaced_by.get((old_id, pid))
+                if existing is not None and existing != new_id:
+                    return False
+                replaced_by[(old_id, pid)] = new_id
+
+    def explained(old_id, raw_id, target_id):
+        cur = old_id
+        seen = {cur}
+        while True:
+            nxt = replaced_by.get((cur, raw_id))
+            if nxt is None or nxt in seen:
+                return False
+            if nxt == target_id:
+                return True
+            seen.add(nxt)
+            cur = nxt
+
+    lower, upper = min(expected), max(expected)
+    for key in unresolved:
+        old_id = linked[key]
+        hits = [frame for frame in all_frames.get(old_id, [])
+                if key in {m['id'] for m in frame['messages']}]
+        if len(hits) != 1 or not frame_matches_expected(old_id, hits[0]):
+            return False
+        frame = hits[0]
+        frame_ids = [m['id'] for m in frame['messages']]
+        if any(lower <= i <= upper and i not in expected for i in frame_ids):
+            return False
+        frame_set = set(frame_ids)
+        if [i for i in expected if i in frame_set] != [i for i in frame_ids if i in expected]:
+            return False
+        earlier = [i for i in frame_ids if i < lower]
+        if not set(earlier).issubset(processed):
+            return False
+        overridden = [i for i in frame_ids if i in expected and linked[i] != old_id]
+        if not overridden:
+            return False
+        if any(not explained(old_id, i, linked[i]) for i in overridden):
+            return False
+    return True
 
 
 def recover_cached_routes(database, data, assignments):
@@ -440,7 +593,8 @@ def recover_cached_routes(database, data, assignments):
             processed = {row[0] for row in store.conn.execute(
                 'SELECT raw_id FROM raw_processing WHERE raw_id IN (SELECT value FROM json_each(?))',
                 (encode(sorted(prefix)),))} if prefix else set()
-        if _proved_late_suffix(expected, wanted, linked, candidates, frames_by_batch, processed):
+        if _proved_late_suffix(expected, wanted, linked, candidates, frames_by_batch, processed,
+                               possibilities=possibilities, wider_frames=wider_frames, database=database):
             raise p.RouteCacheRangeMismatch('verified late reply replaced the tail of an accepted Router frame')
         if linked:
             raise p.RoutingRecoveryError('recorded route history cannot prove the frozen input range')
