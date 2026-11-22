@@ -4,7 +4,11 @@ import json
 import re
 from uuid import uuid4
 
-from ..core.store import Store, Conflict, encode, now
+from ..core.store import Store, Conflict, encode, digest, now
+
+ARCHIVE_CONFIRM='ARCHIVE_PENDING_ORIGINALS'
+REOPEN_CONFIRM='RESTORE_PENDING_ORIGINALS'
+_UNFINISHED_BATCH_STATES=('pending','routing_only','retry_wait','needs_repair','paused_failure','waiting_materials')
 
 
 def initialize(conn):
@@ -13,6 +17,158 @@ def initialize(conn):
         scope TEXT NOT NULL, status TEXT NOT NULL, kind TEXT NOT NULL,
         source_ids_json TEXT NOT NULL, reason TEXT NOT NULL, updated_at TEXT NOT NULL,
         resolved_event_ids_json TEXT NOT NULL DEFAULT '[]')''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS pipeline_pending_archive_receipts(
+        pending_id INTEGER PRIMARY KEY REFERENCES pipeline_pending_materials(id),
+        receipt_json TEXT NOT NULL)''')
+
+
+def _archive_receipt(conn,pending_id):
+    row=conn.execute('SELECT receipt_json FROM pipeline_pending_archive_receipts WHERE pending_id=?',(pending_id,)).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def _archive_check(conn,pending_id,*,reopening=False):
+    """Check exact retained ownership, independently of the old runtime version."""
+    from . import pipeline as p
+    from .pipeline_recovery import _message_key
+    row=conn.execute('''SELECT pm.*,b.input_json,b.result_json,b.status AS batch_status
+        FROM pipeline_pending_materials pm JOIN pipeline_batches b ON b.id=pm.batch_id WHERE pm.id=?''',(pending_id,)).fetchone()
+    if row is None or row['status']!=('archived_only' if reopening else 'open'):raise Conflict('待办已被领取或结束，请刷新')
+    if row['batch_status'] not in ('done',*_UNFINISHED_BATCH_STATES):raise Conflict('原批次状态不允许结束待办')
+    data=json.loads(row['input_json']);values=json.loads(row['source_ids_json'])
+    if not isinstance(values,list) or not values or any(type(i) is not int or i<1 for i in values) or len(set(values))!=len(values):
+        raise Conflict('待办原话范围无效，未结束整理')
+    ids=set(values);frozen={m['id']:m for m in data.get('routing_messages',[])}
+    owned={m['id'] for m in data.get('messages',data.get('routing_messages',[]))}
+    if not ids.issubset(owned) or not ids.issubset(frozen):raise Conflict('待办原话不属于本批冻结所有权')
+    originals=[]
+    receipt=_archive_receipt(conn,pending_id) if reopening else None
+    if reopening and (not isinstance(receipt,dict) or receipt.get('source_ids')!=sorted(ids)
+            or receipt.get('batch_id')!=row['batch_id'] or not isinstance(receipt.get('source_sha256'),dict)):
+        raise Conflict('缺少匹配的保留原话回执，未恢复')
+    for key in sorted(ids):
+        raw=conn.execute('SELECT * FROM raw_events WHERE id=?',(key,)).fetchone()
+        if raw is None or _message_key(p.message(raw))!=_message_key(frozen[key]):raise Conflict('待办原话已变化，未结束整理')
+        processed=conn.execute('SELECT * FROM raw_processing WHERE raw_id=?',(key,)).fetchone()
+        if reopening:
+            if receipt.get('source_sha256',{}).get(str(key))!=digest(encode(dict(raw))):
+                raise Conflict('原话与保留回执不一致，未恢复')
+            if not processed or processed['operation_id']!=receipt.get('operation_id') or processed['outcome']!='archive_only':
+                raise Conflict('原话已经另行处理，未恢复')
+            # A saved Event can cite a shared bridge while another corridor
+            # still defers it. Only its exact archive ownership is undone;
+            # existing Event/source bindings stay available to normal review.
+        elif processed:raise Conflict('待办原话已有结算记录，未重复处理')
+        originals.append(dict(raw))
+    for other in conn.execute("SELECT id,source_ids_json FROM pipeline_pending_materials WHERE id<>? AND status IN ('open','running')",(pending_id,)):
+        if ids.intersection(json.loads(other['source_ids_json'])):raise Conflict('原话还被其他待办预留，请先处理共享依赖')
+    placeholders=','.join('?' for _ in _UNFINISHED_BATCH_STATES)
+    for batch in conn.execute(f'SELECT id,input_json FROM pipeline_batches WHERE id<>? AND status IN ({placeholders})',
+                              (row['batch_id'],*_UNFINISHED_BATCH_STATES)):
+        other=json.loads(batch['input_json'])
+        if ids.intersection(m['id'] for m in other.get('messages',other.get('routing_messages',[]))):
+            raise Conflict('其他未完成批次拥有这些原话，未结束整理')
+        requests=[{'component':c} for c in other.get('components',[])]
+        outputs=[]
+        for job in conn.execute('SELECT request_json,output_json FROM pipeline_jobs WHERE batch_id=?',(batch['id'],)):
+            requests.append(json.loads(job['request_json']))
+            if job['output_json']:outputs.append(json.loads(job['output_json']))
+        for request in requests:
+            component=request.get('component') or {}
+            if pending_id in component.get('adopted_pending_ids',[]) or (component.get('pending_material_read') or {}).get('id')==pending_id:
+                raise Conflict('其他批次正在读取或承接此待办，未结束整理')
+            if ids.intersection((request.get('event') or {}).get('source_message_ids',[])):
+                raise Conflict('其他 Writer 已领取这些来源，未结束整理')
+        for output in outputs:
+            if pending_id in output.get('adopt_pending_material_ids',[]) or any(ids.intersection(e.get('source_message_ids',[])) or
+                ids.intersection(b.get('source_message_id') for b in e.get('source_bindings',[])) for e in output.get('events',[])):
+                raise Conflict('其他 Curator 已承接这些来源，未结束整理')
+    if row['batch_status']!='done' and any(key not in ids and not conn.execute('SELECT 1 FROM raw_processing WHERE raw_id=?',(key,)).fetchone() for key in owned):
+        raise Conflict('原批次还有不属于此待办的未处理原话，未结束整批')
+    return row,data,ids,originals
+
+
+def check_archive(database,pending_id,confirm):
+    if type(pending_id) is not int or pending_id<1 or confirm!=ARCHIVE_CONFIRM:raise ValueError('请明确确认保留原话并结束此待办整理')
+    # Do not run the general initializer here: a repeated acknowledgement must
+    # not compact the archived batch or rewrite unrelated old frozen plans.
+    with Store(database) as store:initialize(store.conn)
+    with Store(database,read_only=True) as store:
+        if not _archive_receipt(store.conn,pending_id):_archive_check(store.conn,pending_id)
+
+
+def _archive_in_store(conn,pending_id):
+    """Atomic terminal receipt; no source, Event, route or accepted output is deleted."""
+    from datetime import datetime,timezone
+    previous=_archive_receipt(conn,pending_id)
+    if previous:return previous
+    row,data,ids,originals=_archive_check(conn,pending_id)
+    proof={'reason':'user_confirmed'}
+    stamp=datetime.now(timezone.utc).isoformat()
+    operation='archive_pending:'+str(pending_id)+':'+digest(row['batch_id'])[:16]
+    receipt={'status':'archived_only','pending_id':pending_id,'batch_id':row['batch_id'],
+        'operation_id':operation,'originals':len(ids),'source_ids':sorted(ids),'automatic':False,
+        'archived_at':stamp,'proof':proof,'originals_preserved':True,'events_changed':0,
+        'source_sha256':{str(raw['id']):digest(encode(raw)) for raw in originals}}
+    for key in sorted(ids):conn.execute('INSERT INTO raw_processing VALUES (?,?,?)',(key,operation,'archive_only'))
+    conn.execute('INSERT INTO pipeline_pending_archive_receipts VALUES (?,?)',(pending_id,encode(receipt)))
+    conn.execute("UPDATE pipeline_pending_materials SET status='archived_only',reason=?,updated_at=? WHERE id=?",
+                 ('原话已保留，已结束此待办整理；未删除原话或修改已保存 Event。',stamp,pending_id))
+    # Completed batches can already contain saved Events: their result stays exact.
+    if row['batch_status']!='done':
+        result={'status':'archived_only','batch_id':row['batch_id'],'completed_at':stamp,
+                'archive_receipt_id':pending_id,'previous_result':json.loads(row['result_json'] or '{}')}
+        conn.execute("UPDATE pipeline_batches SET status='done',result_json=? WHERE id=?",(encode(result),row['batch_id']))
+    return receipt
+
+
+def archive(database,pending_id,confirm):
+    check_archive(database,pending_id,confirm)
+    with Store(database) as store,store.transaction(immediate=True):
+        receipt=_archive_in_store(store.conn,pending_id)
+        return {'status':'archived_only','pending_id':pending_id,'batch_id':receipt['batch_id'],
+                'originals':receipt['originals'],'closure_receipt':receipt}
+
+
+def check_reopen(database,pending_id,confirm):
+    if type(pending_id) is not int or pending_id<1 or confirm!=REOPEN_CONFIRM:
+        raise ValueError('请明确确认恢复这项原话整理')
+    with Store(database) as store:initialize(store.conn)
+    with Store(database,read_only=True) as store:
+        if not store.conn.execute('SELECT 1 FROM background_state WHERE name=?',('pending_reopen:'+str(pending_id),)).fetchone():
+            _archive_check(store.conn,pending_id,reopening=True)
+
+
+def reopen(database,pending_id,confirm):
+    """Restore one mistaken finish; keep its old terminal receipt and exact text."""
+    check_reopen(database,pending_id,confirm)
+    key='pending_reopen:'+str(pending_id)
+    with Store(database) as store,store.transaction(immediate=True):
+        prior=store.conn.execute('SELECT value_json FROM background_state WHERE name=?',(key,)).fetchone()
+        if prior:return json.loads(prior[0])
+        row,data,ids,originals=_archive_check(store.conn,pending_id,reopening=True)
+        receipt=_archive_receipt(store.conn,pending_id)
+        batch_id='pipeline:'+uuid4().hex
+        fresh=deepcopy(data)
+        fresh['messages']=[m for m in data.get('messages',data['routing_messages']) if m['id'] in ids]
+        fresh['pending_previous_batch_id']=row['batch_id']
+        fresh.pop('resume_pending_id',None)
+        fresh.pop('task_snapshot_compacted',None)
+        # A new retained item avoids rewriting the original closure receipt or
+        # pretending an old accepted plan has the current runtime contract.
+        store.conn.execute("INSERT INTO pipeline_batches(id,scope,input_json,status,result_json) VALUES (?,?,?,'done',?)",
+            (batch_id,row['scope'],encode(fresh),encode({'status':'restored_pending','original_pending_id':pending_id})))
+        new_id=store.conn.execute("INSERT INTO pipeline_pending_materials(batch_id,scope,status,kind,source_ids_json,reason,updated_at) "
+            "VALUES (?,?,'open',?,?,?,?)",(batch_id,row['scope'],row['kind'],encode(sorted(ids)),
+             '已恢复误操作保留的原话，可按当前设置继续整理。',now())).lastrowid
+        for raw_id in sorted(ids):
+            store.conn.execute("DELETE FROM raw_processing WHERE raw_id=? AND operation_id=? AND outcome='archive_only'",
+                               (raw_id,receipt['operation_id']))
+        result={'status':'reopened','original_pending_id':pending_id,'pending_id':new_id,'batch_id':batch_id,
+                'originals':len(originals),'originals_preserved':True,'replan_required':True,
+                'source_ids':sorted(ids),'restored_at':now()}
+        store.conn.execute('INSERT INTO background_state(name,value_json) VALUES (?,?)',(key,encode(result)))
+        return result
 
 
 def retain_legacy_batches(conn):
@@ -25,6 +181,7 @@ def retain_legacy_batches(conn):
           AND (json_extract(input_json,'$.contract') IS NULL OR json_extract(input_json,'$.contract')<>?
                OR json_extract(input_json,'$.runtime_revision') IS NULL OR json_extract(input_json,'$.runtime_revision')<>?)""",
         (p.CONTRACT,revision)).fetchall():
+        if p.runtime_compatible(json.loads(row['input_json'])):continue
         detail={'status':'needs_repair','batch_id':row['id'],'scope':row['scope'],'repair_kind':'runtime_contract',
                 'reason':'版本已更新，旧任务原话与输出已保留；可按当前设置重新整理或预览拆批。',
                 'note':'其他聊天可继续，旧任务不会自动重发。'}
@@ -68,6 +225,8 @@ def park(database,batch,error):
     from . import pipeline as p
     with Store(database) as store,store.transaction(immediate=True):
         row=store.conn.execute('SELECT * FROM pipeline_batches WHERE id=?',(batch['id'],)).fetchone()
+        if row['status']=='superseded_source_deleted':
+            return {'status':'cancelled_source_deleted','batch_id':batch['id']}
         data=json.loads(row['input_json'])
         ids=[m['id'] for m in data.get('messages',data.get('routing_messages',[]))
              if not store.conn.execute('SELECT 1 FROM raw_processing WHERE raw_id=?',(m['id'],)).fetchone()]
@@ -96,17 +255,24 @@ def source_locator(messages):
 
 
 def entries(conn, *, limit=100):
-    rows=conn.execute('''SELECT pm.*,b.input_json,b.status AS batch_status FROM pipeline_pending_materials pm
-        JOIN pipeline_batches b ON b.id=pm.batch_id ORDER BY CASE WHEN pm.status IN ('open','running') THEN 0 ELSE 1 END,pm.id DESC LIMIT ?''',(limit,)).fetchall()
+    from . import pipeline as p
+    compatible_revisions={p.runtime_revision(), p.PREVIOUS_UI_RUNTIME}
+    rows=conn.execute('''SELECT pm.*,b.input_json,b.result_json,b.status AS batch_status FROM pipeline_pending_materials pm
+        JOIN pipeline_batches b ON b.id=pm.batch_id WHERE b.status!='superseded_source_deleted' ORDER BY CASE WHEN pm.status IN ('open','running') THEN 0 ELSE 1 END,pm.id DESC LIMIT ?''',(limit,)).fetchall()
     result=[]
     for row in rows:
         data=json.loads(row['input_json']);ids=json.loads(row['source_ids_json'])
         cards=data.get('routing_result',{}).get('tracks',data.get('tracks',[]))
+        relevant={t for c in data.get('components',[]) if set(ids).intersection(m['id'] for m in c['messages']) for t in c.get('track_ids',[])}
+        if relevant:cards=[c for c in cards if c.get('track_id') in relevant]
         source=[m for m in data.get('routing_messages',[]) if m['id'] in ids]
         attempt=last_attempt(conn,row['batch_id'],data,compact=True)
         result.append({key:row[key] for key in ('id','batch_id','scope','status','kind','reason','updated_at')} |
             {'source_ids':ids,'originals':len(ids),'original_chars':sum(len(m['content']) for m in source),
              'locator':source_locator(source),'batch_status':row['batch_status'],
+             'plan_compatible':data.get('contract')==p.CONTRACT and data.get('runtime_revision') in compatible_revisions,
+             'can_archive':row['status']=='open' and row['batch_status'] in ('done',*_UNFINISHED_BATCH_STATES),
+             'closure_receipt':_archive_receipt(conn,row['id']),
              'can_skip':row['batch_status'] in ('pending','paused_failure','retry_wait','routing_only','needs_repair','waiting_materials'),
              'summary':'；'.join(str(c.get('subject',''))+': '+str(c.get('throughline','')) for c in cards)[:240],
              'last_attempt':dict(attempt) if attempt else None,
@@ -139,7 +305,10 @@ def detail(database,pending_id):
         row=store.conn.execute('SELECT * FROM pipeline_pending_materials WHERE id=?',(pending_id,)).fetchone()
         if row is None:raise ValueError('找不到待处理材料')
         batch=store.conn.execute('SELECT input_json,status FROM pipeline_batches WHERE id=?',(row['batch_id'],)).fetchone()
+        if batch['status']=='superseded_source_deleted':raise Conflict('原文已删除，旧整理记录不可读取。')
         data=json.loads(batch['input_json']);ids=set(json.loads(row['source_ids_json']))
+        from ..pipeline_source_guard import assert_readable
+        assert_readable(store.conn,data)
         messages=[m for m in data.get('routing_messages',[]) if m['id'] in ids]
         jobs=[{'role':j['role'],'output':json.loads(j['output_json']) if j['output_json'] else None}
               for j in store.conn.execute('SELECT role,output_json FROM pipeline_jobs WHERE batch_id=? ORDER BY rowid',(row['batch_id'],))]
@@ -148,6 +317,7 @@ def detail(database,pending_id):
         return {'id':row['id'],'batch_id':row['batch_id'],'status':row['status'],'batch_status':batch['status'],
                 'kind':row['kind'],'reason':row['reason'],'locator':source_locator(messages),
                 'originals':len(messages),'original_chars':sum(len(m['content']) for m in messages),'messages':messages,
+                'closure_receipt':_archive_receipt(store.conn,pending_id),
                 'jobs':jobs,'last_attempt':dict(attempt) if attempt else None,
                 'last_error':dict(error) if error else None}
 
@@ -237,6 +407,31 @@ def finish_adoptions(conn,plans,processed,event_ids):
                          (encode(event_ids),now(),pending_id))
 
 
+def _resumable(conn,pending_id,replan):
+    """Refusals that need no write; shared by the HTTP precheck and resume."""
+    from . import pipeline as p
+    from .pipeline_recovery import _message_key
+    row=conn.execute("SELECT pm.*,b.input_json,b.status AS batch_status,b.rowid AS queue_order,b.result_json AS previous_result FROM pipeline_pending_materials pm JOIN pipeline_batches b ON b.id=pm.batch_id WHERE pm.id=? AND pm.status='open'",(pending_id,)).fetchone()
+    if row is None:raise Conflict('待办已被领取或完成，请刷新')
+    data=json.loads(row['input_json']);ids=set(json.loads(row['source_ids_json']))
+    if not p.runtime_compatible(data) and not replan:raise Conflict('版本已变化，请选择重新切分，不复用旧执行计划')
+    if not ids or not ids.issubset(m['id'] for m in data.get('routing_messages',[])):
+        raise Conflict('待处理原话不在完整冻结快照中')
+    for m in data.get('routing_messages',[]):
+        if m['id'] not in ids:continue
+        raw=conn.execute('SELECT * FROM raw_events WHERE id=?',(m['id'],)).fetchone()
+        if raw is None or _message_key(p.message(raw))!=_message_key(m):raise Conflict('待处理原话已变化')
+        if conn.execute('SELECT 1 FROM raw_processing WHERE raw_id=?',(m['id'],)).fetchone():raise Conflict('待处理原话已结算，不能重复写作')
+    return row,data,ids
+
+
+def check_resume(database,pending_id,*,replan=False):
+    """Refuse an impossible request before it can mark the whole pipeline failed."""
+    from . import pipeline as p
+    p.initialize(database)
+    with Store(database,read_only=True) as store:_resumable(store.conn,pending_id,replan)
+
+
 def resume(database,pending_id,*,replan=False):
     from . import pipeline as p
     p.initialize(database)
@@ -252,16 +447,7 @@ def resume(database,pending_id,*,replan=False):
             from .pipeline_recovery import _rebuild
             return {**_rebuild(database,broken['batch_id'],resume_pending_id=pending_id),'status':'resumed'}
     with Store(database) as store,store.transaction(immediate=True):
-        row=store.conn.execute("SELECT pm.*,b.input_json,b.status AS batch_status,b.rowid AS queue_order,b.result_json AS previous_result FROM pipeline_pending_materials pm JOIN pipeline_batches b ON b.id=pm.batch_id WHERE pm.id=? AND pm.status='open'",(pending_id,)).fetchone()
-        if row is None:raise Conflict('待办已被领取或完成，请刷新')
-        data=json.loads(row['input_json']);ids=set(json.loads(row['source_ids_json']))
-        if data.get('runtime_revision')!=p.runtime_revision() and not replan:raise Conflict('版本已变化，请选择重新切分，不复用旧执行计划')
-        from .pipeline_recovery import _message_key
-        for m in data.get('routing_messages',[]):
-            if m['id'] not in ids:continue
-            raw=store.conn.execute('SELECT * FROM raw_events WHERE id=?',(m['id'],)).fetchone()
-            if raw is None or _message_key(p.message(raw))!=_message_key(m):raise Conflict('待处理原话已变化')
-            if store.conn.execute('SELECT 1 FROM raw_processing WHERE raw_id=?',(m['id'],)).fetchone():raise Conflict('待处理原话已结算，不能重复写作')
+        row,data,ids=_resumable(store.conn,pending_id,replan)
         batch_id=row['batch_id']
         data['resume_pending_id']=pending_id
         if row['batch_status']=='done' or replan:

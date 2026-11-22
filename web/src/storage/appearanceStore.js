@@ -8,7 +8,9 @@ async function result(response) {
 }
 
 export async function loadImages() {
-  return (await result(await fetch(endpoint, {cache: 'no-store'}))).images;
+  return (await result(await fetch(endpoint+'?metadata=1', {
+    cache: 'no-store', signal: AbortSignal.timeout(20_000),
+  }))).images;
 }
 
 function dataUrl(blob) {

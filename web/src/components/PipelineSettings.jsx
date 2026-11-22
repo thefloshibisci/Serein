@@ -2,14 +2,15 @@ import {useEffect,useRef,useState} from 'react';
 import {ConversationImport} from './ConversationImport.jsx';
 import {instanceSettings} from '../storage/instanceStore.js';
 import {PendingMaterials} from './PendingMaterials.jsx';
-
 import {useVisiblePolling} from '../hooks/useVisiblePolling.js';
 
 export function PipelineSettings({onOpenSummary,active=true}) {
   const [task,setTask]=useState(null),[output,setOutput]=useState(''),[status,setStatus]=useState(''),[busy,setBusy]=useState(false);
   const [work,setWork]=useState(null);
   const [limits,setLimits]=useState(null);
-  const mounted=useRef(true),acceptedVersion=useRef(0),rebuildDialog=useRef(null),restoreDialog=useRef(null);
+  const mounted=useRef(true),rebuildDialog=useRef(null),restoreDialog=useRef(null);
+  const acceptedVersion=useRef(0);
+  const confirmedSkippedBatches=useRef(new Set());
   const [rebuildTarget,setRebuildTarget]=useState('');
   const recoveryDialog=useRef(null);
   const [recovery,setRecovery]=useState(null),[recoveryLimit,setRecoveryLimit]=useState('');
@@ -25,7 +26,7 @@ export function PipelineSettings({onOpenSummary,active=true}) {
   const failedBatch=['failed','interrupted'].includes(work?.status)&&work.batch_id&&!holds.some(item=>item.batch_id===work.batch_id)?work.batch_id:null;
   const roleNames={track_router:'归线',event_curator:'切分',event_writer:'Event 写作'};
   const autoMessage=limits?.auto_enabled===false?'自动整理已暂停；手动点击“继续整理”仍可启动任务。'
-    :work?.pending_materials?.some(item=>['open','running'].includes(item.status))?'自动整理已开启；有材料留在下方待处理区，独立的新材料可继续整理。'
+    :work?.pending_materials?.some(item=>['open','running'].includes(item.status))?'自动整理已开启；下方待处理材料可继续整理，或只保留原话并结束。也可以让已连接 MCP 的助手处理。'
     :work?.auto_boundary_originals>0?`自动整理已开启，但 ${work.auto_boundary_originals} 条旧原话在启用边界外，需要手动恢复。`
     :work?.status==='awaiting_agent'?'自动整理已开启，当前等待 Agent 领取任务。'
     :work?.status==='failed'||work?.status==='paused'||needsRepair?'自动整理已开启，当前批次需要处理下方的失败原因。'
@@ -35,19 +36,32 @@ export function PipelineSettings({onOpenSummary,active=true}) {
     :work?.execution_mode==='agent'?'自动整理已开启，当前为 Agent 模式；点击“继续整理”可创建任务，等待 Agent 领取。'
     :work?.stage==='settled_today'?'今天的自动检查已完成；新原话会在下一轮检查。'
     :'自动整理已开启；后台在每天 03:00 后检查新原话。要立即运行可点击“继续整理”。';
-  const stages={paused:'本批已暂停',idle:'尚未开始',queued:'等待后台处理',starting:'正在准备',track_router:'归线',event_curator:'切分整理',event_writer:'Event 写作',awaiting_agent:'等待 Agent',processed:'本批处理完成',current:'本轮检查完成',retained:'已移入待处理材料',needs_repair:'归线材料待修复',rebuilt:'计划已重建',blocked:'部分聊天等待处理',retry_wait:'等待有限重试'};
+  const stages={archived_only:'已结束整理，原话保留',skipped_batch:'已跳过本批，原话保留',paused:'本批已暂停',idle:'尚未开始',queued:'等待后台处理',starting:'正在准备',track_router:'归线',event_curator:'切分整理',event_writer:'Event 写作',awaiting_agent:'等待 Agent',processed:'本批处理完成',current:'本轮检查完成',retained:'已移入待处理材料',needs_repair:'归线材料待修复',rebuilt:'计划已重建',blocked:'部分聊天等待处理',retry_wait:'等待有限重试'};
   async function call(action,body) {
     const response=await fetch('/__serein/pipeline/'+action,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const result=await response.json();
     if(!response.ok)throw new Error(result.detail || '整理暂未完成，原话会保留，请稍后重试。');
     return result;
   }
-  function accept(result){acceptedVersion.current++;setWork(result);setTask(result.status==='awaiting_agent'?result.result:null);}
+  function accept(result){
+    const skipped=confirmedSkippedBatches.current;
+    const current={...result,
+      pending_materials:(result.pending_materials||[]).map(item=>skipped.has(item.batch_id)?{...item,status:'resolved_skipped'}:item),
+      blocked_scopes:(result.blocked_scopes||[]).filter(item=>!skipped.has(item.batch_id)),
+      paused_batches:(result.paused_batches||[]).filter(item=>!skipped.has(item.batch_id))};
+    // Skipping is terminal even if the follow-up refresh fails or an old poll
+    // still contains the previous hold. Other batches keep their own state.
+    if(!['queued','running'].includes(current.status)&&skipped.has(current.batch_id||current.result?.batch_id)){
+      current.status='idle';current.stage='current';current.result=null;current.batch_id=null;current.error='';
+    }
+    if(current.status==='blocked'&&!current.blocked_scopes.length&&!current.paused_batches.length){current.status='idle';current.stage='current';}
+    acceptedVersion.current++;setWork(current);setTask(current.status==='awaiting_agent'?current.result:null);
+  }
   useEffect(()=>{
     mounted.current=true;
     instanceSettings().then(value=>{if(mounted.current){setLimits(value.pipeline);}}).catch(error=>{if(mounted.current)setStatus(error.message);});
     const saved=event=>setLimits(event.detail.pipeline);window.addEventListener('serein:settings-saved',saved);
-    return()=>{window.removeEventListener('serein:settings-saved',saved);mounted.current=false;};
+    return()=>{mounted.current=false;window.removeEventListener('serein:settings-saved',saved);};
   },[]);
   useVisiblePolling(active,2000,async current=>{
     const version=acceptedVersion.current;
@@ -138,6 +152,12 @@ export function PipelineSettings({onOpenSummary,active=true}) {
       recoveryDialog.current.close();setRecovery(null);setTask(null);setOutput('');
       const message=skip?`已跳过本批 ${result.skipped_originals} 条原话的 Event 整理，原文保留。`:`已拆成 ${result.batches} 批，旧计划与模型结果保留。`;
       setStatus(message);
+      if(skip){
+        confirmedSkippedBatches.current.add(recovery.preview.batch_id);accept(work);
+        try{accept(await call('status'));}
+        catch{setStatus(message+' 列表同步暂未完成，可刷新查看。');}
+        return;
+      }
       try {accept(await call('next',{include_recent:true}));setStatus(message+'后台继续整理。');}
       catch(error){accept(await call('status'));setStatus(message+'后续任务未启动：'+error.message);}
     }catch(error){setStatus(error.message);}finally{setBusy(false);}
@@ -166,14 +186,13 @@ export function PipelineSettings({onOpenSummary,active=true}) {
     <p>归线 → 切分与转录 → Event 写作。在“自动摘要管理”页选择执行方式、三阶段模型和整理参数。Scene 由聊天中的 agent 主动写。</p></div>
     <ConversationImport active={active} onImported={()=>setStatus('原话已导入。点击继续整理，进入下一步。')} />
     {limits&&<p>{autoMessage}</p>}
+    {work?.last_request_rejection&&<p>上次恢复请求未执行：旧计划版本不兼容，可在待处理材料中重新整理。</p>}
     {work?.auto_boundary_originals>0&&<p>有 {work.auto_boundary_originals} 条原话在开启自动整理时被划到边界外。它们仍保存在原话档案中，点击“继续整理”不会处理这些原话。<button type="button" disabled={busy||running} onClick={()=>restoreDialog.current.showModal()}>恢复并整理这批原话</button></p>}
     <button type="button" className="settings-link" onClick={onOpenSummary}>自动摘要管理</button>
     {work&&<div aria-live="polite"><p>当前阶段：{stages[work.stage]||work.stage} · 本批已完成 {work.completed||0} 个步骤 · 已保存 {work.events??work.result?.events??0} 条 Event</p>
       {work.prompt_chars>0&&<p>本次提示词 {work.prompt_chars} 字符 · 超时 {work.timeout_seconds} 秒 · 第 {work.attempt||1} 次尝试</p>}
       {work.status==='interrupted'&&<p>任务已中断，可以继续。</p>}
       {work.result?.note&&<p>{work.result.note}</p>}
-      {work.result?.pending>0&&<p>本批仍有 {work.result.pending} 条原话等待后续处理。</p>}
-      {work.result?.deferred>0&&<p>暂缓 {work.result.deferred} 条原话；其中 {work.result.protected_deferrals?.length||0} 条事件提案涉及已有内容保护。可对照原话与已有事件人工处理。</p>}
       {curatorOmissions.map((item,index)=><p key={index} className="import-error">Curator {item.reason==='curator_omission_dependency'?'所在范围与漏项共享原话，已一起留待下轮':'未说明原话去向，已将所在审阅范围留待下轮'}：{item.missing_source_message_ids.join('、')}。本轮没有将这些原话标为跳过。</p>)}
       {candidateOverflows.map(item=><p key={item.track_id} className="import-error">Track <code>{item.track_id}</code> 有 {item.eligible_active_leaf_count} 条 active Event leaves，超过上限 {item.limit}；本批未调用 Curator 或 Writer。请先归档误归线或不再需要的 Event，或人工安全合并相关 leaves。</p>)}
       {work.result?.skipped>0&&<p>本批跳过 {work.result.skipped} 条原话，原始记录仍保留。</p>}
@@ -235,6 +254,6 @@ export function PipelineSettings({onOpenSummary,active=true}) {
       <p>将 {work?.auto_boundary_originals||0} 条原话重新放入待整理池，并启动一次后台整理。后续模型调用可能产生费用；已结算和主动跳过的原话不会重跑。</p>
       <div className="settings-actions"><button type="button" onClick={()=>restoreDialog.current.close()}>取消</button><button type="button" disabled={busy||running} onClick={restoreBoundary}>确认恢复并整理</button></div>
     </dialog>
-    <PendingMaterials work={work} onChange={accept}/>
+    <PendingMaterials active={active} work={work} onChange={accept}/>
     <p role="status">{status}</p></section>;
 }

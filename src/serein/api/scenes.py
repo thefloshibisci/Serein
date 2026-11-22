@@ -119,6 +119,24 @@ def routes(settings,services,auth):
                     edges.append({**edge,'source':row['source_scene_id'],'target':row['target_scene_id'],'graph_scope':'scene'})
             return {'status':'ok','source':'Serein SQLite live','snapshotId':digest(json.dumps(items,sort_keys=True)), 'scenes':items,'edges':edges}
 
+    @router.post('/api/authored-types')
+    def feeling_action(body: dict):
+        from ..core.feelings import Feelings
+        feelings = Feelings(settings.database)
+        actions = {'read_feel': feelings.read}
+        if settings.writable:
+            actions['edit_feel'] = feelings.edit
+        name = body.get('tool')
+        if not isinstance(name, str) or name not in actions:
+            raise HTTPException(404, 'Feeling action unavailable')
+        args = body.get('arguments', {})
+        if not isinstance(args, dict):
+            raise HTTPException(422, 'Expected action arguments')
+        try:
+            return actions[name](**args)
+        except TypeError as error:
+            raise HTTPException(422, 'Invalid feeling action arguments') from error
+
     @router.post('/v1/tools/call')
     async def call_tool(body: dict):
         name=body.get('name');args=body.get('arguments') or {}

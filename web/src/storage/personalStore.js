@@ -12,6 +12,7 @@ async function request(path, body) {
     method: body === undefined ? "GET" : "POST",
     headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(20_000),
   });
   const result = await response.json();
   if (!response.ok) throw new Error(response.status === 409

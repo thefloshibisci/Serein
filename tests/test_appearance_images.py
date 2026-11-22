@@ -62,3 +62,24 @@ def test_read_only_instance_can_read_but_not_replace(instance):
     client = TestClient(create_app(readonly, token='synthetic'), headers={'Authorization':'Bearer synthetic'})
     assert client.get('/v1/appearance/images').json()['images']['hero'] == PNG
     assert client.put('/v1/appearance/images/hero', json={'data_url':GIF}).status_code == 403
+
+
+def test_light_manifest_and_versioned_independent_images(instance):
+    import hashlib
+    settings, client = instance
+    for key, value in [('user', PNG), ('hero', GIF)]:
+        assert client.put('/v1/appearance/images/'+key, json={'data_url':value}).status_code == 200
+    manifest = client.get('/v1/appearance/images?metadata=true')
+    assert manifest.headers['cache-control'] == 'no-store'
+    assert manifest.json()['images'] == {key: hashlib.sha256(value.encode()).hexdigest()
+                                         for key, value in [('user', PNG), ('hero', GIF)]}
+    assert 'data:image' not in manifest.text
+    version = manifest.json()['images']['user']
+    assert client.get('/v1/appearance/images/user?version='+version).json() == {'data_url':PNG, 'version':version}
+    assert client.get('/v1/appearance/images/assistant').status_code == 404
+    anonymous = TestClient(create_app(settings, token='synthetic', live=True))
+    assert anonymous.get('/v1/appearance/images/user?version='+version).status_code == 401
+    client.put('/v1/appearance/images/user', json={'data_url':GIF})
+    assert client.get('/v1/appearance/images/user?version='+version).status_code == 404
+    assert client.get('/v1/appearance/images?metadata=true').json()['images']['user'] != version
+    assert client.get('/v1/appearance/images/hero').json()['data_url'] == GIF

@@ -29,7 +29,7 @@ import {
 } from "../storage/recallObservationPagination.js";
 import { readRecallSimulationTrainingLabels } from "../storage/recallSimulationTraining.js";
 import { initializePersonal, loadPersonalScope } from "../storage/personalStore.js";
-import { resolveBridgeObservationOutcome, resolveGatewayObservationOutcome, gatewayRequestLabel } from "../recallObservationOutcome.js";
+import { resolveBridgeObservationOutcome, resolveGatewayObservationOutcome, gatewayRequestLabel, hostObservationDetails } from "../recallObservationOutcome.js";
 
 const snapshotRouteLabels = Object.fromEntries(
   semanticRouteSnapshot.routes.map((route) => [route.name, route.label || route.name]),
@@ -42,7 +42,7 @@ const outcomeLabels = {
   injected: "已注入",
   no_match: "未命中",
   skip: "已跳过",
-  failed: "失败／中断",
+  failed: "召回／回复异常",
   pending: "未完成",
 };
 
@@ -181,6 +181,7 @@ function normalizeBridgeObservation(row, routeActions = snapshotRouteActions) {
     trigger,
     hookOutcome,
     messageId: row?.id,
+    ...hostObservationDetails(row),
   };
 }
 
@@ -215,7 +216,6 @@ export function BasementRecallObservation() {
   const draftRevisionRef = useRef(0);
   const rootRef = useRef(null);
   const bottomRef = useRef(null);
-  const [reviewsReady, setReviewsReady] = useState(false);
   const [source, setSource] = useState("gateway");
   const [filter, setFilter] = useState("all");
   const [reviews, setReviews] = useState(readRecallObservationReviews);
@@ -225,7 +225,7 @@ export function BasementRecallObservation() {
   const [manualSimulations, setManualSimulations] = useState(readRecallSimulationTrainingLabels);
 
   const { feeds, refresh: load, loadEarlier, reveal } = useRecallObservationFeed({
-    source, reviews, ready: reviewsReady, rootRef, bottomRef,
+    source, reviews, ready: true, rootRef, bottomRef,
   });
   const datasets = useMemo(() => ({ hook: feeds.hook.rows, gateway: feeds.gateway.rows }), [feeds]);
   const errors = useMemo(() => Object.fromEntries(Object.entries(feeds).filter(([, feed]) => feed.error).map(([key, feed]) => [key, feed.error])), [feeds]);
@@ -234,8 +234,7 @@ export function BasementRecallObservation() {
   }])), [feeds]);
   const pageLoading = { hook: feeds.hook.loadingEarlier, gateway: feeds.gateway.loadingEarlier };
   const refreshing = feeds[source].loading;
-  const status = !reviewsReady || (!feeds.hook.loaded && !feeds.gateway.loaded && !Object.keys(errors).length)
-    ? 'loading' : feeds.hook.loaded || feeds.gateway.loaded ? 'done' : 'error';
+  const status = feeds[source].loaded ? 'done' : errors[source] ? 'error' : 'loading';
 
   useEffect(() => {
     let cancelled = false;
@@ -247,7 +246,7 @@ export function BasementRecallObservation() {
         window.localStorage.setItem('serein.basement.recall-observation-review.v1', JSON.stringify(Object.fromEntries(rows.map(row => [row.key, row.value]))));
         setManualSimulations(readRecallSimulationTrainingLabels());
       } catch (error) { if (!cancelled) setExportNotice(error.message); }
-      if (!cancelled) { setReviews(readRecallObservationReviews()); setReviewsReady(true); }
+      if (!cancelled) setReviews(readRecallObservationReviews());
     })();
     return () => { cancelled = true; };
   }, []);
@@ -533,14 +532,14 @@ export function BasementRecallObservation() {
           ["no_match", "未命中", counts.no_match],
           ["skip", "已跳过", counts.skip],
           ["pending", "进行中／未完成", counts.pending],
-          ["failed", "失败／中断", counts.failed],
+          ["failed", "召回／回复异常", counts.failed],
           ["all", "全部", items.length],
         ].map(([key, label, count]) => (
           <button type="button" className={filter === key ? "is-active" : ""} key={key} onClick={() => setFilter(key)}>
             {label}<span>{count}</span>
           </button>
         ))}
-        <p>{source === "hook" ? "这里显示 Hook 的完成记录；按实际结果区分已注入、未命中与跳过，不代表客户端已显示回复。" : "当前来源每次加载 20 条，页面可见时自动更新；失败和中断不计成功交付，迁入的旧记录标为历史记录。"}</p>
+        <p>{source === "hook" ? "这里显示 APP 及其他 Hook 客户端上报的召回结果；候选记忆与确认交付分别展示，失败和中断不计成功交付。" : "当前来源每次加载 20 条，页面可见时自动更新；失败和中断不计成功交付，迁入的旧记录标为历史记录。"}</p>
       </div>
 
       {feeds[source].buffered.length > 0 && (
@@ -560,7 +559,7 @@ export function BasementRecallObservation() {
       {status === "error" && (
         <div className="basement-error" role="alert">
           <WarningCircle size={19} aria-hidden="true" />
-          <div><strong>两个观测入口都没有读到</strong><p>{Object.values(errors).join(" / ")}</p></div>
+          <div><strong>{sourceLabels[source]}暂时不可用</strong><p>{errors[source]}</p></div>
         </div>
       )}
 
@@ -585,7 +584,8 @@ export function BasementRecallObservation() {
         <div className="observation-list">
           {filteredItems.map((item) => {
             const review = reviews[item.id] || {};
-            const preparationOnly = item.source === 'gateway' && ['failed','pending'].includes(item.outcome);
+            const preparationOnly = ['failed','pending'].includes(item.outcome) ||
+              (item.source === 'hook' && item.outcome === 'skip' && item.prepared?.length > 0);
             const memories = preparationOnly ? item.prepared : item.injected;
             const showDraft = ["false_positive", "missed"].includes(review.verdict);
             const form = draftForms[item.id] || { routeName: "", role: "typical" };
@@ -597,10 +597,11 @@ export function BasementRecallObservation() {
                     <h3>{item.query}</h3>
                     {item.requestLabel && <p className="observation-request-status">{item.requestLabel}</p>}
                   </div>
-                  <span className={`observation-outcome observation-outcome--${item.outcome}`}>{outcomeLabels[item.outcome]}</span>
+                  <span className={`observation-outcome observation-outcome--${item.outcome}`}>{item.recallLabel || outcomeLabels[item.outcome]}</span>
                 </header>
 
                 <dl className="observation-route-facts">
+                  {item.replyLabel && <div><dt>聊天回复</dt><dd>{item.replyLabel}</dd></div>}
                   <div><dt>Router 路线</dt><dd>{item.route ? publishedRouteLabels[item.route] || item.route : "未记录／本次未执行"}</dd></div>
                   <div><dt>{item.source === "hook" ? "Gateway trigger" : "动作"}</dt><dd>{item.source === "hook" ? item.trigger || "未记录" : item.action || "未执行"}</dd></div>
                   <div><dt>{item.source === "hook" ? "Hook outcome" : "置信度"}</dt><dd>{item.source === "hook" ? item.hookOutcome || "未记录" : item.confidence || "未记录"}</dd></div>

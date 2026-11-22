@@ -801,7 +801,7 @@ function sereinMemoryBridge() {
         response.setHeader("Content-Type","application/json; charset=utf-8");
         response.setHeader("Cache-Control","no-store");
         const action=request.url?.split("?")[0];
-          if(!(request.method==="GET" && (action==="/status" || /^\/(?:attempts|pending)\/\d+$/.test(action))) && !(request.method==="POST" && ["/next","/submit","/rebuild","/retry-image","/retry-batch","/restore-auto-boundary","/recovery-preview","/skip-batch","/rebatch","/resume-pending"].includes(action))) {
+          if(!(request.method==="GET" && (action==="/status" || /^\/(?:attempts|pending)\/\d+$/.test(action))) && !(request.method==="POST" && ["/next","/submit","/rebuild","/retry-image","/retry-batch","/restore-auto-boundary","/recovery-preview","/skip-batch","/rebatch","/resume-pending","/archive-pending"].includes(action))) {
           response.statusCode=405;response.end(JSON.stringify({error:"method_not_allowed"}));return;
         }
         if(request.method==="POST" && (!String(request.headers["content-type"]).startsWith("application/json") ||
@@ -815,6 +815,22 @@ function sereinMemoryBridge() {
           },{timeout:30_000});
           response.statusCode=result.status;response.end(JSON.stringify(result.payload));
         } catch {response.statusCode=502;response.end(JSON.stringify({error:"pipeline_unavailable"}));}
+      });
+      server.middlewares.use("/__serein/originals", async (request,response)=>{
+        response.setHeader("Content-Type","application/json; charset=utf-8");
+        response.setHeader("Cache-Control","no-store");
+        const action=request.url?.split("?")[0];
+        if(request.method!=="POST" || !["/search","/read","/upload","/delete-preview","/delete"].includes(action)){
+          response.statusCode=405;response.end(JSON.stringify({error:"method_not_allowed"}));return;
+        }
+        try {
+          if(!String(request.headers["content-type"]).startsWith("application/json") ||
+             (request.headers.origin && new URL(request.headers.origin).host!==request.headers.host)){
+            response.statusCode=403;response.end(JSON.stringify({error:"origin_not_allowed"}));return;
+          }
+          const result=await callSereinBackend('/v1/originals'+action,{method:'POST',body:await readJsonBody(request,1_000_000)});
+          response.statusCode=result.status;response.end(JSON.stringify(result.payload));
+        }catch{response.statusCode=502;response.end(JSON.stringify({detail:"原话操作未完成，请刷新确认状态后再试。"}));}
       });
       server.middlewares.use("/__serein/imports", async (request,response)=>{
         response.setHeader("Content-Type","application/json; charset=utf-8");
@@ -834,6 +850,24 @@ function sereinMemoryBridge() {
           },{timeout:120_000});
           response.statusCode=result.status;response.end(JSON.stringify(result.payload));
         } catch {response.statusCode=502;response.end(JSON.stringify({error:"import_unavailable"}));}
+      });
+      server.middlewares.use("/__serein/authored-types", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.setHeader("Cache-Control", "no-store");
+        if (request.method !== "POST" || !String(request.headers["content-type"]).startsWith("application/json")) {
+          response.statusCode=405; response.end(JSON.stringify({detail:"method_not_allowed"})); return;
+        }
+        if (request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) {
+          response.statusCode=403; response.end(JSON.stringify({detail:"origin_not_allowed"})); return;
+        }
+        try {
+          const body=await readJsonBody(request,500_000);
+          if (!['read_feel','edit_feel'].includes(body.tool)) {
+            response.statusCode=404; response.end(JSON.stringify({detail:"tool_not_available"})); return;
+          }
+          const result=await callSereinBackend('/api/authored-types',{method:'POST',body});
+          response.statusCode=result.status; response.end(JSON.stringify(result.payload));
+        } catch { response.statusCode=502; response.end(JSON.stringify({detail:"连接暂不可用，请刷新确认当前内容后重试。"})); }
       });
       server.middlewares.use("/__serein/companion", async (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");

@@ -19,11 +19,13 @@ dom.window.HTMLDialogElement.prototype.showModal=function(){this.setAttribute('o
 dom.window.HTMLDialogElement.prototype.close=function(){this.removeAttribute('open');};
 const interval=globalThis.setInterval,clear=globalThis.clearInterval;
 const keepAlive=interval(()=>{},1000);
-globalThis.setInterval=()=>1;globalThis.clearInterval=()=>{};
-let state,root,recoveryBusy=false,unsplittable=false;
+const polls=new Map();let timerId=0;
+globalThis.setInterval=callback=>{polls.set(++timerId,callback);return timerId;};globalThis.clearInterval=id=>polls.delete(id);
+let state,root,recoveryBusy=false,unsplittable=false,statusResponse=null;
 const requests=[];
 globalThis.fetch=async(url,options={})=>{
   requests.push({url,body:options.body?JSON.parse(options.body):null});
+  if(url.endsWith('/status')&&statusResponse)return statusResponse();
   let result=state;
   if(url.endsWith('/recovery-preview')){
     const body=JSON.parse(options.body),limit=body.max_input_chars||5000;
@@ -54,7 +56,7 @@ const button=text=>[...document.querySelectorAll('button')].find(node=>node.text
 async function render(value){
   if(root)await act(async()=>{root.unmount();root=null;await wait();});
   state=value;requests.length=0;
-  recoveryBusy=false;unsplittable=false;
+  recoveryBusy=false;unsplittable=false;statusResponse=null;
   await act(async()=>{root=mount();await wait();});
 }
 async function click(node){assert(node,'button exists');assert(!node.disabled);await act(async()=>{node.click();await wait();});}
@@ -62,6 +64,15 @@ function held(kind='routing_evidence'){
   return {status:'needs_repair',stage:'needs_repair',result:{status:'needs_repair',batch_id:'batch-synthetic',repair_kind:kind,reason:'synthetic hold'},
     blocked_scopes:[{batch_id:'batch-synthetic',scope:'synthetic',hold_status:'needs_repair',repair_kind:kind,reason:'synthetic hold'}]};
 }
+
+test('a rejected old-plan request is explained without showing a pipeline failure',async()=>{
+  await render({status:'idle',stage:'idle',last_request_rejection:'版本已变化，请选择重新切分，不复用旧执行计划',pending_materials:[]});
+  assert.match(document.body.textContent,/上次恢复请求未执行：旧计划版本不兼容，可在待处理材料中重新整理/);
+  assert(!document.body.textContent.includes('当前批次需要处理下方的失败原因'));
+  assert.equal(document.querySelectorAll('.import-error').length,0);
+  assert.equal(button('继续整理').disabled,false);
+  assert(!requests.some(item=>item.body));
+});
 
 test('runtime contract explains the hold and requires explicit rebuild confirmation',async()=>{
   await render(held('runtime_contract'));
@@ -106,7 +117,7 @@ test('each runtime hold is explained when ordinary and runtime repairs coexist',
 
 function paused(){return {status:'blocked',stage:'blocked',paused_batches:[{batch_id:'paused-synthetic',reason:'synthetic failure'}],
   blocked_scopes:[{batch_id:'paused-synthetic',scope:'synthetic',hold_status:'paused_failure'}]};}
-test('skipping previews the exact scope, cancellation is harmless, and confirmation continues work',async()=>{
+test('skipping previews the exact scope, cancellation is harmless, and confirmation does not start more work',async()=>{
   await render(paused());
   await click(button('跳过本批，保留原话'));
   assert.match(document.querySelector('#pipeline-recovery-title').closest('dialog').textContent,/8 条未整理原话，共 16000 字符/);
@@ -116,8 +127,45 @@ test('skipping previews the exact scope, cancellation is harmless, and confirmat
   await click(button('跳过本批，保留原话'));
   await click(button('确认跳过本批'));
   assert.deepEqual(requests.find(item=>item.url.endsWith('/skip-batch')).body,{batch_id:'paused-synthetic',confirm:'SKIP_PIPELINE_BATCH'});
-  assert(requests.some(item=>item.url.endsWith('/next')));
+  assert(!requests.some(item=>item.url.endsWith('/next')));
   assert.match(document.body.textContent,/已跳过本批 8 条原话/);
+});
+
+function pendingFor(batch_id,id){return {id,batch_id,status:'open',kind:'writing',reason:'Synthetic retained material',summary:'Synthetic',
+  originals:2,original_chars:100,can_skip:true,resolved_event_ids:[]};}
+test('the pending section counts unfinished items instead of historical deferred totals',async()=>{
+  await render({status:'idle',stage:'processed',result:{pending:999,deferred:998},pending_materials:[
+    pendingFor('ordinary',17),{...pendingFor('short-chat',18),waiting_for_continuation:true},
+    {...pendingFor('finished',19),status:'archived_only'}]});
+  assert.match(document.body.textContent,/有 2 批材料待处理/);
+  assert.match(document.body.textContent,/已连接 MCP 的助手处理/);
+  assert.equal(document.querySelectorAll('.pending-material').length,2);
+  for(const text of ['999','998','暂缓','等待后续处理','已处理记录','等后续的对话'])assert(!document.body.textContent.includes(text));
+});
+test('a delayed pre-skip poll cannot restore the completed batch or remove unrelated work',async()=>{
+  const stale={...paused(),pending_materials:[pendingFor('paused-synthetic',17),pendingFor('other',18)]};
+  await render(stale);
+  let releasePoll;
+  statusResponse=()=>{statusResponse=null;return new Promise(resolve=>{releasePoll=()=>resolve({ok:true,json:async()=>structuredClone(stale)});});};
+  await act(async()=>{[...polls.values()][0]();await wait();});
+  await click(button('跳过本批，保留原话'));await click(button('确认跳过本批'));
+  await act(async()=>{releasePoll();await wait();});
+  assert.deepEqual([...document.querySelectorAll('.pending-material')].map(node=>node.getAttribute('aria-label')),['待办 18']);
+  assert(!document.body.textContent.includes('本批已暂停：synthetic failure'));
+  assert.match(document.body.textContent,/已跳过本批 8 条原话/);
+  assert(!requests.some(item=>item.url.endsWith('/next')));
+});
+
+test('a confirmed skip remains finished when refreshing the list fails',async()=>{
+  await render({...paused(),pending_materials:[pendingFor('paused-synthetic',17),pendingFor('other',18)]});
+  await click(button('跳过本批，保留原话'));
+  statusResponse=async()=>({ok:false,json:async()=>({detail:'Synthetic status failure'})});
+  await click(button('确认跳过本批'));
+  assert(!document.querySelector('dialog[aria-labelledby="pipeline-recovery-title"]').open);
+  assert.deepEqual([...document.querySelectorAll('.pending-material')].map(node=>node.getAttribute('aria-label')),['待办 18']);
+  assert.match(document.body.textContent,/已跳过本批 8 条原话.*列表同步暂未完成/);
+  assert(!requests.some(item=>item.url.endsWith('/next')));
+  statusResponse=null;
 });
 test('rebatching requires a fresh preview after editing the scoped input limit',async()=>{
   await render(paused());

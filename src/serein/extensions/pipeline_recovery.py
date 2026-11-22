@@ -100,7 +100,7 @@ def _frames(database, batch):
         and bool(jobs) and all('routing_frame' in json.loads(row['request_json']) for row in jobs))
     current_revision = p.runtime_revision()
     if (original.get('contract') != p.CONTRACT
-            or (original.get('runtime_revision') != current_revision
+            or (not p.runtime_compatible(original)
                 and not published_replay
                 and not (legacy_compacted and original.get('runtime_revision') in COMPACTED_ROUTER_REVISIONS))
             or original.get('scope') != batch['scope']):

@@ -29,6 +29,7 @@ export function useRecallObservationFeed({ source, reviews, ready, rootRef, bott
   const controllerRef = useRef(null);
   const currentRef = useRef({ source, reviews });
   const anchorRef = useRef(null);
+  const previousReviews = useRef(reviews);
   currentRef.current = { source, reviews };
 
   useLayoutEffect(() => {
@@ -66,6 +67,12 @@ export function useRecallObservationFeed({ source, reviews, ready, rootRef, bott
     for (const key of observationSources) controller.refresh(key);
     return () => { controller.dispose(); controllerRef.current = null; anchorRef.current = null; };
   }, [ready, rootRef]);
+
+  useEffect(() => {
+    if (previousReviews.current === reviews) return;
+    previousReviews.current = reviews;
+    for (const key of observationSources) controllerRef.current?.refreshReviewed(key);
+  }, [reviews]);
 
   // Only poll while this component and browser tab are visible. A recursive
   // timer and the feed's per-source lock prevent overlapping network reads.

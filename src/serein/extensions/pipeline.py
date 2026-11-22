@@ -43,6 +43,15 @@ def runtime_revision():
     return digest(encode({'contract':CONTRACT,'code':code,'rules':role_rules}))
 
 
+# Source revocation checks preserve the previous frozen request format.
+PREVIOUS_UI_RUNTIME = 'c6b90fb9b53e2c17bb321a4aebcef5ba0b93c4f2e12068e0eed04b42cc35fcf6'
+
+
+def runtime_compatible(data):
+    return data.get('contract') == CONTRACT and data.get('runtime_revision') in (
+        runtime_revision(), PREVIOUS_UI_RUNTIME)
+
+
 class PausedBatch(ValueError):
     pass
 
@@ -90,6 +99,8 @@ def initialize(database):
                   ON b.upload_id=json_extract(m.value,'$.metadata.import_upload_id') AND b.released=0)""")
         # A code upgrade is not permission to rebuild frozen work or reset its
         # failure budget. Retain requests, outputs, provenance and existing holds.
+        from ..pipeline_source_guard import invalidate_deleted
+        invalidate_deleted(store.conn)
         pending_materials.retain_legacy_batches(store.conn)
         compact_completed_snapshots(store)
         expire_completed_media(store)
@@ -253,7 +264,7 @@ def new_batch(database,include_recent,clock=None,*,retry_repair=False):
                     "AND json_array_length(result_json,'$.attempted_source_message_ids')>0",
                     (scope,watermark.date().isoformat())):
                 frozen=json.loads(previous['input_json'])
-                if frozen.get('runtime_revision')!=runtime_revision() or frozen.get('input_policy')!=policy:
+                if not runtime_compatible(frozen) or frozen.get('input_policy')!=policy:
                     continue
                 receipt=json.loads(previous['result_json'])
                 attempted_today.update(receipt['attempted_source_message_ids'])
@@ -1239,6 +1250,8 @@ def _submit(database,job_id,output):
         if row is None:raise ValueError('Unknown pipeline job')
         frozen_request=row['request_json'];existing_output=row['output_json'];status=row['status']
     request=hydrate_request_images(database,row['batch_id'],json.loads(frozen_request))
+    from ..pipeline_source_guard import check
+    check(database,request)
     if request['role'] not in ROLES:
         raise ValueError('This pipeline stage is retired; request the next task')
     output=prepare_stage_output(request,output)
@@ -1246,7 +1259,7 @@ def _submit(database,job_id,output):
         latest.canonicalize_claim_group_ids(output)
     encoded_output=encode(output)
     if status.startswith('superseded_'):raise ValueError('任务输入已更新，请重新领取任务；原话和已完成的归线仍保留')
-    if request.get('runtime_revision')!=runtime_revision() or request.get('contract')!=CONTRACT:
+    if not runtime_compatible(request):
         raise ValueError('Frozen runtime contract changed; explicitly rebuild the plan.')
     if existing_output:
         if existing_output!=encoded_output:raise Conflict('This job already has a different result')
@@ -1272,6 +1285,8 @@ def _submit(database,job_id,output):
         if row['output_json']:
             if row['output_json']!=encoded_output:raise Conflict('This job already has a different result')
             return {'status':'unchanged','job_id':job_id}
+        from ..pipeline_source_guard import assert_readable
+        assert_readable(store.conn,request)
         store.conn.execute('UPDATE pipeline_jobs SET output_json=? WHERE id=?',(encoded_output,job_id))
     return {'status':'accepted','job_id':job_id}
 
@@ -1363,6 +1378,8 @@ async def job(database,batch,request,key,runner):
     with Store(database) as store,store.transaction(immediate=True):
         store.conn.execute('INSERT OR IGNORE INTO pipeline_jobs(id,batch_id,role,request_json) VALUES (?,?,?,?)',(identifier,batch['id'],key,encoded_request))
         row=store.conn.execute('SELECT * FROM pipeline_jobs WHERE id=?',(identifier,)).fetchone()
+    from ..pipeline_source_guard import check
+    check(database,json.loads(row['request_json']))
     incoming=request
     current_execution=request['execution']
     request=hydrate_request_images(database,batch['id'],json.loads(row['request_json']))
@@ -1713,6 +1730,9 @@ def settle(database,batch,data,routed,plans):
     result['task_snapshot_compacted']=not bool(remaining)
     encoded_result=encode(result)
     def finish(conn):
+        from ..pipeline_source_guard import assert_readable
+        assert_readable(conn,data)
+        for component,_,_ in plans:assert_readable(conn,component)
         from .pipeline_recovery import record_routes
         record_routes(conn,batch['id'],assignments,preserve_existing=bool(routed.get('recovered_route_sources')))
         for item,detail in zip(items,details):
@@ -1902,7 +1922,9 @@ async def _advance_frozen(database,*,include_recent=False,runner=None,retry_repa
     batch=new_batch(database,include_recent,retry_repair=retry_repair)
     if not batch:return held_result(database) or {'status':'current','note':'No stable dialogue units are ready.'}
     data=json.loads(batch['input_json']);plans=[]
-    if data.get('runtime_revision')!=runtime_revision():
+    from ..pipeline_source_guard import check
+    check(database,data)
+    if not runtime_compatible(data):
         return json.loads(batch['result_json'])
     try:
         if batch['id'].startswith('route:'):
@@ -2065,6 +2087,8 @@ async def _publish_routes(database,batch,data,runner=None):
     output=await route_batch(database,batch,data,runner)
     assignments,updates,_=route_result(data,output)
     with Store(database) as store,store.transaction(immediate=True):
+        from ..pipeline_source_guard import assert_readable
+        assert_readable(store.conn,data)
         validate_routing_result(data,output)
         data['routing_result']=output
         track_state.persist(store.conn,output['track_state_updates'],data['scope'],preserve_newer=True)

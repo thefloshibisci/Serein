@@ -7,6 +7,7 @@ from . import Contributions
 from ..core.store import Store, Conflict, encode, now
 from ..core.reader import Reader
 from ..compat.originals import READABLE, TIME, original_timestamp
+from .handoff_dates import event_time, recent_candidates
 
 
 MAX_ITEMS = 500
@@ -28,7 +29,7 @@ def resume_text(page):
         lines.extend(('', '[material]', *[name+': '+json.dumps(item[name],ensure_ascii=False) for name in
             ('id','kind','section','title','revision','body_offset','body_complete')],
             *[name+': '+json.dumps(item[name],ensure_ascii=False) for name in
-              ('source_system','session_id','source_message_id','role','created_at') if name in item],
+              ('source_system','session_id','source_message_id','role','created_at','date','date_basis','reference_time') if name in item],
             'body:',item['body_md'],'[/material]'))
     if page.get('handoff'):
         lines.extend(('', '[handoff]', page['handoff']['body'], '[/handoff]'))
@@ -115,17 +116,17 @@ def factory(services, options):
                     if key not in existing_ids:
                         doc=obj['document']
                         documents.append({'id':key,'kind':doc['kind'],'section':'selected_memory','title':doc['title'],
-                            'revision':doc['revision'],'body_md':doc['body_md'],'created_at':doc['created_at']})
+                            'revision':doc['revision'],'body_md':doc['body_md'],'created_at':doc['created_at'],
+                            **(event_time(doc['metadata'],doc['created_at'])[1] if doc['kind']=='event' else {})})
                         existing_ids.add(key)
-            events = reader.store.conn.execute("SELECT id FROM documents WHERE kind='event' AND lifecycle='active' "
-                "ORDER BY created_at DESC,id DESC").fetchall()
             recent_events = []
-            for row in (events if selection['recent_events'] else []):
-                obj = reader.read(row['id'], with_evidence=False)
+            for _, key, dates in (recent_candidates(reader.store) if selection['recent_events'] else []):
+                obj = reader.read(key, with_evidence=False)
                 if obj['readable'] and obj.get('document'):
                     doc = obj['document']
-                    recent_events.append({'id':row['id'],'kind':'event','section':'recent_event',
-                        'title':doc['title'],'revision':doc['revision'],'body_md':doc['body_md'],'created_at':doc['created_at']})
+                    recent_events.append({'id':key,'kind':'event','section':'recent_event',
+                        'title':doc['title'],'revision':doc['revision'],'body_md':doc['body_md'],
+                        'created_at':doc['created_at'],**dates})
                     if len(recent_events)==10:break
             favorite_ids={d['id'] for d in documents}
             documents.extend(item for item in reversed(recent_events) if item['id'] not in favorite_ids)

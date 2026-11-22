@@ -7,7 +7,7 @@ import {pathToFileURL,fileURLToPath} from 'node:url';
 import {build,stop} from 'esbuild';
 import {JSDOM} from 'jsdom';
 
-test('settings tabs map to seven slides with one active page',async()=>{
+test('settings tabs map to eight slides with one active page',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'serein-settings-order-'));
   let dom;
   try {
@@ -28,10 +28,11 @@ test('settings tabs map to seven slides with one active page',async()=>{
     dom=new JSDOM(html);
     const tabs=[...dom.window.document.querySelectorAll('[role="tab"]')];
     const slides=[...dom.window.document.querySelectorAll('.settings-panel__body > [role="tabpanel"]')];
-    assert.equal(slides.length,7);
+    assert.equal(slides.length,8);
     assert.equal(slides.filter(panel=>panel.getAttribute('aria-hidden')==='false').length,1);
     assert.deepEqual(tabs.map(tab=>tab.getAttribute('aria-controls')),slides.map(slide=>slide.id));
     assert(tabs.some(tab=>tab.textContent==='自动摘要管理'));
+    assert(tabs.some(tab=>tab.textContent==='原文档案'));
   } finally {
     dom?.window.close();stop();await rm(directory,{recursive:true,force:true});
   }
@@ -72,7 +73,7 @@ test('settings targets actual slides and loads only visited pages',async()=>{
     assert.deepEqual(requests,[],'Opening appearance does not start hidden configuration or import requests');
     const selected=key=>{
       const panels=[...document.querySelectorAll('.settings-panel__body > [role=tabpanel]')];
-      assert.equal(panels.length,7);
+      assert.equal(panels.length,8);
       assert.deepEqual(panels.filter(panel=>panel.getAttribute('aria-hidden')==='false').map(panel=>panel.id),['settings-content-'+key]);
       assert.equal(document.querySelector('[role=tab][aria-selected=true]').id,'settings-tab-'+key);
       for(const panel of panels)assert.equal(panel.hidden,false,'All panels retain layout slots for sliding');
@@ -84,7 +85,7 @@ test('settings targets actual slides and loads only visited pages',async()=>{
     width=254.6;
     await act(async()=>{pages.dispatchEvent(new window.Event('scrollend',{bubbles:true}));});
     assert.equal(pages.scrollLeft,4*width,'A resize during sliding settles at the current panel position');
-    for(const key of ['summary','appearance','models','configuration','features','imports','migration','summary']){
+    for(const key of ['summary','appearance','originals','models','configuration','features','imports','migration','summary']){
       await act(async()=>{document.getElementById('settings-tab-'+key).click();});
       selected(key);
       const index=[...document.querySelectorAll('[role=tab]')].findIndex(item=>item.id==='settings-tab-'+key);
@@ -108,7 +109,7 @@ test('settings targets actual slides and loads only visited pages',async()=>{
     await act(async()=>{window.dispatchEvent(new window.CustomEvent('serein:open-settings-tab',{detail:'summary'}));});
     selected('summary');
     dom.window.matchMedia=()=>({matches:true});
-    await act(async()=>{document.getElementById('settings-tab-imports').click();});
+    await act(async()=>{document.getElementById('settings-tab-originals').click();});
     assert.equal(pages.scrollLeft,5*width,'Reduced motion settles immediately');
     await act(async()=>{pages.dispatchEvent(new window.Event('pointerdown',{bubbles:true}));pages.scrollLeft=width;pages.dispatchEvent(new window.Event('scroll',{bubbles:true}));});
     selected('features');

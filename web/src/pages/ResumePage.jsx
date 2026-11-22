@@ -3,7 +3,7 @@ import {Copy} from '@phosphor-icons/react';
 import {MarkdownProjection} from '../components/MarkdownProjection.jsx';
 import {ResumeSelection} from '../components/ResumeSelection.jsx';
 import {instanceSettings} from '../storage/instanceStore.js';
-import {appendResumePage,resumeMaterials,resumePagesText} from '../utils/resumePages.js';
+import {appendResumePage,resumeDate,resumeMaterials,resumePagesText} from '../utils/resumePages.js';
 import './resume-page.css';
 
 const labels={latest_shadow:'窗影',favorite:'收藏 Scene',selected_memory:'自选记忆',recent_event:'最近事件',recent_original:'最近原话',pending_original:'待整理原话'};
@@ -83,11 +83,11 @@ export function ResumePage({onOpenSettings}) {
         {(dirty||!!pages.length)&&<p className="resume-note">{dirty&&'当前选择尚未保存。 '}{!!pages.length&&<>已读 {items.filter(item=>item.body_complete).length} / {last.total_items} 条 · {pages.length} 页{last.has_more?' · 还有资料':' · 已完整读取'}</>}</p>}
         <div ref={previewBody} className="resume-preview-scroll" tabIndex={0} role="region" aria-label="续接资料正文">
         {previewError?<div className="resume-empty" role="alert"><p>续接资料读取失败</p><span>{previewError}</span><span>可点击上方“重新预览”重试。</span></div>:!pages.length?<div className="resume-empty"><p>一窗结束，另一窗接起。</p><span>{previewing?'正在读取当前选择…':'勾选要带走的内容，预览会自动更新。'}</span></div>:<>
-          <div className="resume-materials">{items.length?items.map(item=><article key={item.id}>
-            <p>{labels[item.section]||item.section}</p><h3>{item.title||'未命名'}</h3><small>{item.id}{item.created_at&&<> · <time dateTime={item.created_at}>{item.created_at.slice(0,10)}</time></>}</small>
+          <div className="resume-materials">{items.length?items.map(item=>{const date=resumeDate(item);return <article key={item.id}>
+            <p>{labels[item.section]||item.section}</p><h3>{item.title||'未命名'}</h3><small>{item.id}{(date.value||date.label)&&<> · {date.label}{date.label&&date.value?' ':''}{date.value&&<time dateTime={date.value}>{date.value}</time>}</>}</small>
             {item.kind==='raw'&&<p className="resume-note">{item.role==='user'?'用户':'助手'}</p>}
             <MarkdownProjection content={item.body_md}/>{!item.body_complete&&<p className="resume-note">这段文字还有下一页。</p>}
-          </article>):<p className="resume-note">当前选择没有可读资料。</p>}</div>
+          </article>;}):<p className="resume-note">当前选择没有可读资料。</p>}</div>
           {pages[0].handoff&&<article className="resume-handoff"><h3>续接便笺</h3><MarkdownProjection content={pages[0].handoff.body}/></article>}
         </>}
         </div>
