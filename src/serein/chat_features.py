@@ -178,3 +178,31 @@ async def evaluate_retreat(database,window_id,query,message,messages,round_id,st
     finally:
         with Store(database) as store,store.transaction(immediate=True):
             store.conn.execute("UPDATE background_state SET value_json=json_set(value_json,'$.running_until',0) WHERE name=? AND json_extract(value_json,'$.token')=?",(key,token))
+
+
+async def uploaded_persona(database, raw_id):
+    """OrangeChat live uploads arrive one message at a time, in archive order."""
+    state = read_settings(database)
+    if not state['features']['persona'] or not task_model(database, 'persona'):
+        return
+    with Store(database) as store, store.transaction(immediate=True):
+        row = store.conn.execute('SELECT session_id, conversation_id FROM raw_events WHERE id=?', (raw_id,)).fetchone()
+        if not row or not row['session_id'].startswith('orangechat:'):
+            return
+        window = row['session_id']
+        history = store.conn.execute('''SELECT role,text AS content FROM raw_events
+            WHERE source='orangechat' AND session_id=? AND conversation_id=? AND id<=?
+            ORDER BY id DESC LIMIT 18''', (window, row['conversation_id'], raw_id)).fetchall()
+        if len(history) < 2 or history[1]['role'] != 'user':
+            return
+        turns = conversation_turns([dict(r) for r in reversed(history)])
+        if not turns or turns[-1]['assistant_text'] != history[0]['content']:
+            return
+        key = 'orangechat_persona_round:' + window
+        n = store.conn.execute('''INSERT INTO background_state(name,value_json) VALUES (?, '1')
+            ON CONFLICT(name) DO UPDATE SET value_json=CAST(value_json AS INTEGER)+1
+            RETURNING value_json''', (key,)).fetchone()[0]
+    engine = persona_engine(database, 'persona', state)
+    if int(n) % engine.evaluation_interval_rounds == 0:
+        await engine.update_from_exchange(window, turns[-1]['user_text'], turns[-1]['assistant_text'],
+                                          recent_conversation_turns=turns)

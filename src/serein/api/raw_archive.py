@@ -1,6 +1,6 @@
 """Raw dialogue ingestion and lookup used by the existing Bridge queue."""
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from ..compat.raw_archive import raw_archive
 from ..compat.germany.raw_ingest import _raw_ingest_events_from_body
@@ -36,14 +36,20 @@ def routes(settings, auth):
         except Conflict as error: raise HTTPException(409,str(error)) from None
 
     @router.post('/api/ingest-raw')
-    def ingest(body: dict, request: Request):
+    def ingest(body: dict, request: Request, background_tasks: BackgroundTasks):
         session = request.headers.get('X-Serein-Session-Id', '').strip()
         events = _raw_ingest_events_from_body(body, default_session_id=session, default_conversation_id=session)
         if not events:
             raise HTTPException(400, 'missing events')
         if len(events)>archive.max_ingest_batch:
             raise HTTPException(413, f'At most {archive.max_ingest_batch} original messages per request; split larger imports')
-        return archive.ingest(events, source=str(body.get('source') or 'raw'))
+        result = archive.ingest(events, source=str(body.get('source') or 'raw'))
+        from ..chat_features import uploaded_persona
+        for item in result['items']:
+            if (item['status'] == 'inserted' and item['source'] == 'orangechat'
+                    and item['role'] == 'assistant'):
+                background_tasks.add_task(uploaded_persona, settings.database, item['id'])
+        return result
 
     @router.api_route('/api/search-raw', methods=['GET', 'POST'])
     async def search(request: Request):

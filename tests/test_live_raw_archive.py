@@ -42,4 +42,23 @@ def test_transplant_preserves_ids_source_rows_and_search(tmp_path):
     assert migrated.search('风铃')['items'] == archive.search('风铃')['items']
     assert migrated.ingest([record], source='original')['duplicate'] == 1
     with closing(sqlite3.connect(target)) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 9
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 10
+
+
+def test_orangechat_persona_counts_new_pairs_per_window(live, monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+    from serein import chat_features as f
+    _, client = live
+    engine = Mock(evaluation_interval_rounds=3, update_from_exchange=AsyncMock())
+    monkeypatch.setattr(f, 'read_settings', lambda db: {'features': {'persona': True}})
+    monkeypatch.setattr(f, 'task_model', lambda *args: True)
+    monkeypatch.setattr(f, 'persona_engine', lambda *args: engine)
+    for i, window in enumerate(['b','a','a','a']):
+        for role in ('user','assistant'):
+            text=f'{role} {i}'
+            body={'source':'orangechat','session_id':'orangechat:'+window,'conversation_id':window,
+                  'events':[{'role':role,'text':text,'source_event_id':f'{window}:{text}'}]}
+            assert client.post('/api/ingest-raw',json=body).json()['inserted']==1
+            assert client.post('/api/ingest-raw',json=body).json()['duplicate']==1
+    engine.update_from_exchange.assert_awaited_once()
+    assert engine.update_from_exchange.await_args.args==('orangechat:a','user 3','assistant 3')
